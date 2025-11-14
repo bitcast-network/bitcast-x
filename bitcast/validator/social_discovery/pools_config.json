@@ -1,0 +1,13 @@
+{
+  "pools": [
+    {
+      "name": "tao",
+      "keywords": ["bittensor", "$tao", "#bittensor"],
+      "initial_accounts": ["opentensor"],
+      "max_members": 150,
+      "considered_accounts": 300,
+      "min_interaction_weight": 2,
+      "active": true
+    }
+  ]
+}

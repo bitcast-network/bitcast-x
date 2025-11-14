@@ -1,0 +1,150 @@
+
+Querying cache for user: @YVR_Trader...
+
+================================================================================
+Cached Tweets for @YVR_Trader
+================================================================================
+
+User Information:
+  Username: yvr_trader
+  Followers: 11068
+
+Cache Information:
+  Last Updated: 2025-11-13 04:03:16
+  Cache Timestamp: 2025-11-13T04:03:16.228422
+
+Total Tweets: 42
+================================================================================
+
+Tweets:
+  [1] ID: 1988522938325143922 | Date: Wed Nov 12 08:23:08 +0000 2025
+      Text: The $TAO family has Uncle Barry surrounded https://t.co/Zhzbw7U5ZW
+
+  [2] ID: 1988520884475216223 | Date: Wed Nov 12 08:14:58 +0000 2025
+      Text: Wynne coming in with the 🔥🔥🔥 from the PNW
+
+  [3] ID: 1988511268190224605 | Date: Wed Nov 12 07:36:45 +0000 2025
+      Text: AI × Football: why @ReadingFC  move signals a new playbook for sporting organ...
+
+  [4] ID: 1988413726547210566 | Date: Wed Nov 12 01:09:10 +0000 2025
+      Text: Great news that I made the top 150 accounts and will be able to mine on @Bitc...
+
+  [5] ID: 1988405946620805164 | Date: Wed Nov 12 00:38:15 +0000 2025
+      Text: bitcast-x65c1d1a5
+
+  [6] ID: 1987839017380200575 | Date: Mon Nov 10 11:05:28 +0000 2025
+      Text: Gotta love Canadian soccer and a bicycle kick in a blizzard ….absolutely epic...
+
+  [7] ID: 1987389770897473999 | Date: Sun Nov 09 05:20:19 +0000 2025
+      Text: For Quantum Innovate #SN63 on $TAO, the rising value of Quantum Computing  IP...
+
+  [8] ID: 1987176643488850289 | Date: Sat Nov 08 15:13:26 +0000 2025
+      Text: Extremely bullish updates for Quantum Computing subnets 48 &amp; 63 on $TAO. ...
+
+  [9] ID: 1986814835020214626 | Date: Fri Nov 07 15:15:44 +0000 2025
+      Text: Be $TAO greedy when others are fearful
+
+  [10] ID: 1985529636122739172 | Date: Tue Nov 04 02:08:49 +0000 2025
+      Text: The who’s who in Quantum Computing getting $TAO pilled in the windy city.
+
+  [11] ID: 1985518650158350593 | Date: Tue Nov 04 01:25:10 +0000 2025
+      Text: Forecasting sunny days ahead for @zeussubnet #SN18
+
+  [12] ID: 1985312902971269591 | Date: Mon Nov 03 11:47:36 +0000 2025
+      Text: Great interview Mark with @bitstarterAI …..love the analogy of becoming the w...
+
+  [13] ID: 1984855280786817184 | Date: Sun Nov 02 05:29:10 +0000 2025
+      Text: Very intriguing new $TAO subnet is @LeadpoetAI 
+#SN71 uses autonomous AI sale...
+
+  [14] ID: 1984455639519945204 | Date: Sat Nov 01 03:01:08 +0000 2025
+      Text: $500 $TAO is now in play….Send it 🚀 https://t.co/30btQB0h7e
+
+  [15] ID: 1984295335024329181 | Date: Fri Oct 31 16:24:08 +0000 2025
+      Text: If you paid attention to the below tweet you are being rewarded handsomely in...
+
+  [16] ID: 1984289337270505838 | Date: Fri Oct 31 16:00:18 +0000 2025
+      Text: Something big is being built on $TAO and goes by the name of CARTHA #SN35 aka...
+
+  [17] ID: 1984287376555102411 | Date: Fri Oct 31 15:52:31 +0000 2025
+      Text: One if the most no brainer subnets to hold is #SN48 @qBitTensorLabs.  This wi...
+
+  [18] ID: 1984271586246173158 | Date: Fri Oct 31 14:49:46 +0000 2025
+      Text: Up next is a $500 target for $TAO …..perfect breakout over $460 level https:/...
+
+  [19] ID: 1983715331366646200 | Date: Thu Oct 30 01:59:25 +0000 2025
+      Text: $TAO really heating up here.  If we break $460 it’s game on to $500+ https://...
+
+  [20] ID: 1983162318344315304 | Date: Tue Oct 28 13:21:56 +0000 2025
+      Text: If you are looking for an arbitrage play for $TAO look no further than Bitten...
+
+  [21] ID: 1983089590497096110 | Date: Tue Oct 28 08:32:57 +0000 2025
+      Text: And we have liftoff …. $TAO https://t.co/saVX0wAUVZ
+
+  [22] ID: 1982970344303669334 | Date: Tue Oct 28 00:39:06 +0000 2025
+      Text: $TAO looks ready here 🚀 https://t.co/5ZmzPr6x0F
+
+  [23] ID: 1982246502635585573 | Date: Sun Oct 26 00:42:49 +0000 2025
+      Text: Beautiful breakout above 200 MA for $TAO https://t.co/BbSmwprZiX
+
+  [24] ID: 1982030380938223722 | Date: Sat Oct 25 10:24:01 +0000 2025
+      Text: Had a dive into the @0x_Markets  CARTHA Litepaper.  
+
+#SN35 powers decentrali...
+
+  [25] ID: 1981949042872705121 | Date: Sat Oct 25 05:00:49 +0000 2025
+      Text: The alphanomics of @0x_Markets #SN35 on $TAO are being well received as alpha...
+
+  [26] ID: 1981928254429909420 | Date: Sat Oct 25 03:38:12 +0000 2025
+      Text: On $TAO @0x_Markets AKA Cartha #SN35 is tackling the Trillion dollar FX marke...
+
+  [27] ID: 1981381022853062772 | Date: Thu Oct 23 15:23:42 +0000 2025
+      Text: $TAO subnets will get a nice infusion of much needed liquidity from @hippius_...
+
+  [28] ID: 1981369294882767119 | Date: Thu Oct 23 14:37:06 +0000 2025
+      Text: So @hippius_subnet SN75 getting listed on MEXC is a really big deal for $TAO....
+
+  [29] ID: 1979364887076966478 | Date: Sat Oct 18 01:52:18 +0000 2025
+      Text: These are the emails I don’t mind having in my inbox $TAO https://t.co/uLJLh6...
+
+  [30] ID: 1978785927188140350 | Date: Thu Oct 16 11:31:43 +0000 2025
+      Text: Hanging amongst $TAO royalty…..feel blessed. https://t.co/wkaQGfX6Tq
+
+  [31] ID: 1978639499740815594 | Date: Thu Oct 16 01:49:52 +0000 2025
+      Text: If you are in the  $TAO ecosystem and don’t have  @ridges_ai  #SN62 on your r...
+
+  [32] ID: 1978322454608273854 | Date: Wed Oct 15 04:50:03 +0000 2025
+      Text: The powers that be are telling me to buy more $TAO.  Was at Bang Tao beach ye...
+
+  [33] ID: 1977857670096023901 | Date: Mon Oct 13 22:03:10 +0000 2025
+      Text: $TAO is the future of Capitalism.  The boys on wall street are in for a rude ...
+
+  [34] ID: 1977779778553008266 | Date: Mon Oct 13 16:53:39 +0000 2025
+      Text: Big move for @xtaohq $XTAIF up 87% today.  The tutes are coming for your $TAO...
+
+  [35] ID: 1977719295854489802 | Date: Mon Oct 13 12:53:19 +0000 2025
+      Text: 🤫🤫🤫🤫 $TAO
+
+  [36] ID: 1977601343008522604 | Date: Mon Oct 13 05:04:36 +0000 2025
+      Text: As many know I'm very deep in the $TAO ecosystem.   The most undervalued unde...
+
+  [37] ID: 1977393612846756237 | Date: Sun Oct 12 15:19:10 +0000 2025
+      Text: $TAO looking uber bullish back over $350…..send it 🚀 https://t.co/uintWRDorq
+
+  [38] ID: 1976847795777913332 | Date: Sat Oct 11 03:10:17 +0000 2025
+      Text: Hot take….if you fvck with China you damage crypto.  Can’t we all just get al...
+
+  [39] ID: 1976147351128637736 | Date: Thu Oct 09 04:46:58 +0000 2025
+      Text: "Start spreading the news, bitches, we're going!" https://t.co/n0l1kZ600p
+
+  [40] ID: 1976094185078874174 | Date: Thu Oct 09 01:15:42 +0000 2025
+      Text: $TAO vs centralized AI https://t.co/dw0CDLTLqe
+
+  [41] ID: 1976093603962519639 | Date: Thu Oct 09 01:13:23 +0000 2025
+      Text: Keep your eyes on $QUAI …..back over 5 cents. Quality project that is very un...
+
+  [42] ID: 1976086303260410004 | Date: Thu Oct 09 00:44:23 +0000 2025
+      Text: Here’s @Barbarian7676 of @MANTISBittensor SN123 presenting to @NumeraiCoE at ...
+
+
+✅ Query complete

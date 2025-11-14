@@ -1,0 +1,19 @@
+# Bittensor core dependencies
+bittensor==9.12.2
+bittensor-cli==9.15.2
+bittensor-commit-reveal==0.4.0
+bittensor-wallet==4.0.0
+requests==2.32.3
+diskcache==5.6.3
+networkx==3.5
+python-dotenv==1.1.0
+numpy==2.0.2
+wandb==0.19.10
+pytest==8.4.2
+pytest-asyncio==1.2.0
+fastapi==0.110.3
+uvicorn==0.32.1
+slowapi==0.1.9
+httpx>=0.24.0
+tenacity==8.2.3
+scipy>=1.11.0

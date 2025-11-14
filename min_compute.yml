@@ -1,0 +1,14 @@
+# Use this document to specify the minimum compute requirements.
+# This document will be used to generate a list of recommended hardware for your subnet.
+
+# This is intended to give a rough estimate of the minimum requirements
+# so that the user can make an informed decision about whether or not
+# they want to run a miner or validator on their machine.
+
+version: '1.0'
+
+compute_spec:
+
+  validator:
+    cpu: 1  # Minimum number of CPU cores
+    ram: 2  # Minimum RAM (GB)
