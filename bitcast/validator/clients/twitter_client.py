@@ -17,6 +17,7 @@ import bittensor as bt
 from bitcast.validator.utils.config import (
     RAPID_API_KEY,
     TWITTER_DEFAULT_LOOKBACK_DAYS,
+    TWITTER_CACHE_FRESHNESS,
     FORCE_CACHE_REFRESH
 )
 from bitcast.validator.utils.twitter_cache import (
@@ -46,7 +47,7 @@ class TwitterClient:
             retry_delay: Delay in seconds between retries (default: 2.0)
             rate_limit_delay: Delay in seconds between API calls (default: 1.0)
             lookback_hours: Hours to look back when updating stale cache (default: 96)
-            force_cache_refresh: If True, always refresh cache (ignores 1-hour freshness check)
+            force_cache_refresh: If True, always refresh cache (ignores freshness check)
         """
         self.api_key = api_key or RAPID_API_KEY
         if not self.api_key:
@@ -64,7 +65,7 @@ class TwitterClient:
             "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
         }
         
-        cache_mode = "forced refresh mode" if self.force_cache_refresh else "with 1-hour freshness check"
+        cache_mode = "forced refresh mode" if self.force_cache_refresh else f"with {TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness check"
         bt.logging.info(f"TwitterClient initialized with centralized cache ({cache_mode})")
     
     def _make_api_request(self, url: str, params: Dict) -> Tuple[Optional[Dict], Optional[str]]:
@@ -133,8 +134,8 @@ class TwitterClient:
         if cached_data and not force_refresh:
             last_updated = cached_data.get('last_updated')
             
-            # If updated within past 1 hour, use cache completely (unless force refresh enabled)
-            if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < 3600:  # 3600 seconds = 1 hour
+            # If updated within past freshness period, use cache completely (unless force refresh enabled)
+            if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
                 bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
                 return {
                     'user_info': cached_data['user_info'],

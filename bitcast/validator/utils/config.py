@@ -48,6 +48,7 @@ BASELINE_TWEET_SCORE_FACTOR = 2
 PAGERANK_ALPHA = 0.85
 CACHE_EXPIRY_DAYS = 30
 TWITTER_CACHE_EXPIRY = CACHE_EXPIRY_DAYS * 24 * 60 * 60  # Convert days to seconds
+TWITTER_CACHE_FRESHNESS = int(os.getenv('TWITTER_CACHE_FRESHNESS', str(6 * 60 * 60)))  # Default 6 hours in seconds
 FORCE_CACHE_REFRESH = os.getenv('FORCE_CACHE_REFRESH', 'False').lower() == 'true'
 
 # Social Discovery Concurrency (1 = sequential, 2+ = concurrent)
@@ -89,6 +90,7 @@ bt.logging.info(f"ENABLE_DATA_PUBLISH: {ENABLE_DATA_PUBLISH}")
 bt.logging.info(f"X_SOCIAL_MAP_ENDPOINT: {X_SOCIAL_MAP_ENDPOINT}")
 bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOINT}")
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
+bt.logging.info(f"TWITTER_CACHE_FRESHNESS: {TWITTER_CACHE_FRESHNESS}s ({TWITTER_CACHE_FRESHNESS/3600:.1f} hours)")
 bt.logging.info(f"FORCE_CACHE_REFRESH: {FORCE_CACHE_REFRESH}")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")
 bt.logging.info(f"REWARDS_DELAY_DAYS: {REWARDS_DELAY_DAYS}")
