@@ -14,7 +14,7 @@ async def forward_weight_copy(self):
     Weight copy mode forward function.
     
     Instead of running complex validation logic, fetches weights from 
-    the primary validator and updates local scores.
+    the reference validator and updates local scores.
     
     Behavior on API failure: Continues with existing scores (no update).
     """
@@ -23,7 +23,7 @@ async def forward_weight_copy(self):
         time.sleep(VALIDATOR_WAIT)
         return
     
-    bt.logging.info(f"🔄 WC Mode: Fetching weights from primary validator (step {self.step})")
+    bt.logging.info(f"🔄 WC Mode: Fetching weights from reference validator (step {self.step})")
     
     try:
         # Initialize client if not already done
@@ -60,8 +60,8 @@ async def forward_weight_copy(self):
         # Update our scores with fetched weights
         self.scores = scores.copy()
         bt.logging.info(
-            f"✅ Updated scores from primary validator "
-            f"(primary_step={primary_step}, our_step={self.step})"
+            f"✅ Updated scores from reference validator "
+            f"(ref_step={primary_step}, our_step={self.step})"
         )
         
     except Exception as e:

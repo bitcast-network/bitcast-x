@@ -2,11 +2,13 @@ import time
 import os
 import wandb
 import threading
+import asyncio
 import bittensor as bt
 import random
 
 from bitcast.base.validator import BaseValidatorNeuron
 from bitcast.validator.utils.config import __version__, WANDB_PROJECT, WC_MODE
+from bitcast.validator.utils.startup_checks import check_and_download_social_maps
 from core.auto_update import run_auto_update
 
 # Conditionally import forward implementation based on mode
@@ -27,6 +29,17 @@ class Validator(BaseValidatorNeuron):
     def __init__(self, config=None):
         super(Validator, self).__init__(config=config)
 
+        # Run startup checks (social map download if needed)
+        bt.logging.info("🚀 Running validator startup checks...")
+        try:
+            asyncio.run(check_and_download_social_maps())
+        except RuntimeError as e:
+            bt.logging.error(f"❌ Startup checks failed: {e}")
+            raise
+        except Exception as e:
+            bt.logging.error(f"❌ Unexpected error in startup checks: {e}")
+            raise
+
         # Initialize wandb only if disable_set_weights is False AND not in WC mode
         if not self.config.neuron.disable_set_weights and not WC_MODE:
             try:
@@ -42,7 +55,7 @@ class Validator(BaseValidatorNeuron):
 
         # Log which mode we're running in
         if WC_MODE:
-            bt.logging.info("🔄 Running in WEIGHT COPY MODE - fetching weights from primary validator")
+            bt.logging.info("🔄 Running in WEIGHT COPY MODE - fetching weights from reference validator")
         else:
             bt.logging.info("✅ Running in FULL VALIDATION MODE - performing complete validation")
 

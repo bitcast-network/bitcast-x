@@ -1,6 +1,6 @@
-# Validator Weights API
+# Reference Validator API
 
-Simple read-only API for exposing validator weights with rate limiting.
+Simple read-only API for exposing validator weights and social maps with rate limiting.
 
 ## Features
 
@@ -48,6 +48,42 @@ Get weight for a specific UID.
 }
 ```
 
+### `GET /social-map/{pool_name}`
+Get latest social map for a pool.
+- **Rate Limit**: 5 requests/minute per IP
+- **Parameters**:
+  - `pool_name` (path): Pool name (e.g., "tao")
+- **Response**:
+```json
+{
+  "pool_name": "tao",
+  "created_at": "2025-11-15T10:30:00",
+  "total_accounts": 150,
+  "social_map": {
+    "metadata": {
+      "created_at": "2025-11-15T10:30:00",
+      "pool_name": "tao",
+      "total_accounts": 150,
+      "active_members": 64
+    },
+    "accounts": {
+      "username1": {
+        "score": 0.045678,
+        "status": "in"
+      },
+      "username2": {
+        "score": 0.034521,
+        "status": "promoted"
+      }
+    }
+  }
+}
+```
+- **Errors**:
+  - 404: Pool not found or no social maps available
+  - 429: Rate limit exceeded
+  - 500: Server error
+
 ## Running the API
 
 ### Option 1: With Validator (Recommended)
@@ -61,12 +97,12 @@ The API will run on port 8094 by default (configurable via `API_PORT` env var).
 ### Option 2: Standalone
 For testing or development:
 ```bash
-python -m bitcast.validator.api.weights_api
+python -m bitcast.validator.api.reference_validator_api
 ```
 
 ### Option 3: Custom Port
 ```python
-from bitcast.validator.api.weights_api import run_api
+from bitcast.validator.api.reference_validator_api import run_api
 run_api(host="0.0.0.0", port=8888)
 ```
 
@@ -76,6 +112,7 @@ Rate limits are enforced per IP address:
 - `/health`: 60 requests/minute
 - `/weights`: 10 requests/minute
 - `/weights/{uid}`: 20 requests/minute
+- `/social-map/{pool_name}`: 5 requests/minute
 
 Exceeding limits returns HTTP 429 (Too Many Requests).
 
@@ -107,6 +144,12 @@ curl http://localhost:8094/weights
 
 # Get specific miner
 curl http://localhost:8094/weights/42
+
+# Get social map for a pool
+curl http://localhost:8094/social-map/tao
+
+# Get social map with formatted output
+curl http://localhost:8094/social-map/tao | jq '.social_map.metadata'
 ```
 
 ## Development
@@ -114,6 +157,6 @@ curl http://localhost:8094/weights/42
 Run tests:
 ```bash
 source ~/venv_bitcast_x/bin/activate
-pytest tests/validator/api/test_weights_api.py -v
+pytest tests/validator/api/test_reference_validator_api.py -v
 ```
 

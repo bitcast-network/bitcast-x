@@ -53,7 +53,7 @@ NETUID=${NETUID:-93}
 MECHID=${MECHID:-1}
 SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-"finney"}
 SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-"wss://entrypoint-finney.opentensor.ai:443"}
-PORT=${PORT:-8092}
+PORT=${PORT:-8093}
 LOGGING=${LOGGING:-"--logging.debug"}
 
 # Handle boolean flags
