@@ -15,7 +15,7 @@ fi
 # Set default values if variables are not set
 VENV_PATH=${VENV_PATH:-"$PROJECT_PARENT/venv_bitcast_x"}
 PM2_VALIDATOR_NAME=${PM2_VALIDATOR_NAME:-"bitcast_x_validator"}
-PM2_API_NAME=${PM2_API_NAME:-"bitcast_x_weights_api"}
+PM2_API_NAME=${PM2_API_NAME:-"bitcast_x_validator_api"}
 
 # Activate virtual environment
 if [ ! -d "$VENV_PATH" ]; then
@@ -54,7 +54,7 @@ NETUID=${NETUID:-93}
 MECHID=${MECHID:-1}
 SUBTENSOR_NETWORK=${SUBTENSOR_NETWORK:-"finney"}
 SUBTENSOR_CHAIN_ENDPOINT=${SUBTENSOR_CHAIN_ENDPOINT:-"wss://entrypoint-finney.opentensor.ai:443"}
-PORT=${PORT:-8092}
+PORT=${PORT:-8093}
 API_PORT=${API_PORT:-8094}
 LOGGING=${LOGGING:-"--logging.info"}
 
@@ -92,19 +92,19 @@ else
   pm2 start python --name "$PM2_VALIDATOR_NAME" -- neurons/validator.py --netuid $NETUID --subtensor.chain_endpoint $SUBTENSOR_CHAIN_ENDPOINT --subtensor.network $SUBTENSOR_NETWORK --wallet.name $WALLET_NAME --wallet.hotkey $HOTKEY_NAME --axon.port $PORT $LOGGING $DISABLE_AUTO_UPDATE_FLAG
 fi
 
-# START/RESTART WEIGHTS API PROCESS
+# START/RESTART VALIDATOR API PROCESS
 if pm2 list | grep -q "$PM2_API_NAME"; then
   echo "Process '$PM2_API_NAME' is already running. Restarting it..."
   pm2 restart "$PM2_API_NAME"
 else
   echo "Process '$PM2_API_NAME' is not running. Starting it for the first time..."
-  pm2 start "$VENV_PATH/bin/python" --name "$PM2_API_NAME" -- -m bitcast.validator.api.weights_api
+  pm2 start "$VENV_PATH/bin/python" --name "$PM2_API_NAME" -- -m bitcast.validator.api.reference_validator_api
 fi
 
 echo ""
-echo "✅ Validator and Weights API started successfully!"
+echo "✅ Validator and API started successfully!"
 echo "   Validator: $PM2_VALIDATOR_NAME (port $PORT)"
-echo "   Weights API: $PM2_API_NAME (port $API_PORT)"
+echo "   API: $PM2_API_NAME (port $API_PORT)"
 echo ""
 echo "View logs:"
 echo "   pm2 logs $PM2_VALIDATOR_NAME"

@@ -463,7 +463,7 @@ if __name__ == "__main__":
         parser.add_argument(
             "--force-cache-refresh",
             action="store_true",
-            help="Force cache refresh - ignores 1-hour freshness check (overrides config)"
+            help="Force cache refresh - ignores freshness check (overrides config)"
         )
         
         # Build args list from command line
@@ -530,7 +530,7 @@ if __name__ == "__main__":
         force_cache_refresh = config.force_cache_refresh if hasattr(config, 'force_cache_refresh') and config.force_cache_refresh else None
         
         if force_cache_refresh:
-            bt.logging.info("Force cache refresh enabled - ignoring 1-hour cache freshness check")
+            bt.logging.info("Force cache refresh enabled - ignoring cache freshness check")
         
         # Run tweet scoring (without connected accounts filter)
         results = score_tweets_for_pool(

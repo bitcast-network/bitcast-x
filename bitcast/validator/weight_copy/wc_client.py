@@ -1,25 +1,25 @@
 """
-Client for fetching weights from the primary validator's weights API.
+Client for fetching weights from the reference validator's API.
 Handles API communication, error handling, and weight format conversion.
 """
 import httpx
 import bittensor as bt
 import numpy as np
 from typing import Optional, Tuple
-from bitcast.validator.utils.config import WC_ENDPOINT
+from bitcast.validator.utils.config import REFERENCE_VALIDATOR_ENDPOINT
 
 
 class WeightCopyClient:
-    """Client for fetching weights from primary validator."""
+    """Client for fetching weights from reference validator."""
     
     def __init__(self, timeout: float = 10.0):
-        self.base_url = WC_ENDPOINT
+        self.base_url = REFERENCE_VALIDATOR_ENDPOINT
         self.timeout = timeout
         bt.logging.info(f"WeightCopyClient initialized with endpoint: {self.base_url}")
         
     async def fetch_weights(self) -> Optional[Tuple[np.ndarray, np.ndarray, int]]:
         """
-        Fetch weights from primary validator API.
+        Fetch weights from reference validator API.
         
         Returns:
             Tuple of (scores, hotkeys, step) if successful, None if failed
@@ -37,7 +37,7 @@ class WeightCopyClient:
                 step = data.get("step", 0)
                 
                 if not weights_data:
-                    bt.logging.warning("No weights data received from primary validator")
+                    bt.logging.warning("No weights data received from reference validator")
                     return None
                 
                 # Convert to numpy arrays for validator use
@@ -50,7 +50,7 @@ class WeightCopyClient:
                     hotkeys[uid] = weight_info["hotkey"]
                 
                 bt.logging.info(
-                    f"✅ Successfully fetched weights from primary validator "
+                    f"✅ Successfully fetched weights from reference validator "
                     f"(step={step}, miners={total_miners})"
                 )
                 
@@ -58,19 +58,19 @@ class WeightCopyClient:
                 
         except httpx.TimeoutException:
             bt.logging.warning(
-                f"⚠️ Timeout connecting to primary validator at {self.base_url} "
+                f"⚠️ Timeout connecting to reference validator at {self.base_url} "
                 f"- continuing with existing weights"
             )
             return None
         except httpx.HTTPStatusError as e:
             bt.logging.warning(
-                f"⚠️ HTTP error fetching weights from primary validator: {e.response.status_code} "
+                f"⚠️ HTTP error fetching weights from reference validator: {e.response.status_code} "
                 f"- continuing with existing weights"
             )
             return None
         except Exception as e:
             bt.logging.warning(
-                f"⚠️ Error fetching weights from primary validator: {e} "
+                f"⚠️ Error fetching weights from reference validator: {e} "
                 f"- continuing with existing weights"
             )
             return None
