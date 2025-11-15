@@ -1,11 +1,11 @@
-"""Tests for the validator weights API."""
+"""Tests for the reference validator API."""
 import pytest
 import numpy as np
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
-from bitcast.validator.api.weights_api import app, load_state, normalize_weights, get_state_path
+from bitcast.validator.api.reference_validator_api import app, load_state, normalize_weights, get_state_path
 
 
 @pytest.fixture
@@ -46,7 +46,7 @@ def test_health_endpoint(client):
     assert response.json() == {"status": "healthy"}
 
 
-@patch('bitcast.validator.api.weights_api.load_state')
+@patch('bitcast.validator.api.reference_validator_api.load_state')
 def test_get_all_weights(mock_load, client, mock_state_data):
     """Test getting all weights."""
     mock_load.return_value = mock_state_data
@@ -62,7 +62,7 @@ def test_get_all_weights(mock_load, client, mock_state_data):
     assert data["weights"][0]["hotkey"] == "hotkey1"
 
 
-@patch('bitcast.validator.api.weights_api.load_state')
+@patch('bitcast.validator.api.reference_validator_api.load_state')
 def test_get_weight_by_uid(mock_load, client, mock_state_data):
     """Test getting weight for specific UID."""
     mock_load.return_value = mock_state_data
@@ -76,7 +76,7 @@ def test_get_weight_by_uid(mock_load, client, mock_state_data):
     assert abs(data["raw_weight"] - 0.3) < 1e-6  # Float precision tolerance
 
 
-@patch('bitcast.validator.api.weights_api.load_state')
+@patch('bitcast.validator.api.reference_validator_api.load_state')
 def test_get_weight_invalid_uid(mock_load, client, mock_state_data):
     """Test getting weight for invalid UID."""
     mock_load.return_value = mock_state_data
@@ -85,7 +85,7 @@ def test_get_weight_invalid_uid(mock_load, client, mock_state_data):
     assert response.status_code == 404
 
 
-@patch('bitcast.validator.api.weights_api.load_state')
+@patch('bitcast.validator.api.reference_validator_api.load_state')
 def test_state_not_found(mock_load, client):
     """Test when state file doesn't exist."""
     mock_load.side_effect = FileNotFoundError("State file not found")
@@ -103,7 +103,7 @@ def test_rate_limiting(client):
     
     # Weights endpoint is 10/min - this is hard to test without mocking time
     # Just verify it works normally
-    with patch('bitcast.validator.api.weights_api.load_state') as mock_load:
+    with patch('bitcast.validator.api.reference_validator_api.load_state') as mock_load:
         mock_load.return_value = {
             "scores": np.array([0.5]),
             "hotkeys": np.array(["test"]),
