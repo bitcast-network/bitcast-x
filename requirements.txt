@@ -17,4 +17,4 @@ slowapi==0.1.9
 httpx>=0.24.0
 tenacity==8.2.3
 scipy>=1.11.0
-networkx-3.5
+networkx==3.5
