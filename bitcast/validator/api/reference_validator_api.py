@@ -9,7 +9,8 @@ from slowapi.errors import RateLimitExceeded
 from pathlib import Path
 import numpy as np
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
+from datetime import datetime, timezone
 import uvicorn
 
 from bitcast.validator.utils.config import WALLET_NAME, HOTKEY_NAME, MECHID
@@ -227,6 +228,61 @@ async def get_social_map(pool_name: str, request: Request) -> Dict:
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error loading social map: {str(e)}")
+
+
+@app.get("/account-connections")
+@limiter.limit("5/minute")
+async def get_account_connections(
+    request: Request,
+    pool_name: Optional[str] = None
+) -> Dict:
+    """
+    Get all account connections from the database.
+    Rate limit: 5 requests per minute per IP.
+    
+    Args:
+        pool_name: Optional pool name to filter connections
+        
+    Returns:
+        {
+            "timestamp": "2025-11-17T10:30:00Z",
+            "total_connections": 150,
+            "connections": [
+                {
+                    "pool_name": "tao",
+                    "tweet_id": 1234567890,
+                    "tag": "bitcast-hk:5DNm...",
+                    "account_username": "user1",
+                    "added": "2025-11-15T10:00:00",
+                    "updated": "2025-11-17T08:00:00"
+                },
+                ...
+            ]
+        }
+    """
+    try:
+        # Import here to avoid circular dependencies
+        from bitcast.validator.account_connection import ConnectionDatabase
+        
+        # Load connections from database
+        db = ConnectionDatabase()
+        connections = db.get_all_connections(pool_name=pool_name)
+        
+        # Remove connection_id from each connection (internal DB field)
+        for conn in connections:
+            conn.pop('connection_id', None)
+        
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "total_connections": len(connections),
+            "connections": connections
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error loading account connections: {str(e)}"
+        )
 
 
 def run_api(host: str = "0.0.0.0", port: int = 8094):

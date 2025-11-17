@@ -84,6 +84,40 @@ Get latest social map for a pool.
   - 429: Rate limit exceeded
   - 500: Server error
 
+### `GET /account-connections`
+Get all account connection data from the database.
+- **Rate Limit**: 5 requests/minute per IP
+- **Query Parameters**:
+  - `pool_name` (optional): Filter connections by pool name (e.g., "tao")
+- **Response**:
+```json
+{
+  "timestamp": "2025-11-17T10:30:00Z",
+  "total_connections": 150,
+  "connections": [
+    {
+      "pool_name": "tao",
+      "tweet_id": 1234567890,
+      "tag": "bitcast-hk:5DNm...",
+      "account_username": "user1",
+      "added": "2025-11-15T10:00:00",
+      "updated": "2025-11-17T08:00:00"
+    },
+    {
+      "pool_name": "tao",
+      "tweet_id": 9876543210,
+      "tag": "bitcast-xabc123",
+      "account_username": "user2",
+      "added": "2025-11-16T14:30:00",
+      "updated": "2025-11-16T14:30:00"
+    }
+  ]
+}
+```
+- **Errors**:
+  - 429: Rate limit exceeded
+  - 500: Database error
+
 ## Running the API
 
 ### Option 1: With Validator (Recommended)
@@ -113,6 +147,7 @@ Rate limits are enforced per IP address:
 - `/weights`: 10 requests/minute
 - `/weights/{uid}`: 20 requests/minute
 - `/social-map/{pool_name}`: 5 requests/minute
+- `/account-connections`: 5 requests/minute
 
 Exceeding limits returns HTTP 429 (Too Many Requests).
 
@@ -150,6 +185,15 @@ curl http://localhost:8094/social-map/tao
 
 # Get social map with formatted output
 curl http://localhost:8094/social-map/tao | jq '.social_map.metadata'
+
+# Get all account connections
+curl http://localhost:8094/account-connections
+
+# Get connections for specific pool
+curl http://localhost:8094/account-connections?pool_name=tao
+
+# Get connection count
+curl http://localhost:8094/account-connections | jq '.total_connections'
 ```
 
 ## Development
