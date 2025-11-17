@@ -17,6 +17,7 @@ import bittensor as bt
 from bitcast.validator.utils.config import (
     RAPID_API_KEY,
     TWITTER_DEFAULT_LOOKBACK_DAYS,
+    TWEET_FETCH_LIMIT,
     TWITTER_CACHE_FRESHNESS,
     FORCE_CACHE_REFRESH
 )
@@ -137,23 +138,23 @@ class TwitterClient:
         
         return validated_tweets
     
-    def fetch_user_tweets(self, username: str, tweet_limit: int = 100, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
+    def fetch_user_tweets(self, username: str, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
         
         Args:
             username: Twitter username to fetch tweets for
-            tweet_limit: Maximum number of tweets to fetch (default: 100)
             force_refresh: If True, bypass cache and always fetch fresh data (default: False)
             validate_author: If True, filter tweets to only those authored by username (default: True)
                            The tweetsandreplies API returns both user's tweets AND replies from others,
                            so validation ensures only the timeline owner's tweets are included.
         
-        Stops when either tweet_limit is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
+        Stops when either TWEET_FETCH_LIMIT is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
         Uses smart cache merging to preserve historical tweets while fetching recent updates.
         
         Returns dict with 'user_info', 'tweets', and 'cache_info'
         """
+        tweet_limit = TWEET_FETCH_LIMIT
         username = username.lower()
         
         # Calculate cutoff date for lookback period

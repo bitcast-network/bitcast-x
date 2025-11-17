@@ -51,7 +51,8 @@ def fetch_user_tweets_safe(
     try:
         # TwitterClient.fetch_user_tweets() now validates author by default (validate_author=True)
         # and ensures all tweets have the author field set
-        result = client.fetch_user_tweets(username, tweet_limit=100)
+        # Uses TWEET_FETCH_LIMIT from config (default: 200)
+        result = client.fetch_user_tweets(username)
         return result.get('tweets', []), None
     except Exception as e:
         bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
