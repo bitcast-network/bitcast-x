@@ -75,7 +75,7 @@ SUBNET_TREASURY_PERCENTAGE = 1.0
 SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 
 # No-code mining
-NOCODE_UID = int(os.getenv('NOCODE_UID', '68'))
+NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
 # Reference Validator API Configuration
