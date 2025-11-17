@@ -24,8 +24,9 @@ from bitcast.validator.tweet_scoring.tweet_scorer import score_tweets_for_pool
 from bitcast.validator.tweet_filtering.tweet_filter import filter_tweets_for_brief
 from bitcast.validator.utils.config import (
     EMISSIONS_PERIOD, TWEETS_SUBMIT_ENDPOINT, ENABLE_DATA_PUBLISH,
-    NOCODE_UID, SIMULATE_CONNECTIONS
+    NOCODE_UID, SIMULATE_CONNECTIONS, REWARD_SMOOTHING_EXPONENT
 )
+from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price
 from bitcast.validator.reward_engine.utils import (
     publish_brief_tweets,
     create_tweet_payload,
@@ -195,24 +196,39 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 tweet_rewards = snapshot_data['tweet_rewards']
                 bt.logging.info(f"📸 Using reward snapshot for brief {brief_id} ({len(tweet_rewards)} tweets)")
                 
-                # Aggregate tweet-level rewards to UID level
+                # Aggregate to UID level and convert to daily payouts
                 uid_total_targets = {}
+                uid_to_authors = {}
                 for tweet in tweet_rewards:
                     uid = tweet['uid']
-                    total_usd = tweet['total_usd']
-                    uid_total_targets[uid] = uid_total_targets.get(uid, 0.0) + total_usd
+                    uid_total_targets[uid] = uid_total_targets.get(uid, 0.0) + tweet['total_usd']
+                    uid_to_authors.setdefault(uid, set()).add(tweet['author'])
                 
-                # Convert to daily payouts
                 daily_budget = budget / EMISSIONS_PERIOD
-                usd_targets = {uid: total/EMISSIONS_PERIOD for uid, total in uid_total_targets.items()}
+                usd_targets = {uid: total / EMISSIONS_PERIOD for uid, total in uid_total_targets.items()}
                 
-                # Store results and skip to next brief
+                # Store results and track contributing accounts
                 for uid, usd_amount in usd_targets.items():
                     if uid not in brief_scores_by_uid:
                         brief_scores_by_uid[uid] = {}
                     brief_scores_by_uid[uid][brief_id] = usd_amount
+                    contributing_accounts[uid] = contributing_accounts.get(uid, set()) | uid_to_authors[uid]
                 
                 bt.logging.info(f"  → ${daily_budget:.2f}/day distributed to {len(usd_targets)} UIDs (from snapshot)")
+                
+                # Log USD rewards by account
+                self._log_usd_rewards_by_account(tweet_rewards, account_to_uid, brief_id)
+                
+                # Convert snapshot to publishing format and publish
+                tweets_with_targets = self._convert_snapshot_to_tweets_with_targets(tweet_rewards)
+                await self._publish_brief_tweets(
+                    brief_id=brief_id,
+                    brief=brief,
+                    tweets_with_targets=tweets_with_targets,
+                    usd_targets=usd_targets,
+                    run_id=run_id
+                )
+                
                 continue
                 
             except FileNotFoundError:
@@ -305,6 +321,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 try:
                     snapshot_file = save_reward_snapshot(brief_id, pool_name, snapshot_data)
                     bt.logging.info(f"💾 Saved reward snapshot: {len(tweet_rewards)} tweets → {snapshot_file}")
+                    self._log_usd_rewards_by_account(tweet_rewards, account_to_uid, brief_id)
                 except Exception as e:
                     bt.logging.error(f"Failed to save reward snapshot: {e}")
                 
@@ -490,6 +507,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
         """
         Calculate USD and alpha targets for each tweet based on engagement scores.
         
+        Applies power law smoothing to create more separation between high and 
+        low performers while maintaining budget constraints.
+        
         Args:
             filtered_tweets: Tweets that passed LLM filtering
             daily_budget: Brief budget / EMISSIONS_PERIOD
@@ -500,16 +520,20 @@ class TwitterEvaluator(ScanBasedEvaluator):
         """
         from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price
         
-        total_score = sum(t.get('score', 0.0) for t in filtered_tweets)
-        if total_score == 0:
-            bt.logging.warning(f"Total score is 0 for brief {brief_id}")
+        # Apply power law smoothing to scores before calculating proportions
+        smoothed_scores = [t.get('score', 0.0) ** REWARD_SMOOTHING_EXPONENT for t in filtered_tweets]
+        
+        total_smoothed = sum(smoothed_scores)
+        if total_smoothed == 0:
+            bt.logging.warning(f"Total smoothed score is 0 for brief {brief_id}")
             return filtered_tweets
         
         alpha_price = get_bitcast_alpha_price()
         
-        for tweet in filtered_tweets:
-            score = tweet.get('score', 0.0)
-            proportion = score / total_score
+        bt.logging.debug(f"Applied power law smoothing (exponent={REWARD_SMOOTHING_EXPONENT}) to {len(filtered_tweets)} tweets")
+        
+        for tweet, smoothed_score in zip(filtered_tweets, smoothed_scores):
+            proportion = smoothed_score / total_smoothed
             tweet['usd_target'] = daily_budget * proportion
             tweet['total_usd_target'] = tweet['usd_target'] * EMISSIONS_PERIOD
             tweet['alpha_target'] = tweet['usd_target'] / alpha_price
@@ -548,6 +572,62 @@ class TwitterEvaluator(ScanBasedEvaluator):
         
         bt.logging.debug(f"Aggregated to {len(uid_targets)} UIDs: {list(uid_targets.keys())}")
         return uid_targets
+    
+    def _convert_snapshot_to_tweets_with_targets(
+        self,
+        tweet_rewards: List[Dict]
+    ) -> List[Dict]:
+        """
+        Convert snapshot tweet_rewards to tweets_with_targets format for publishing.
+        
+        Args:
+            tweet_rewards: Snapshot data with tweet_id, author, uid, score, total_usd
+            
+        Returns:
+            List of tweets in tweets_with_targets format with daily USD/alpha targets
+        """
+        alpha_price = get_bitcast_alpha_price()
+        tweets_with_targets = []
+        
+        for tweet_reward in tweet_rewards:
+            daily_usd = tweet_reward.get('total_usd', 0.0) / EMISSIONS_PERIOD
+            tweets_with_targets.append({
+                'tweet_id': tweet_reward.get('tweet_id'),
+                'author': tweet_reward.get('author'),
+                'score': tweet_reward.get('score', 0.0),
+                'usd_target': daily_usd,
+                'total_usd_target': tweet_reward.get('total_usd', 0.0),
+                'alpha_target': daily_usd / alpha_price,
+            })
+        
+        return tweets_with_targets
+    
+    def _log_usd_rewards_by_account(
+        self,
+        tweet_rewards: List[Dict],
+        account_to_uid: Dict[str, int],
+        brief_id: str
+    ) -> None:
+        """
+        Log USD rewards by account in descending order.
+        
+        Args:
+            tweet_rewards: List of tweets with 'author' and 'total_usd' fields
+            account_to_uid: Mapping from account username to UID
+            brief_id: Brief identifier for logging
+        """
+        account_usd_totals = {}
+        for tweet in tweet_rewards:
+            author = tweet.get('author')
+            if author:
+                total_usd = tweet.get('total_usd', 0.0)
+                account_usd_totals[author] = account_usd_totals.get(author, 0.0) + total_usd
+        
+        sorted_accounts = sorted(account_usd_totals.items(), key=lambda x: x[1], reverse=True)
+        bt.logging.info(f"💰 USD rewards by account for brief {brief_id}:")
+        for author, total_usd in sorted_accounts:
+            uid = account_to_uid.get(author, 'unknown')
+            bt.logging.info(f"    @{author} (UID {uid}): ${total_usd:.2f}")
     
     def _log_top_tweets(
         self,
