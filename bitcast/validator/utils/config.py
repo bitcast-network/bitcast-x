@@ -15,7 +15,7 @@ CACHE_DIRS = {
     "llm": os.path.join(CACHE_ROOT, "llm")
 }
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 # Wallet Configuration
 WALLET_NAME = os.getenv('WALLET_NAME')
