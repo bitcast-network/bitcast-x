@@ -8,7 +8,10 @@ import random
 
 from bitcast.base.validator import BaseValidatorNeuron
 from bitcast.validator.utils.config import __version__, WANDB_PROJECT, WC_MODE
-from bitcast.validator.utils.startup_checks import check_and_download_social_maps
+from bitcast.validator.utils.startup_checks import (
+    check_and_download_social_maps,
+    check_and_download_account_connections
+)
 from core.auto_update import run_auto_update
 
 # Conditionally import forward implementation based on mode
@@ -33,6 +36,7 @@ class Validator(BaseValidatorNeuron):
         bt.logging.info("🚀 Running validator startup checks...")
         try:
             asyncio.run(check_and_download_social_maps())
+            asyncio.run(check_and_download_account_connections())
         except RuntimeError as e:
             bt.logging.error(f"❌ Startup checks failed: {e}")
             raise

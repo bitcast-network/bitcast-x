@@ -121,3 +121,72 @@ async def check_and_download_social_maps() -> None:
     else:
         bt.logging.info("✅ All required social maps downloaded successfully")
 
+
+async def check_and_download_account_connections() -> None:
+    """
+    Check if account connections database is empty and download if needed.
+    Runs for all validators on startup.
+    
+    Only downloads if database is completely empty (fresh deployment).
+    If database has any connections, assumes validator is operational.
+    
+    Does NOT raise exceptions - validator can function without connections.
+    Connection scanner will run periodically and populate database.
+    """
+    bt.logging.info("🔍 Checking account connections database...")
+    
+    try:
+        # Import here to avoid circular dependencies
+        from bitcast.validator.account_connection import ConnectionDatabase
+        from bitcast.validator.account_connection.connection_client import ConnectionClient
+        
+        # Check if database has any connections
+        db = ConnectionDatabase()
+        connection_count = db.get_connection_count()
+        
+        if connection_count > 0:
+            bt.logging.info(
+                f"✅ Found {connection_count} existing connections - "
+                f"no download needed"
+            )
+            return
+        
+        # Database is empty - try to download
+        bt.logging.info(
+            "📭 No connections found in database - downloading from reference validator"
+        )
+        
+        client = ConnectionClient()
+        success = await client.download_and_store_connections()
+        
+        if success:
+            final_count = db.get_connection_count()
+            bt.logging.info(
+                f"✅ Downloaded {final_count} account connections successfully"
+            )
+        else:
+            # Download failed - check if we can continue
+            final_count = db.get_connection_count()
+            if final_count == 0:
+                error_msg = (
+                    f"⚠️ Failed to download account connections and database is empty.\n"
+                    f"Validator will continue but will not be able to reward miners until "
+                    f"connection scanner runs.\n"
+                    f"Please check:\n"
+                    f"  1. Reference validator API is accessible at {REFERENCE_VALIDATOR_ENDPOINT}\n"
+                    f"  2. Network connectivity is working\n"
+                    f"  3. Reference validator has account connection data available"
+                )
+                bt.logging.warning(error_msg)
+                # Note: Do NOT raise exception - validator can function without connections
+                # Connection scanner will run periodically and populate database
+            else:
+                bt.logging.info(
+                    f"⚠️ Download failed but found {final_count} connections - continuing"
+                )
+    except Exception as e:
+        bt.logging.warning(
+            f"⚠️ Error checking/downloading account connections: {e}\n"
+            f"Validator will continue - connection scanner will populate database"
+        )
+

@@ -15,7 +15,7 @@ CACHE_DIRS = {
     "llm": os.path.join(CACHE_ROOT, "llm")
 }
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 # Wallet Configuration
 WALLET_NAME = os.getenv('WALLET_NAME')
@@ -57,6 +57,7 @@ SOCIAL_DISCOVERY_MAX_WORKERS = 10
 # Twitter emissions
 EMISSIONS_PERIOD = 7  # 7 days
 REWARDS_DELAY_DAYS = 2  # Wait period before rewards start after brief closes
+REWARD_SMOOTHING_EXPONENT = 0.65
 
 # LLM caching
 DISABLE_LLM_CACHING = os.getenv('DISABLE_LLM_CACHING', 'False').lower() == 'true'
@@ -75,7 +76,7 @@ SUBNET_TREASURY_PERCENTAGE = 1.0
 SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 
 # No-code mining
-NOCODE_UID = int(os.getenv('NOCODE_UID', '68'))
+NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
 # Reference Validator API Configuration
@@ -94,6 +95,7 @@ bt.logging.info(f"TWITTER_CACHE_FRESHNESS: {TWITTER_CACHE_FRESHNESS}s ({TWITTER_
 bt.logging.info(f"FORCE_CACHE_REFRESH: {FORCE_CACHE_REFRESH}")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")
 bt.logging.info(f"REWARDS_DELAY_DAYS: {REWARDS_DELAY_DAYS}")
+bt.logging.info(f"REWARD_SMOOTHING_EXPONENT: {REWARD_SMOOTHING_EXPONENT}")
 bt.logging.info(f"VALIDATOR_WAIT: {VALIDATOR_WAIT}")
 bt.logging.info(f"ACCOUNT_CONNECTION_INTERVAL_HOURS: {ACCOUNT_CONNECTION_INTERVAL_HOURS}")
 bt.logging.info(f"REWARDS_INTERVAL_HOURS: {REWARDS_INTERVAL_HOURS}")

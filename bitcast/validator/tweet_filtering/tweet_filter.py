@@ -434,16 +434,16 @@ if __name__ == "__main__":
             
             if show_budget:
                 print(f"\n✅ Passed Tweets (sorted by score, ${budget:,.2f} budget):")
-                print(f"{'Rank':<6} {'Score':<12} {'Budget $':<12} {'Author':<20} {'Tweet ID'}")
+                print(f"{'Rank':<6} {'Score':<12} {'Budget $':<12} {'Author':<40} {'Tweet ID'}")
                 print("-" * 100)
             else:
                 print(f"\n✅ Passed Tweets (sorted by score):")
-                print(f"{'Rank':<6} {'Score':<12} {'Author':<20} {'Tweet ID'}")
+                print(f"{'Rank':<6} {'Score':<12} {'Author':<40} {'Tweet ID'}")
                 print("-" * 80)
             
             sorted_tweets = sorted(passed_tweets, key=lambda t: t['score'], reverse=True)
             
-            for idx, tweet in enumerate(sorted_tweets[:20], 1):
+            for idx, tweet in enumerate(sorted_tweets[:40], 1):
                 author = tweet['author']
                 tweet_id = tweet['tweet_id']
                 score = tweet['score']
@@ -454,12 +454,12 @@ if __name__ == "__main__":
                 else:
                     print(f"{idx:<6} {score:<12.6f} @{author:<19} {tweet_id}")
             
-            if len(passed_tweets) > 20:
-                print(f"\n... and {len(passed_tweets) - 20} more passed tweets")
+            if len(passed_tweets) > 40:
+                print(f"\n... and {len(passed_tweets) - 40} more passed tweets")
         
         if failed_tweets and len(failed_tweets) <= 10:
             print(f"\n❌ Failed Tweets:")
-            print(f"{'Author':<20} {'Tweet ID'}")
+            print(f"{'Author':<40} {'Tweet ID'}")
             print("-" * 60)
             
             for tweet in failed_tweets:

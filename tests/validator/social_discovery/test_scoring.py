@@ -65,14 +65,14 @@ class TestTwitterNetworkAnalyzer:
         # Mock tweet data with interactions
         mock_tweets = {
             'user1': [
-                {'text': 'Hello @user2', 'tagged_accounts': ['user2'], 'retweeted_user': None, 'quoted_user': None},
-                {'text': 'RT @user3: Great', 'tagged_accounts': [], 'retweeted_user': 'user3', 'quoted_user': None}
+                {'text': 'Hello @user2', 'tagged_accounts': ['user2'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user1'},
+                {'text': 'RT @user3: Great', 'tagged_accounts': [], 'retweeted_user': 'user3', 'quoted_user': None, 'author': 'user1'}
             ],
             'user2': [
-                {'text': 'Thanks @user1', 'tagged_accounts': ['user1'], 'retweeted_user': None, 'quoted_user': None}
+                {'text': 'Thanks @user1', 'tagged_accounts': ['user1'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user2'}
             ],
             'user3': [
-                {'text': 'Original tweet', 'tagged_accounts': [], 'retweeted_user': None, 'quoted_user': None}
+                {'text': 'Original tweet', 'tagged_accounts': [], 'retweeted_user': None, 'quoted_user': None, 'author': 'user3'}
             ]
         }
         
@@ -102,6 +102,47 @@ class TestTwitterNetworkAnalyzer:
         # Matrix should be correct size
         assert matrix.shape == (3, 3)
         assert len(usernames) == 3
+    
+    def test_analyze_network_filters_replies(self):
+        """Test that reply tweets are filtered out from network analysis."""
+        # Mock Twitter client
+        mock_client = mock.Mock()
+        
+        # Mock tweet data with replies (which should be filtered out)
+        mock_tweets = {
+            'user1': [
+                {'text': 'Hello @user2', 'tagged_accounts': ['user2'], 'retweeted_user': None, 'quoted_user': None, 'in_reply_to_status_id': None, 'author': 'user1'},
+                {'text': 'Reply @user3', 'tagged_accounts': ['user3'], 'retweeted_user': None, 'quoted_user': None, 'in_reply_to_status_id': '123456', 'author': 'user1'}  # Filtered (reply)
+            ],
+            'user2': [
+                {'text': 'Original tweet', 'tagged_accounts': [], 'retweeted_user': None, 'quoted_user': None, 'in_reply_to_status_id': None, 'author': 'user2'},
+                {'text': 'Another reply', 'tagged_accounts': ['user1'], 'retweeted_user': None, 'quoted_user': None, 'in_reply_to_status_id': '789012', 'author': 'user2'}  # Filtered (reply)
+            ]
+        }
+        
+        def mock_fetch(username):
+            return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
+        
+        def mock_relevance(username, keywords, min_followers, lang=None):
+            return True  # All users are relevant
+        
+        mock_client.fetch_user_tweets.side_effect = mock_fetch
+        mock_client.check_user_relevance.side_effect = mock_relevance
+        
+        analyzer = TwitterNetworkAnalyzer(mock_client)
+        
+        scores, matrix, usernames = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        
+        # Should only have user1 and user2 (user3 was only in a reply, which got filtered)
+        assert len(scores) == 2
+        assert set(scores.keys()) == {'user1', 'user2'}
+        
+        # Scores should sum to 1.0
+        assert abs(sum(scores.values()) - 1.0) < 1e-10
+        
+        # All scores should be positive
+        assert all(score > 0 for score in scores.values())
+    
     
     def test_no_interactions_error(self):
         """Test error when no interactions found."""

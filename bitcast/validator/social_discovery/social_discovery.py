@@ -56,16 +56,19 @@ class TwitterNetworkAnalyzer:
     - Score normalization
     """
     
-    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None):
+    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, force_cache_refresh: bool = False):
         """
         Initialize analyzer with optional custom Twitter client.
         
         Args:
-            twitter_client: Optional TwitterClient instance
+            twitter_client: Optional TwitterClient instance (typically for testing/mocking).
+                          If provided, force_cache_refresh is ignored.
             max_workers: Number of concurrent workers (1=sequential, 2+=concurrent)
                         If None, uses SOCIAL_DISCOVERY_MAX_WORKERS config
+            force_cache_refresh: If True, force Twitter API cache refresh. Only applied when
+                               twitter_client is not provided.
         """
-        self.twitter_client = twitter_client or TwitterClient()
+        self.twitter_client = twitter_client or TwitterClient(force_cache_refresh=force_cache_refresh)
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -178,8 +181,20 @@ class TwitterNetworkAnalyzer:
         interactions = {}  # (from_user, to_user) -> interaction_type
         discovered_users = set()
         
+        # Track reply filtering for logging
+        total_tweets_processed = 0
+        reply_tweets_filtered = 0
+        
         for from_user, tweets in all_tweets.items():
             for tweet in tweets:
+                total_tweets_processed += 1
+                
+                # Skip reply tweets (consistent with rewards/scoring behavior)
+                # Only analyze original tweets and quote tweets
+                if tweet.get('in_reply_to_status_id'):
+                    reply_tweets_filtered += 1
+                    continue
+                
                 # Handle mentions
                 for tagged_user in tweet.get('tagged_accounts', []):
                     if tagged_user != from_user:
@@ -208,6 +223,13 @@ class TwitterNetworkAnalyzer:
                             self.quote_weight
                         )
                         discovered_users.add(quoted_user)
+        
+        # Log reply filtering stats
+        if reply_tweets_filtered > 0:
+            bt.logging.info(
+                f"Filtered {reply_tweets_filtered}/{total_tweets_processed} reply tweets "
+                f"({reply_tweets_filtered/total_tweets_processed*100:.1f}%) - analyzing only original tweets and quotes"
+            )
         
         # Step 3: Filter by keyword relevance
         if keywords:
@@ -301,7 +323,8 @@ class TwitterNetworkAnalyzer:
 
 def discover_social_network(
     pool_name: str = "tao", 
-    run_id: Optional[str] = None
+    run_id: Optional[str] = None,
+    force_cache_refresh: bool = False
 ) -> str:
     """
     Discover social network using PageRank network analysis.
@@ -309,6 +332,7 @@ def discover_social_network(
     Args:
         pool_name: Name of the pool to discover social network for
         run_id: Validation cycle identifier (auto-generated if not provided)
+        force_cache_refresh: If True, force Twitter API cache refresh for all accounts
         
     Returns:
         Path to saved social map file
@@ -371,7 +395,7 @@ def discover_social_network(
             bt.logging.info(f"Using {len(seed_accounts)} initial accounts as seeds")
         
         # Analyze network
-        analyzer = TwitterNetworkAnalyzer()
+        analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh)
         scores, adjacency_matrix, usernames = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
@@ -499,6 +523,8 @@ def run_discovery_for_stale_pools() -> Dict[str, str]:
     Only runs discovery for pools without a map from today (UTC).
     Only runs every 2 weeks on Sundays.
     
+    Always forces cache refresh to ensure fresh Twitter data for bi-weekly discovery.
+    
     Returns:
         Dict mapping pool_name to social_map_path for pools that ran
     """
@@ -519,6 +545,9 @@ def run_discovery_for_stale_pools() -> Dict[str, str]:
         next_run_date = today + timedelta(days=14 - (days_since_reference % 14))
         bt.logging.debug(f"Skipping social discovery. Next run: {next_run_date}")
         return {}
+    
+    bt.logging.info("🔄 Bi-weekly discovery: forcing cache refresh for fresh Twitter data")
+    
     pool_manager = PoolManager()
     results = {}
     
@@ -550,7 +579,10 @@ def run_discovery_for_stale_pools() -> Dict[str, str]:
         if needs_update:
             try:
                 bt.logging.info(f"Running discovery for {pool_name} (no map from today)")
-                social_map_path = discover_social_network(pool_name=pool_name)
+                social_map_path = discover_social_network(
+                    pool_name=pool_name, 
+                    force_cache_refresh=True
+                )
                 results[pool_name] = social_map_path
             except Exception as e:
                 bt.logging.error(f"Discovery failed for {pool_name}: {e}")

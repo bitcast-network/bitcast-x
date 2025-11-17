@@ -65,18 +65,24 @@ class BriefEvaluator:
         
         # Evaluate using ChuteClient
         try:
-            meets_brief, reasoning = evaluate_content_against_brief(
+            meets_brief, reasoning, detailed_breakdown = evaluate_content_against_brief(
                 self.brief, 
                 tweet_text, 
                 tweet_id=tweet.get('tweet_id'),
                 author=tweet.get('author')
             )
             
-            return {
+            result = {
                 **tweet,
                 'meets_brief': meets_brief,
                 'reasoning': reasoning
             }
+            
+            # Add detailed breakdown if available
+            if detailed_breakdown:
+                result['detailed_breakdown'] = detailed_breakdown
+            
+            return result
             
         except Exception as e:
             bt.logging.error(

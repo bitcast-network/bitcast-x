@@ -103,10 +103,10 @@ class TweetFilter:
         Check if tweet is a scoreable type.
         
         Scoreable: original tweets and quote tweets
-        Not scoreable: pure retweets
+        Not scoreable: pure retweets and reply tweets
         
         Args:
-            tweet: Tweet dictionary with 'text' field
+            tweet: Tweet dictionary with 'text' and 'in_reply_to_status_id' fields
             
         Returns:
             True if tweet should be scored
@@ -117,6 +117,11 @@ class TweetFilter:
         if text.startswith('RT @'):
             return False
         
+        # Exclude reply tweets (have in_reply_to_status_id set)
+        # Note: Missing field treated as non-reply (backward compatible with old cache)
+        if tweet.get('in_reply_to_status_id'):
+            return False
+        
         return True
     
     def filter_tweets(self, tweets: List[Dict]) -> List[Dict]:
@@ -124,7 +129,7 @@ class TweetFilter:
         Apply all filters to tweet list.
         
         Filters by:
-        1. Tweet type (exclude pure RTs)
+        1. Tweet type (exclude pure RTs and replies)
         2. Language (if specified)
         3. Tag (if specified)
         4. QRT (if specified)
