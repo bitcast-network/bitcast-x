@@ -134,7 +134,7 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 - Much simpler setup
 
 **Full Validation Mode (Optional)**
-1. **RapidAPI Key** - [The Old Bird V2](https://rapidapi.com/datahungrybeast/api/twitter-v24) - Ultra subscription ($50/month)
+1. **RapidAPI Key** - [The Old Bird V2](https://rapidapi.com/datahungrybeast/api/twitter-v24) - Mega subscription ($200/month)
 2. **Chutes API Key** - Get from [Chutes.ai](https://chutes.ai/) - Plus subscription ($10/month)
 3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/)
 
