@@ -52,9 +52,11 @@ def fetch_user_tweets_safe(
         result = client.fetch_user_tweets(username, tweet_limit=100)
         tweets = result.get('tweets', [])
         
-        # Add author field to each tweet (TwitterClient doesn't include it)
+        # Set author field if not already set (TwitterClient now includes it)
+        # Fallback to timeline owner for backward compatibility with old cache
         for tweet in tweets:
-            tweet['author'] = username.lower()
+            if not tweet.get('author'):
+                tweet['author'] = username.lower()
         
         return tweets, None
     except Exception as e:
@@ -321,6 +323,26 @@ def score_tweets_for_pool(
             if not error:
                 considered_tweets.extend(tweets)
     
+    # Step 4.5: Deduplicate tweets by tweet_id
+    # The tweetsandreplies endpoint can return duplicates, so we need to deduplicate
+    bt.logging.debug("Deduplicating tweets by tweet_id")
+    
+    def deduplicate_tweets(tweets: List[Dict]) -> List[Dict]:
+        """Remove duplicate tweets by tweet_id, keeping first occurrence."""
+        seen = set()
+        unique = []
+        for tweet in tweets:
+            tweet_id = tweet.get('tweet_id')
+            if tweet_id and tweet_id not in seen:
+                seen.add(tweet_id)
+                unique.append(tweet)
+        return unique
+    
+    member_tweets = deduplicate_tweets(member_tweets)
+    considered_tweets = deduplicate_tweets(considered_tweets)
+    
+    bt.logging.debug(f"After deduplication: {len(member_tweets)} member tweets, {len(considered_tweets)} considered tweets")
+    
     # Combine all tweets for engagement detection
     all_tweets = member_tweets + considered_tweets
     bt.logging.debug(f"Total tweets for engagement analysis: {len(all_tweets)}")
@@ -439,6 +461,7 @@ if __name__ == "__main__":
     import argparse
     from dotenv import load_dotenv
     from bitcast.validator.reward_engine.utils import get_briefs
+    from bitcast.validator.account_connection import ConnectionDatabase
     
     # Load environment variables
     env_path = Path(__file__).parents[1] / '.env'
@@ -532,11 +555,29 @@ if __name__ == "__main__":
         if force_cache_refresh:
             bt.logging.info("Force cache refresh enabled - ignoring cache freshness check")
         
-        # Run tweet scoring (without connected accounts filter)
+        # Load connected accounts from database (matching production behavior)
+        bt.logging.info(f"Loading connected accounts from database for pool '{pool_name}'...")
+        db = ConnectionDatabase()
+        
+        # Get all connections and extract usernames
+        # Note: CLI mode doesn't resolve UIDs (no metagraph), just checks for connection tags
+        all_connections = db.get_all_connections(pool_name=pool_name)
+        connected_accounts = {conn['account_username'].lower() for conn in all_connections}
+        
+        if connected_accounts:
+            bt.logging.info(f"  → Found {len(connected_accounts)} connected accounts in database")
+        else:
+            bt.logging.warning(
+                f"  → No connected accounts found in database for pool '{pool_name}'\n"
+                f"     No tweets will be scored. Run connection scanner first:\n"
+                f"     python -m bitcast.validator.account_connection.connection_scanner --pool-name {pool_name}"
+            )
+        
+        # Run tweet scoring (with connected accounts filter - matching production)
         results = score_tweets_for_pool(
             pool_name=pool_name,
             brief_id=config.brief_id,
-            connected_accounts=None,
+            connected_accounts=connected_accounts,
             run_id=run_id,
             tag=tag,
             qrt=qrt,

@@ -158,7 +158,7 @@ class TwitterClient:
             bt.logging.info(f"Force refresh enabled for @{username} - bypassing cache")
         
         # Fetch from API
-        url = "https://twitter-v24.p.rapidapi.com/user/tweets"
+        url = "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies"
         params = {"username": username, "limit": "40"}
         
         tweets = []
@@ -176,6 +176,7 @@ class TwitterClient:
             
             # Extract timeline data
             try:
+                # Response is normalized by _make_api_request to {'data': {'user': ...}}
                 timeline = data['data']['user']['result']['timeline']['timeline']
                 instructions = timeline.get('instructions', [])
                 
@@ -363,10 +364,19 @@ class TwitterClient:
                     quoted_user = match.group(1).lower()
                     quoted_tweet_id = match.group(2)
             
+            # Extract actual author from core.user_results (not the timeline owner)
+            # This is crucial for detecting retweets that don't have "RT @" prefix
+            author = None
+            try:
+                author = tweet_result['core']['user_results']['result']['legacy']['screen_name'].lower()
+            except (KeyError, AttributeError, TypeError):
+                pass
+            
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
                 'created_at': legacy.get('created_at', ''),
                 'text': text,
+                'author': author,  # Actual tweet author (None if not found)
                 'tagged_accounts': tagged_accounts,
                 'retweeted_user': retweeted_user,
                 'retweeted_tweet_id': retweeted_tweet_id,
@@ -377,7 +387,9 @@ class TwitterClient:
                 'retweet_count': legacy.get('retweet_count', 0),
                 'reply_count': legacy.get('reply_count', 0),
                 'quote_count': legacy.get('quote_count', 0),
-                'bookmark_count': legacy.get('bookmark_count', 0)
+                'bookmark_count': legacy.get('bookmark_count', 0),
+                'in_reply_to_status_id': legacy.get('in_reply_to_status_id_str'),
+                'in_reply_to_user': legacy.get('in_reply_to_screen_name')
             }
         except (KeyError, AttributeError):
             return None
