@@ -60,9 +60,58 @@ def generate_brief_evaluation_prompt_v1(brief, tweet):
         "Be concise and remember: fabricated evidence = Not Met."
     )
 
+def generate_brief_evaluation_prompt_v2(brief, tweet):
+    """
+    Generate a detailed evaluation prompt that requires evidence for each brief item.
+
+    Features:
+    • Auto-numbers brief items for systematic evaluation
+    • Requires 5-15-word quote for every Met claim
+    • Demands exact `start` time (seconds) from transcript as evidence
+    • Uncertain or fabricated timestamps → Not Met
+    • Special handling for description-only items
+    """
+    return (
+        "///// SPONSOR BRIEF /////\n"
+        f"{brief['brief']}\n\n"
+        "///// TWEET /////\n"
+        f"{tweet}\n\n"
+        "///// YOUR TASK /////\n"
+        "You are the sponsor's review agent. Decide—objectively—whether this tweet **fully** satisfies the brief.\n"
+        "The brief requirements are **minimum requirements** - creators are may choose to go deeper into the topic area - although this is not mandatory\n"
+        "**Base Requirements**\n"
+        "• The tweet must be **predominantly (80% or more) about the sponsor or their topic** - not just a passing mention. If < 80% of the text is relevant, return NO.\n"
+        "• The tweet must not be negative or critical of the sponsor\n"
+        "**Step-by-step instructions**\n\n"
+        "1. **Auto-number** each requirement in the brief (1, 2, 3 …) in the order it appears.\n"
+        "2. For every numbered and base requirement:\n"
+        "   • Search the tweet.\n"
+        "   • If you find evidence, mark **Met** and provide:\n"
+        "       – a 3-15-word quote extracted verbatim from the tweet\n"
+        "   • If no clear evidence or you are **uncertain**, mark **Not Met**.\n"
+        "3. **If any item fails → Verdiction = NO.**\n\n"
+        "**Important accuracy rules**\n"
+        "• Do **not** invent timestamps. If a timestamp is uncertain, mark the item Not Met.\n"
+        "• Fabricated quotes automatically fail that item.\n"
+        "• When in doubt, choose **NO**.\n"
+        "**Response format (exactly):**\n"
+        "```\n"
+        "## Requirement-by-Requirement\n"
+        "- Req 1: [requirement text] — Met / Not Met — \"quoted evidence\" (start-sec or range)\n"
+        "- Req 2: ...\n"
+        "...\n"
+        "## Verdict\n"
+        "YES or NO\n"
+        "## Summary\n"
+        "Brief 1 sentence explanation of why the content did or did not meet the brief requirements.\n"
+        "```\n"
+        "Be concise and remember: fabricated evidence = Not Met."
+    )
+
 # Registry of available prompt generators
 PROMPT_GENERATORS = {
-    1: generate_brief_evaluation_prompt_v1
+    1: generate_brief_evaluation_prompt_v1,
+    2: generate_brief_evaluation_prompt_v2
 }
 
 def get_prompt_generator(version):

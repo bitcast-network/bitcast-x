@@ -71,7 +71,7 @@ class TestEvaluateTweet:
     @patch('bitcast.validator.tweet_filtering.brief_evaluator.evaluate_content_against_brief')
     def test_evaluates_tweet_with_text(self, mock_evaluate, sample_brief):
         """Should evaluate tweet and return enriched result."""
-        mock_evaluate.return_value = (True, "Tweet mentions BitCast and tags correctly")
+        mock_evaluate.return_value = (True, "Tweet mentions BitCast and tags correctly", "- Req 1: mentions BitCast — Met — \"@bitcast_network\"")
         
         evaluator = BriefEvaluator(sample_brief)
         tweet = {
@@ -93,6 +93,7 @@ class TestEvaluateTweet:
         assert result['score'] == 0.5
         assert result['meets_brief'] is True
         assert result['reasoning'] == "Tweet mentions BitCast and tags correctly"
+        assert result['detailed_breakdown'] == "- Req 1: mentions BitCast — Met — \"@bitcast_network\""
     
     @patch('bitcast.validator.tweet_filtering.brief_evaluator.evaluate_content_against_brief')
     def test_handles_empty_text(self, mock_evaluate, sample_brief):
@@ -143,8 +144,8 @@ class TestEvaluateTweetsBatch:
         """Should evaluate all tweets in batch."""
         # Mock different responses for different tweets
         mock_evaluate.side_effect = [
-            (True, "Meets requirements"),
-            (False, "Does not mention BitCast"),
+            (True, "Meets requirements", "- Req 1: mention BitCast — Met"),
+            (False, "Does not mention BitCast", "- Req 1: mention BitCast — Not Met"),
             # Empty text tweet won't call LLM
         ]
         
@@ -177,9 +178,9 @@ class TestEvaluateTweetsBatch:
         """Should continue batch even if individual evaluations fail."""
         # First succeeds, second fails, third succeeds
         mock_evaluate.side_effect = [
-            (True, "Pass"),
+            (True, "Pass", "- Req 1: Met"),
             Exception("API error"),
-            (True, "Pass")
+            (True, "Pass", "- Req 1: Met")
         ]
         
         tweets = [
@@ -213,7 +214,7 @@ class TestEvaluateTweetsBatch:
     @patch('bitcast.validator.tweet_filtering.brief_evaluator.evaluate_content_against_brief')
     def test_preserves_all_original_fields(self, mock_evaluate, sample_brief):
         """Should preserve all original tweet fields."""
-        mock_evaluate.return_value = (True, "Pass")
+        mock_evaluate.return_value = (True, "Pass", "- Req 1: Met")
         
         tweet = {
             'tweet_id': '123',

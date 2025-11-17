@@ -139,6 +139,7 @@ def _parse_llm_response(text_response: str, response_type: str = "brief_evaluati
     For brief evaluation, extracts:
     - meets_brief from "## Verdict\nYES or NO"
     - reasoning from "## Summary\nExplanation"
+    - detailed_breakdown from "## Requirement-by-Requirement" section
     
     For prompt injection, extracts:
     - injection_detected from "TRUE" or "FALSE" in response
@@ -148,11 +149,20 @@ def _parse_llm_response(text_response: str, response_type: str = "brief_evaluati
         verdict_match = re.search(r'## Verdict\s*\n\s*(YES|NO)', text_response, re.IGNORECASE)
         meets_brief = verdict_match.group(1).upper() == "YES" if verdict_match else False
         
+        # Extract detailed breakdown from Requirement-by-Requirement section
+        # Use [ \t]* instead of \s* to avoid consuming newlines
+        breakdown_match = re.search(r'## Requirement-by-Requirement[ \t]*\n(.*?)(?:\n## Verdict|\n## |$)', text_response, re.DOTALL | re.IGNORECASE)
+        detailed_breakdown = breakdown_match.group(1).strip() if breakdown_match else None
+        
         # Extract reasoning from summary
         summary_match = re.search(r'## Summary\s*\n\s*(.*?)(?:\n##|\n```|$)', text_response, re.DOTALL | re.IGNORECASE)
         reasoning = summary_match.group(1).strip() if summary_match else "Unable to parse response"
         
-        return {"meets_brief": meets_brief, "reasoning": reasoning}
+        return {
+            "meets_brief": meets_brief, 
+            "reasoning": reasoning,
+            "detailed_breakdown": detailed_breakdown
+        }
     
     elif response_type == "prompt_injection":
         # Extract verdict (TRUE/FALSE) using structured format
@@ -180,7 +190,10 @@ def _parse_llm_response(text_response: str, response_type: str = "brief_evaluati
 def evaluate_content_against_brief(brief, tweet, tweet_id=None, author=None):
     """
     Evaluate the tweet against the brief using Chutes API to determine if the content meets the brief.
-    Returns a tuple of (bool, str) where bool indicates if the content meets the brief, and str is the reasoning.
+    Returns a tuple of (bool, str, str) where:
+    - bool indicates if the content meets the brief
+    - first str is the reasoning summary
+    - second str is the detailed breakdown (or None if not available)
     
     Supports multiple prompt versions based on the brief's prompt_version field.
     
@@ -203,6 +216,7 @@ def evaluate_content_against_brief(brief, tweet, tweet_id=None, author=None):
             cached_result = cache[prompt_content]
             meets_brief = cached_result["meets_brief"]
             reasoning = cached_result["reasoning"]
+            detailed_breakdown = cached_result.get("detailed_breakdown")
             
             # Implement sliding expiration - reset the timer on access
             with ChuteClient._cache_lock:
@@ -216,7 +230,7 @@ def evaluate_content_against_brief(brief, tweet, tweet_id=None, author=None):
                 info_items.append(f"tweet: {tweet_id}")
             info_str = f" [{', '.join(info_items)}]" if info_items else ""
             bt.logging.info(f"Meets brief '{brief['id']}' (v{prompt_version}): {meets_brief} {emoji} (cache){info_str}")
-            return meets_brief, reasoning
+            return meets_brief, reasoning, detailed_breakdown
 
         # Make request to Chutes API
         response = _make_chutes_request(
@@ -231,10 +245,15 @@ def evaluate_content_against_brief(brief, tweet, tweet_id=None, author=None):
         
         meets_brief = parsed_result["meets_brief"]
         reasoning = parsed_result["reasoning"]
+        detailed_breakdown = parsed_result.get("detailed_breakdown")
 
         if cache is not None:
             with ChuteClient._cache_lock:
-                cache.set(prompt_content, {"meets_brief": meets_brief, "reasoning": reasoning}, expire=LLM_CACHE_EXPIRY)
+                cache.set(prompt_content, {
+                    "meets_brief": meets_brief, 
+                    "reasoning": reasoning,
+                    "detailed_breakdown": detailed_breakdown
+                }, expire=LLM_CACHE_EXPIRY)
 
         emoji = "✅" if meets_brief else "❌"
         info_items = []
@@ -244,14 +263,14 @@ def evaluate_content_against_brief(brief, tweet, tweet_id=None, author=None):
             info_items.append(f"tweet: {tweet_id}")
         info_str = f" [{', '.join(info_items)}]" if info_items else ""
         bt.logging.info(f"Brief {brief['id']} (v{prompt_version}) met: {meets_brief} {emoji}{info_str}")
-        return meets_brief, reasoning
+        return meets_brief, reasoning, detailed_breakdown
 
     except requests.exceptions.RequestException as e:
         bt.logging.error(f"Chutes API error: {e}")
-        return False, f"Error during evaluation: {str(e)}"
+        return False, f"Error during evaluation: {str(e)}", None
     except Exception as e:
         bt.logging.error(f"Unexpected error during brief evaluation: {e}")
-        return False, f"Unexpected error: {str(e)}"
+        return False, f"Unexpected error: {str(e)}", None
 
 def check_for_prompt_injection(tweet):
     """
