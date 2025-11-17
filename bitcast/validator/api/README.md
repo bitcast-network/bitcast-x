@@ -85,7 +85,7 @@ Get latest social map for a pool.
   - 500: Server error
 
 ### `GET /account-connections`
-Get all account connection data from the database.
+Get all account connection data from the database. Returns only the most recent connection per account (deduplicated).
 - **Rate Limit**: 5 requests/minute per IP
 - **Query Parameters**:
   - `pool_name` (optional): Filter connections by pool name (e.g., "tao")

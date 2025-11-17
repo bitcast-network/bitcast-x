@@ -268,14 +268,20 @@ async def get_account_connections(
         db = ConnectionDatabase()
         connections = db.get_all_connections(pool_name=pool_name)
         
-        # Remove connection_id from each connection (internal DB field)
+        # Deduplicate: keep only most recent connection per account
+        account_map = {}
         for conn in connections:
-            conn.pop('connection_id', None)
+            username = conn['account_username']
+            if username not in account_map or conn['updated'] > account_map[username]['updated']:
+                conn.pop('connection_id', None)  # Remove internal ID
+                account_map[username] = conn
+        
+        deduplicated = list(account_map.values())
         
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "total_connections": len(connections),
-            "connections": connections
+            "total_connections": len(deduplicated),
+            "connections": deduplicated
         }
         
     except Exception as e:
