@@ -106,7 +106,7 @@ def main():
     brief = {'id': brief_id, 'brief': brief_text, 'prompt_version': prompt_version}
     
     try:
-        meets_brief, reasoning = evaluate_content_against_brief(brief, tweet_text)
+        meets_brief, reasoning, detailed_breakdown = evaluate_content_against_brief(brief, tweet_text)
         
         print("\n" + "="*70)
         if meets_brief:
@@ -116,7 +116,12 @@ def main():
         print("="*70)
         print(f"\nBRIEF ID: {brief_id}")
         print(f"PROMPT VERSION: v{prompt_version}")
-        print("\nREASONING:")
+        
+        if detailed_breakdown:
+            print("\nDETAILED BREAKDOWN:")
+            print(detailed_breakdown)
+        
+        print("\nSUMMARY:")
         print(reasoning)
         print("\n" + "="*70 + "\n")
         

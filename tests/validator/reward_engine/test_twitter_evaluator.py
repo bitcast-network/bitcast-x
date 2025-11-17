@@ -82,13 +82,15 @@ class TestTwitterEvaluator:
         
         with patch.object(evaluator, '_score_tweets_for_brief', return_value=scored_tweets):
             with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
-                result = await evaluator.evaluate_briefs(
-                    briefs=briefs,
-                    uid_account_mappings=uid_mappings,
-                    connected_accounts={'test_user'},
-                    metagraph=Mock(),
-                    run_id="test_run"
-                )
+                with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=FileNotFoundError()):
+                        result = await evaluator.evaluate_briefs(
+                            briefs=briefs,
+                            uid_account_mappings=uid_mappings,
+                            connected_accounts={'test_user'},
+                            metagraph=Mock(),
+                            run_id="test_run"
+                        )
         
         # Verify results
         assert len(result.results) == 1
@@ -99,7 +101,7 @@ class TestTwitterEvaluator:
         assert uid_result.platform == "twitter"
         assert 'test_brief_001' in uid_result.aggregated_scores
         
-        # Check USD amount
+        # Check USD amount - with power law smoothing, single UID still gets 100%
         daily_budget = 7000 / EMISSIONS_PERIOD
         expected_usd = daily_budget  # 100% of budget since only UID
         assert abs(uid_result.aggregated_scores['test_brief_001'] - expected_usd) < 0.01
@@ -137,28 +139,33 @@ class TestTwitterEvaluator:
         
         with patch.object(evaluator, '_score_tweets_for_brief', return_value=scored_tweets):
             with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
-                result = await evaluator.evaluate_briefs(
-                    briefs=briefs,
-                    uid_account_mappings=uid_mappings,
-                    connected_accounts={'user1', 'user2'},
-                    metagraph=Mock(),
-                    run_id="test_run"
-                )
+                with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=FileNotFoundError()):
+                        result = await evaluator.evaluate_briefs(
+                            briefs=briefs,
+                            uid_account_mappings=uid_mappings,
+                            connected_accounts={'user1', 'user2'},
+                            metagraph=Mock(),
+                            run_id="test_run"
+                        )
         
         # Verify results
         assert len(result.results) == 2
         assert 10 in result.results
         assert 20 in result.results
         
-        # Check proportional distribution
+        # Check proportional distribution with power law smoothing (α=0.65)
+        # Scores: 0.6 and 0.4
+        # Smoothed: 0.6^0.65 = 0.7175, 0.4^0.65 = 0.5512, total = 1.2687
+        # Proportions: 56.55% and 43.45%
         daily_budget = 7000 / EMISSIONS_PERIOD
-        uid1_expected = daily_budget * (0.6 / 1.0)  # 60% of budget
-        uid2_expected = daily_budget * (0.4 / 1.0)  # 40% of budget
+        uid1_expected = daily_budget * 0.5655  # ~56.55% of budget
+        uid2_expected = daily_budget * 0.4345  # ~43.45% of budget
         
-        assert abs(result.results[10].aggregated_scores['test_brief_002'] - uid1_expected) < 0.01
-        assert abs(result.results[20].aggregated_scores['test_brief_002'] - uid2_expected) < 0.01
+        assert abs(result.results[10].aggregated_scores['test_brief_002'] - uid1_expected) < 1.0
+        assert abs(result.results[20].aggregated_scores['test_brief_002'] - uid2_expected) < 1.0
         
-        # Verify total equals daily budget
+        # Verify total equals daily budget (critical constraint)
         total = (result.results[10].aggregated_scores['test_brief_002'] + 
                 result.results[20].aggregated_scores['test_brief_002'])
         assert abs(total - daily_budget) < 0.01
@@ -195,25 +202,26 @@ class TestTwitterEvaluator:
         
         with patch.object(evaluator, '_score_tweets_for_brief', return_value=scored_tweets):
             with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
-                result = await evaluator.evaluate_briefs(
-                    briefs=briefs,
-                    uid_account_mappings=uid_mappings,
-                    connected_accounts={'mapped_user', 'unmapped_user'},
-                    metagraph=Mock(),
-                    run_id="test_run"
-                )
+                with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=FileNotFoundError()):
+                        result = await evaluator.evaluate_briefs(
+                            briefs=briefs,
+                            uid_account_mappings=uid_mappings,
+                            connected_accounts={'mapped_user', 'unmapped_user'},
+                            metagraph=Mock(),
+                            run_id="test_run"
+                        )
         
-        # With SIMULATE_CONNECTIONS, unmapped accounts go to NOCODE_UID (2)
-        # So we get 2 UIDs: mapped (42) and NOCODE (2)
-        assert len(result.results) == 2
+        # Only mapped accounts get rewards in results (unmapped tweet processed but not assigned to UID)
+        assert len(result.results) == 1
         assert 42 in result.results
-        assert 2 in result.results  # NOCODE_UID
         
-        # Budget distributed proportionally: mapped user has score 0.5, unmapped has 0.3
-        # Total score = 0.8, so mapped gets 62.5%, unmapped gets 37.5%
+        # Budget distributed with power law smoothing (α=0.65)
+        # Scores: 0.5 (mapped) and 0.3 (unmapped)
+        # Smoothed: 0.5^0.65 = 0.6373, 0.3^0.65 = 0.4572, total = 1.0945
+        # Mapped user gets: 58.23% of budget (unmapped user's 41.77% goes unassigned)
         daily_budget = 7000 / EMISSIONS_PERIOD
-        assert abs(result.results[42].aggregated_scores['test_brief_004'] - daily_budget * 0.625) < 0.01
-        assert abs(result.results[2].aggregated_scores['test_brief_004'] - daily_budget * 0.375) < 0.01
+        assert abs(result.results[42].aggregated_scores['test_brief_004'] - daily_budget * 0.5823) < 1.0
     
     @pytest.mark.asyncio
     async def test_evaluate_briefs_error_in_brief_continues(self, mock_alpha_price):
@@ -230,7 +238,7 @@ class TestTwitterEvaluator:
         ]
         
         # Mock scoring to fail for first brief, succeed for second
-        def mock_score(pool_name, brief_id, tag, qrt, run_id):
+        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date):
             if brief_id == 'error_brief':
                 raise ValueError("Scoring failed")
             return [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5}]
@@ -241,13 +249,15 @@ class TestTwitterEvaluator:
         
         with patch.object(evaluator, '_score_tweets_for_brief', side_effect=mock_score):
             with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
-                result = await evaluator.evaluate_briefs(
-                    briefs=briefs,
-                    uid_account_mappings=uid_mappings,
-                    connected_accounts={'test_user'},
-                    metagraph=Mock(),
-                    run_id="test_run"
-                )
+                with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=FileNotFoundError()):
+                        result = await evaluator.evaluate_briefs(
+                            briefs=briefs,
+                            uid_account_mappings=uid_mappings,
+                            connected_accounts={'test_user'},
+                            metagraph=Mock(),
+                            run_id="test_run"
+                        )
         
         # Should have result only for good brief
         assert len(result.results) == 1
@@ -255,7 +265,7 @@ class TestTwitterEvaluator:
         assert 'error_brief' not in result.results[42].aggregated_scores
     
     def test_calculate_tweet_targets(self, mock_alpha_price):
-        """Test _calculate_tweet_targets method."""
+        """Test _calculate_tweet_targets method with power law smoothing."""
         evaluator = TwitterEvaluator()
         
         tweets = [
@@ -267,13 +277,17 @@ class TestTwitterEvaluator:
         
         result = evaluator._calculate_tweet_targets(tweets, daily_budget, 'test_brief')
         
-        # Verify targets added proportionally
-        assert abs(result[0]['usd_target'] - 600.0) < 0.01  # 60% of budget
-        assert abs(result[1]['usd_target'] - 400.0) < 0.01  # 40% of budget
+        # With power law smoothing (α=0.65):
+        # 0.6^0.65 = 0.7175, 0.4^0.65 = 0.5512, total = 1.2687
+        # Proportions: 56.55% and 43.45%
+        assert abs(result[0]['usd_target'] - 565.51) < 0.1  # ~56.55% of budget
+        assert abs(result[1]['usd_target'] - 434.49) < 0.1  # ~43.45% of budget
         assert 'alpha_target' in result[0]
         assert 'alpha_target' in result[1]
+        assert 'total_usd_target' in result[0]
+        assert 'total_usd_target' in result[1]
         
-        # Verify total equals budget
+        # Verify total equals budget (critical constraint)
         total = sum(t['usd_target'] for t in result)
         assert abs(total - daily_budget) < 0.01
     

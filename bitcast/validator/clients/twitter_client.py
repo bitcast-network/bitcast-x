@@ -17,6 +17,7 @@ import bittensor as bt
 from bitcast.validator.utils.config import (
     RAPID_API_KEY,
     TWITTER_DEFAULT_LOOKBACK_DAYS,
+    TWEET_FETCH_LIMIT,
     TWITTER_CACHE_FRESHNESS,
     FORCE_CACHE_REFRESH
 )
@@ -108,20 +109,52 @@ class TwitterClient:
         
         return None, "Max retries exceeded"
     
-    def fetch_user_tweets(self, username: str, tweet_limit: int = 100, force_refresh: bool = False) -> Dict[str, Any]:
+    def _validate_tweet_authors(self, tweets: List[Dict], username: str) -> List[Dict]:
+        """
+        Filter tweets to only those authored by the specified username.
+        
+        Handles backward compatibility by setting author field for old cache entries.
+        
+        Args:
+            tweets: List of tweet dictionaries
+            username: Expected author username (already lowercased)
+            
+        Returns:
+            Filtered list of tweets from the specified author only
+        """
+        validated_tweets = []
+        
+        for tweet in tweets:
+            author = tweet.get('author', '').lower() if tweet.get('author') else None
+            
+            if author == username:
+                # Tweet is from the expected author
+                validated_tweets.append(tweet)
+            elif not author:
+                # Backward compatibility: assume timeline owner for old cache entries
+                tweet['author'] = username
+                validated_tweets.append(tweet)
+            # else: skip - tweet from someone else (e.g., reply TO user FROM someone else)
+        
+        return validated_tweets
+    
+    def fetch_user_tweets(self, username: str, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
         
         Args:
             username: Twitter username to fetch tweets for
-            tweet_limit: Maximum number of tweets to fetch (default: 100)
             force_refresh: If True, bypass cache and always fetch fresh data (default: False)
+            validate_author: If True, filter tweets to only those authored by username (default: True)
+                           The tweetsandreplies API returns both user's tweets AND replies from others,
+                           so validation ensures only the timeline owner's tweets are included.
         
-        Stops when either tweet_limit is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
+        Stops when either TWEET_FETCH_LIMIT is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
         Uses smart cache merging to preserve historical tweets while fetching recent updates.
         
         Returns dict with 'user_info', 'tweets', and 'cache_info'
         """
+        tweet_limit = TWEET_FETCH_LIMIT
         username = username.lower()
         
         # Calculate cutoff date for lookback period
@@ -137,9 +170,15 @@ class TwitterClient:
             # If updated within past freshness period, use cache completely (unless force refresh enabled)
             if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
                 bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
+                cached_tweets = cached_data['tweets']
+                
+                # Apply author validation to cached data
+                if validate_author:
+                    cached_tweets = self._validate_tweet_authors(cached_tweets, username)
+                
                 return {
                     'user_info': cached_data['user_info'],
-                    'tweets': cached_data['tweets'],
+                    'tweets': cached_tweets,
                     'cache_info': {'cache_hit': True, 'new_tweets': 0}
                 }
             
@@ -158,7 +197,7 @@ class TwitterClient:
             bt.logging.info(f"Force refresh enabled for @{username} - bypassing cache")
         
         # Fetch from API
-        url = "https://twitter-v24.p.rapidapi.com/user/tweets"
+        url = "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies"
         params = {"username": username, "limit": "40"}
         
         tweets = []
@@ -176,6 +215,7 @@ class TwitterClient:
             
             # Extract timeline data
             try:
+                # Response is normalized by _make_api_request to {'data': {'user': ...}}
                 timeline = data['data']['user']['result']['timeline']['timeline']
                 instructions = timeline.get('instructions', [])
                 
@@ -303,6 +343,15 @@ class TwitterClient:
             all_tweets.sort(key=get_tweet_date, reverse=True)
             bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total tweets")
         
+        # Validate author: filter to only tweets from timeline owner
+        if validate_author:
+            original_count = len(all_tweets)
+            all_tweets = self._validate_tweet_authors(all_tweets, username)
+            
+            if len(all_tweets) < original_count:
+                filtered_count = original_count - len(all_tweets)
+                bt.logging.debug(f"Filtered {filtered_count} tweets from other authors (keeping {len(all_tweets)} from @{username})")
+        
         # Cache results
         cache_data = {
             'user_info': (cached_data.get('user_info') if cached_data else None) or user_info or {'username': username, 'followers_count': 0},
@@ -363,10 +412,19 @@ class TwitterClient:
                     quoted_user = match.group(1).lower()
                     quoted_tweet_id = match.group(2)
             
+            # Extract actual author from core.user_results (not the timeline owner)
+            # This is crucial for detecting retweets that don't have "RT @" prefix
+            author = None
+            try:
+                author = tweet_result['core']['user_results']['result']['legacy']['screen_name'].lower()
+            except (KeyError, AttributeError, TypeError):
+                pass
+            
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
                 'created_at': legacy.get('created_at', ''),
                 'text': text,
+                'author': author,  # Actual tweet author (None if not found)
                 'tagged_accounts': tagged_accounts,
                 'retweeted_user': retweeted_user,
                 'retweeted_tweet_id': retweeted_tweet_id,
@@ -377,7 +435,9 @@ class TwitterClient:
                 'retweet_count': legacy.get('retweet_count', 0),
                 'reply_count': legacy.get('reply_count', 0),
                 'quote_count': legacy.get('quote_count', 0),
-                'bookmark_count': legacy.get('bookmark_count', 0)
+                'bookmark_count': legacy.get('bookmark_count', 0),
+                'in_reply_to_status_id': legacy.get('in_reply_to_status_id_str'),
+                'in_reply_to_user': legacy.get('in_reply_to_screen_name')
             }
         except (KeyError, AttributeError):
             return None

@@ -10,6 +10,55 @@ Monitors tweets from social discovery pools for special connection tags that lin
 
 By default, only scans accounts with status 'in' or 'promoted' in the social map. Use `--scan-all-accounts` to scan all accounts regardless of status.
 
+## Automatic Connection Download
+
+New validators automatically download existing account connections from the reference validator on startup, allowing them to immediately access miner account-UID mappings without waiting for the first connection scan.
+
+### How It Works
+
+1. **On validator startup**, checks if `connections.db` is empty
+2. **Downloads all connections** from reference validator API (`/account-connections`)
+3. **Stores connections** in local database using same schema as scanner
+4. **If download fails**, validator continues normally - connection scanner will populate database on its next run
+
+### Benefits
+
+- **Faster startup**: New validators can reward miners immediately
+- **Consistency**: All validators start with same connection state
+- **Redundancy**: Connection data preserved across validator deployments
+- **Optional**: Only downloads if database is completely empty
+
+### Manual Download
+
+Download connections manually using the CLI tool:
+
+```bash
+# Download all connections
+python -m bitcast.validator.account_connection.download_connections
+
+# Download for specific pool only
+python -m bitcast.validator.account_connection.download_connections --pool-name tao
+
+# Force download even with existing connections
+python -m bitcast.validator.account_connection.download_connections --force
+
+# Use custom reference validator URL
+python -m bitcast.validator.account_connection.download_connections --server-url http://custom-validator:8094
+```
+
+### Verification
+
+```bash
+# Check downloaded connections
+sqlite3 bitcast/validator/account_connection/connections.db "SELECT COUNT(*) FROM connections;"
+
+# View connections by pool
+sqlite3 bitcast/validator/account_connection/connections.db "SELECT pool_name, COUNT(*) FROM connections GROUP BY pool_name;"
+
+# Compare with reference validator
+curl http://44.241.197.212:8094/account-connections | jq '.total_connections'
+```
+
 ## Architecture
 
 ```

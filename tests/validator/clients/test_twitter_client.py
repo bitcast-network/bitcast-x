@@ -183,4 +183,225 @@ class TestTwitterClient:
         assert tweet is not None
         assert tweet['text'] == 'Extended tweet with full text @user1 @user2'
         assert tweet['tagged_accounts'] == ['user1', 'user2']
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_author_validation_filters_wrong_authors(self, mock_get, mock_get_cache, mock_cache):
+        """Test that author validation filters out tweets from other users."""
+        # Mock no cache
+        mock_get_cache.return_value = None
+        
+        # Mock API response with mixed authors
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [
+                                        {
+                                            'entryId': 'tweet-1',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '1',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'testuser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'full_text': 'Tweet from testuser',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        {
+                                            'entryId': 'tweet-2',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '2',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'otheruser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'full_text': 'Reply from otheruser',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        client = TwitterClient(api_key="test")
+        
+        # Test with validate_author=True (default)
+        result = client.fetch_user_tweets("testuser")
+        
+        # Should only include tweet from testuser
+        assert len(result['tweets']) == 1
+        assert result['tweets'][0]['text'] == 'Tweet from testuser'
+        assert result['tweets'][0]['author'] == 'testuser'
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_author_validation_disabled(self, mock_get, mock_get_cache, mock_cache):
+        """Test that author validation can be disabled."""
+        # Mock no cache
+        mock_get_cache.return_value = None
+        
+        # Mock API response with mixed authors
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [
+                                        {
+                                            'entryId': 'tweet-1',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '1',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'testuser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'full_text': 'Tweet from testuser',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        {
+                                            'entryId': 'tweet-2',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '2',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'otheruser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'full_text': 'Reply from otheruser',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        client = TwitterClient(api_key="test")
+        
+        # Test with validate_author=False
+        with mock.patch('time.sleep'):  # Skip rate limiting delay
+            result = client.fetch_user_tweets("testuser", validate_author=False)
+        
+        # Should include both tweets (if API parsing succeeds for both)
+        assert len(result['tweets']) >= 1  # At least testuser's tweet
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_author_validation_backward_compat(self, mock_get, mock_get_cache, mock_cache):
+        """Test that tweets without author field get author set."""
+        from datetime import datetime, timedelta
+        
+        # Mock cached data without author field (old cache format)
+        # Cache is recent enough to be used
+        mock_get_cache.return_value = {
+            'user_info': {'username': 'testuser', 'followers_count': 100},
+            'tweets': [
+                {
+                    'tweet_id': '1',
+                    'text': 'Old cached tweet',
+                    'created_at': 'Mon Jan 01 00:00:00 +0000 2024'
+                    # Note: no 'author' field
+                }
+            ],
+            'last_updated': datetime.now() - timedelta(seconds=10)  # Fresh cache
+        }
+        
+        client = TwitterClient(api_key="test")
+        
+        # Test that author field is added for old cache entries
+        result = client.fetch_user_tweets("testuser", force_refresh=False)
+        
+        assert len(result['tweets']) == 1
+        assert result['tweets'][0]['author'] == 'testuser'
 

@@ -70,6 +70,7 @@ path, iterations, converged, metrics = recursive_social_discovery(
 from bitcast.validator.social_discovery import run_discovery_for_stale_pools
 
 # Auto-run for pools needing updates (every 2 weeks on Sunday)
+# Automatically forces cache refresh for fresh data
 results = run_discovery_for_stale_pools()
 # Returns: {'tao': '/path/to/social_map.json', ...}
 ```
@@ -256,6 +257,12 @@ Social discovery provides the foundation for the entire reward pipeline:
 
 ### Manual Override
 Can be run anytime via CLI for immediate discovery.
+
+## Cache Behavior
+
+**Bi-weekly discovery** automatically forces fresh Twitter API data to ensure accurate analysis.
+
+**Manual/CLI runs** use cached data (refreshed if stale) for faster iteration.
 
 ## Performance
 

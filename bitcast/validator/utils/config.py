@@ -15,7 +15,7 @@ CACHE_DIRS = {
     "llm": os.path.join(CACHE_ROOT, "llm")
 }
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 
 # Wallet Configuration
 WALLET_NAME = os.getenv('WALLET_NAME')
@@ -41,6 +41,7 @@ WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 
 # Twitter API Configuration
 TWITTER_DEFAULT_LOOKBACK_DAYS = 30
+TWEET_FETCH_LIMIT = 200
 PAGERANK_RETWEET_WEIGHT = 1.0
 PAGERANK_MENTION_WEIGHT = 2.0
 PAGERANK_QUOTE_WEIGHT = 3.0
@@ -57,6 +58,7 @@ SOCIAL_DISCOVERY_MAX_WORKERS = 10
 # Twitter emissions
 EMISSIONS_PERIOD = 7  # 7 days
 REWARDS_DELAY_DAYS = 2  # Wait period before rewards start after brief closes
+REWARD_SMOOTHING_EXPONENT = 0.65
 
 # LLM caching
 DISABLE_LLM_CACHING = os.getenv('DISABLE_LLM_CACHING', 'False').lower() == 'true'
@@ -75,7 +77,7 @@ SUBNET_TREASURY_PERCENTAGE = 1.0
 SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 
 # No-code mining
-NOCODE_UID = int(os.getenv('NOCODE_UID', '68'))
+NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
 # Reference Validator API Configuration
@@ -90,10 +92,12 @@ bt.logging.info(f"ENABLE_DATA_PUBLISH: {ENABLE_DATA_PUBLISH}")
 bt.logging.info(f"X_SOCIAL_MAP_ENDPOINT: {X_SOCIAL_MAP_ENDPOINT}")
 bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOINT}")
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
+bt.logging.info(f"TWEET_FETCH_LIMIT: {TWEET_FETCH_LIMIT}")
 bt.logging.info(f"TWITTER_CACHE_FRESHNESS: {TWITTER_CACHE_FRESHNESS}s ({TWITTER_CACHE_FRESHNESS/3600:.1f} hours)")
 bt.logging.info(f"FORCE_CACHE_REFRESH: {FORCE_CACHE_REFRESH}")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")
 bt.logging.info(f"REWARDS_DELAY_DAYS: {REWARDS_DELAY_DAYS}")
+bt.logging.info(f"REWARD_SMOOTHING_EXPONENT: {REWARD_SMOOTHING_EXPONENT}")
 bt.logging.info(f"VALIDATOR_WAIT: {VALIDATOR_WAIT}")
 bt.logging.info(f"ACCOUNT_CONNECTION_INTERVAL_HOURS: {ACCOUNT_CONNECTION_INTERVAL_HOURS}")
 bt.logging.info(f"REWARDS_INTERVAL_HOURS: {REWARDS_INTERVAL_HOURS}")
