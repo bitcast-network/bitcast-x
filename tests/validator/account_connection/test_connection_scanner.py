@@ -163,7 +163,8 @@ class TestConnectionScanner:
                 {
                     'tweet_id': 123456789,
                     'text': 'Check out bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq for more info',
-                    'created_at': recent_date.isoformat()
+                    'created_at': recent_date.isoformat(),
+                    'author': 'testuser'  # Author must match scanned username
                 }
             ]
         }
@@ -191,7 +192,8 @@ class TestConnectionScanner:
                 {
                     'tweet_id': 123456789,
                     'text': 'Just a regular tweet with no tags',
-                    'created_at': recent_date.isoformat()
+                    'created_at': recent_date.isoformat(),
+                    'author': 'testuser'
                 }
             ]
         }
@@ -202,6 +204,47 @@ class TestConnectionScanner:
         found_tags = scanner.scan_account("testuser")
         
         assert len(found_tags) == 0
+    
+    @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
+    def test_scan_account_filters_wrong_author(self, mock_twitter_client, temp_db_path):
+        """Test that tweets from other authors are filtered out (e.g., replies/mentions)."""
+        # Setup mock
+        mock_client_instance = Mock()
+        mock_twitter_client.return_value = mock_client_instance
+        
+        recent_date = datetime.now(timezone.utc) - timedelta(days=1)
+        mock_client_instance.fetch_user_tweets.return_value = {
+            'tweets': [
+                {
+                    'tweet_id': 111,
+                    'text': 'My tweet with bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                    'created_at': recent_date.isoformat(),
+                    'author': 'testuser'  # Correct author
+                },
+                {
+                    'tweet_id': 222,
+                    'text': 'Reply to @testuser with bitcast-xxyz78900',
+                    'created_at': recent_date.isoformat(),
+                    'author': 'otheruser'  # Wrong author (reply/mention)
+                },
+                {
+                    'tweet_id': 333,
+                    'text': 'Tweet without author field bitcast-xabc123',
+                    'created_at': recent_date.isoformat(),
+                    'author': None  # No author field
+                }
+            ]
+        }
+        
+        scanner = ConnectionScanner(db_path=temp_db_path)
+        scanner.twitter_client = mock_client_instance
+        
+        found_tags = scanner.scan_account("testuser")
+        
+        # Should only find 1 tag (from tweet 111), not from tweets by other users or without author
+        assert len(found_tags) == 1
+        assert found_tags[0][0] == 111
+        assert found_tags[0][2] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
     
     @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
     def test_scan_account_api_error(self, mock_twitter_client, temp_db_path):
@@ -232,18 +275,21 @@ class TestConnectionScanner:
                     'tweet_id': 111,
                     'text': 'Original tweet with bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
                     'created_at': recent_date.isoformat(),
+                    'author': 'testuser',  # Author must match scanned username
                     'retweeted_user': None  # Not a retweet
                 },
                 {
                     'tweet_id': 222,
                     'text': 'RT @someone: Check out bitcast-xxyz78900',
                     'created_at': recent_date.isoformat(),
+                    'author': 'someone',  # Different author (retweet)
                     'retweeted_user': 'someone'  # This is a retweet
                 },
                 {
                     'tweet_id': 333,
                     'text': 'Another original with bitcast-hk:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
                     'created_at': recent_date.isoformat(),
+                    'author': 'testuser',  # Author must match scanned username
                     'retweeted_user': None  # Not a retweet
                 }
             ]
