@@ -181,8 +181,20 @@ class TwitterNetworkAnalyzer:
         interactions = {}  # (from_user, to_user) -> interaction_type
         discovered_users = set()
         
+        # Track reply filtering for logging
+        total_tweets_processed = 0
+        reply_tweets_filtered = 0
+        
         for from_user, tweets in all_tweets.items():
             for tweet in tweets:
+                total_tweets_processed += 1
+                
+                # Skip reply tweets (consistent with rewards/scoring behavior)
+                # Only analyze original tweets and quote tweets
+                if tweet.get('in_reply_to_status_id'):
+                    reply_tweets_filtered += 1
+                    continue
+                
                 # Handle mentions
                 for tagged_user in tweet.get('tagged_accounts', []):
                     if tagged_user != from_user:
@@ -211,6 +223,13 @@ class TwitterNetworkAnalyzer:
                             self.quote_weight
                         )
                         discovered_users.add(quoted_user)
+        
+        # Log reply filtering stats
+        if reply_tweets_filtered > 0:
+            bt.logging.info(
+                f"Filtered {reply_tweets_filtered}/{total_tweets_processed} reply tweets "
+                f"({reply_tweets_filtered/total_tweets_processed*100:.1f}%) - analyzing only original tweets and quotes"
+            )
         
         # Step 3: Filter by keyword relevance
         if keywords:

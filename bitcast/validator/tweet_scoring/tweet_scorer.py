@@ -49,16 +49,10 @@ def fetch_user_tweets_safe(
         Tuple of (tweets_list, error_message)
     """
     try:
+        # TwitterClient.fetch_user_tweets() now validates author by default (validate_author=True)
+        # and ensures all tweets have the author field set
         result = client.fetch_user_tweets(username, tweet_limit=100)
-        tweets = result.get('tweets', [])
-        
-        # Set author field if not already set (TwitterClient now includes it)
-        # Fallback to timeline owner for backward compatibility with old cache
-        for tweet in tweets:
-            if not tweet.get('author'):
-                tweet['author'] = username.lower()
-        
-        return tweets, None
+        return result.get('tweets', []), None
     except Exception as e:
         bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
         return [], str(e)

@@ -108,7 +108,36 @@ class TwitterClient:
         
         return None, "Max retries exceeded"
     
-    def fetch_user_tweets(self, username: str, tweet_limit: int = 100, force_refresh: bool = False) -> Dict[str, Any]:
+    def _validate_tweet_authors(self, tweets: List[Dict], username: str) -> List[Dict]:
+        """
+        Filter tweets to only those authored by the specified username.
+        
+        Handles backward compatibility by setting author field for old cache entries.
+        
+        Args:
+            tweets: List of tweet dictionaries
+            username: Expected author username (already lowercased)
+            
+        Returns:
+            Filtered list of tweets from the specified author only
+        """
+        validated_tweets = []
+        
+        for tweet in tweets:
+            author = tweet.get('author', '').lower() if tweet.get('author') else None
+            
+            if author == username:
+                # Tweet is from the expected author
+                validated_tweets.append(tweet)
+            elif not author:
+                # Backward compatibility: assume timeline owner for old cache entries
+                tweet['author'] = username
+                validated_tweets.append(tweet)
+            # else: skip - tweet from someone else (e.g., reply TO user FROM someone else)
+        
+        return validated_tweets
+    
+    def fetch_user_tweets(self, username: str, tweet_limit: int = 100, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
         
@@ -116,6 +145,9 @@ class TwitterClient:
             username: Twitter username to fetch tweets for
             tweet_limit: Maximum number of tweets to fetch (default: 100)
             force_refresh: If True, bypass cache and always fetch fresh data (default: False)
+            validate_author: If True, filter tweets to only those authored by username (default: True)
+                           The tweetsandreplies API returns both user's tweets AND replies from others,
+                           so validation ensures only the timeline owner's tweets are included.
         
         Stops when either tweet_limit is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
         Uses smart cache merging to preserve historical tweets while fetching recent updates.
@@ -137,9 +169,15 @@ class TwitterClient:
             # If updated within past freshness period, use cache completely (unless force refresh enabled)
             if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
                 bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
+                cached_tweets = cached_data['tweets']
+                
+                # Apply author validation to cached data
+                if validate_author:
+                    cached_tweets = self._validate_tweet_authors(cached_tweets, username)
+                
                 return {
                     'user_info': cached_data['user_info'],
-                    'tweets': cached_data['tweets'],
+                    'tweets': cached_tweets,
                     'cache_info': {'cache_hit': True, 'new_tweets': 0}
                 }
             
@@ -303,6 +341,15 @@ class TwitterClient:
             
             all_tweets.sort(key=get_tweet_date, reverse=True)
             bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total tweets")
+        
+        # Validate author: filter to only tweets from timeline owner
+        if validate_author:
+            original_count = len(all_tweets)
+            all_tweets = self._validate_tweet_authors(all_tweets, username)
+            
+            if len(all_tweets) < original_count:
+                filtered_count = original_count - len(all_tweets)
+                bt.logging.debug(f"Filtered {filtered_count} tweets from other authors (keeping {len(all_tweets)} from @{username})")
         
         # Cache results
         cache_data = {
