@@ -203,6 +203,7 @@ class TwitterClient:
         tweets = []
         user_info = None
         cursor = None
+        api_fetch_succeeded = False
         
         while len(tweets) < tweet_limit:
             if cursor:
@@ -212,6 +213,8 @@ class TwitterClient:
             if error:
                 bt.logging.error(f"API failed for @{username}: {error}")
                 break
+            
+            api_fetch_succeeded = True
             
             # Extract timeline data
             try:
@@ -317,21 +320,41 @@ class TwitterClient:
         unique_map = {t['tweet_id']: t for t in tweets if t.get('tweet_id')}
         tweets = list(unique_map.values())
         
+        # Reset missing counter for newly fetched tweets
+        for tweet in tweets:
+            tweet['missing_count'] = 0
+        
         bt.logging.info(f"Fetched {len(tweets)} new tweets for @{username}")
         
-        # Smart merge: combine new tweets with cached tweets
+        # Smart merge: combine new tweets with cached tweets, track deleted tweets
         all_tweets = tweets.copy()
         cached_count = 0
+        incremented_missing = 0
         
         if cached_data and cached_data.get('tweets'):
-            # Only add cached tweets that we didn't just re-fetch
             new_tweet_ids = {t['tweet_id'] for t in tweets if t.get('tweet_id')}
-            for cached_tweet in cached_data['tweets']:
-                if cached_tweet.get('tweet_id') and cached_tweet['tweet_id'] not in new_tweet_ids:
-                    all_tweets.append(cached_tweet)
-                    cached_count += 1
             
-            # Sort by date (most recent first) - handle tweets without dates gracefully
+            for cached_tweet in cached_data['tweets']:
+                tweet_id = cached_tweet.get('tweet_id')
+                if not tweet_id or tweet_id in new_tweet_ids:
+                    continue
+                
+                # Increment missing counter if API succeeded and tweet within fetch window
+                if api_fetch_succeeded and cached_tweet.get('created_at'):
+                    try:
+                        tweet_date = datetime.strptime(cached_tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                        cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
+                        
+                        if tweet_date >= cutoff_with_tz:
+                            cached_tweet['missing_count'] = cached_tweet.get('missing_count', 0) + 1
+                            incremented_missing += 1
+                    except (ValueError, AttributeError):
+                        pass
+                
+                all_tweets.append(cached_tweet)
+                cached_count += 1
+            
+            # Sort by date (most recent first)
             def get_tweet_date(tweet):
                 try:
                     if tweet.get('created_at'):
@@ -341,7 +364,8 @@ class TwitterClient:
                     return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
             
             all_tweets.sort(key=get_tweet_date, reverse=True)
-            bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total tweets")
+            bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total" + 
+                           (f", {incremented_missing} missing++" if incremented_missing > 0 else ""))
         
         # Validate author: filter to only tweets from timeline owner
         if validate_author:
@@ -352,7 +376,12 @@ class TwitterClient:
                 filtered_count = original_count - len(all_tweets)
                 bt.logging.debug(f"Filtered {filtered_count} tweets from other authors (keeping {len(all_tweets)} from @{username})")
         
-        # Cache results
+        # Filter deleted tweets (missing_count >= 2) before returning
+        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
+        if len(visible_tweets) < len(all_tweets):
+            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} deleted tweets from @{username}")
+        
+        # Cache all tweets including deleted ones
         cache_data = {
             'user_info': (cached_data.get('user_info') if cached_data else None) or user_info or {'username': username, 'followers_count': 0},
             'tweets': all_tweets,
@@ -362,7 +391,7 @@ class TwitterClient:
         
         return {
             'user_info': cache_data['user_info'],
-            'tweets': all_tweets,
+            'tweets': visible_tweets,
             'cache_info': {'cache_hit': bool(cached_data), 'new_tweets': len(tweets), 'cached_tweets': cached_count}
         }
     
