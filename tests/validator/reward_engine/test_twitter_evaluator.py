@@ -435,4 +435,32 @@ class TestTwitterEvaluator:
         assert evaluator._parse_brief_date(None) is None
         assert evaluator._parse_brief_date('') is None
         assert evaluator._parse_brief_date('not-a-date') is None
+    
+    def test_convert_snapshot_to_tweets_with_targets_preserves_engagement(self):
+        """Test that _convert_snapshot_to_tweets_with_targets preserves engagement metrics."""
+        evaluator = TwitterEvaluator()
+        
+        tweet_rewards = [{
+            'tweet_id': '123', 'author': 'user1', 'uid': 1, 'score': 0.85, 'total_usd': 700.0,
+            'favorite_count': 10, 'retweet_count': 5, 'reply_count': 3, 'quote_count': 2,
+            'bookmark_count': 1, 'retweets': ['acc1', 'acc2'], 'quotes': ['acc3'],
+            'created_at': '2025-11-01T10:00:00Z', 'lang': 'en'
+        }]
+        
+        with patch('bitcast.validator.reward_engine.twitter_evaluator.get_bitcast_alpha_price', return_value=0.01):
+            result = evaluator._convert_snapshot_to_tweets_with_targets(tweet_rewards)
+            
+            assert len(result) == 1
+            tweet = result[0]
+            
+            # Financial targets calculated correctly
+            expected_daily = 700.0 / EMISSIONS_PERIOD
+            assert abs(tweet['usd_target'] - expected_daily) < 0.01
+            assert tweet['total_usd_target'] == 700.0
+            
+            # Engagement metrics preserved
+            assert tweet['favorite_count'] == 10
+            assert tweet['retweet_count'] == 5
+            assert tweet['retweets'] == ['acc1', 'acc2']
+            assert tweet['quotes'] == ['acc3']
 
