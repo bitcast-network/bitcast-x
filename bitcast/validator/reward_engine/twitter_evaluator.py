@@ -303,7 +303,16 @@ class TwitterEvaluator(ScanBasedEvaluator):
                         'author': author,
                         'uid': uid,
                         'score': tweet.get('score', 0.0),
-                        'total_usd': tweet.get('total_usd_target', 0.0)
+                        'total_usd': tweet.get('total_usd_target', 0.0),
+                        'favorite_count': tweet.get('favorite_count', 0),
+                        'retweet_count': tweet.get('retweet_count', 0),
+                        'reply_count': tweet.get('reply_count', 0),
+                        'quote_count': tweet.get('quote_count', 0),
+                        'bookmark_count': tweet.get('bookmark_count', 0),
+                        'retweets': tweet.get('retweets', []),
+                        'quotes': tweet.get('quotes', []),
+                        'created_at': tweet.get('created_at', ''),
+                        'lang': tweet.get('lang', 'und')
                     })
                     
                     # Track contributing accounts
@@ -581,7 +590,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
         Convert snapshot tweet_rewards to tweets_with_targets format for publishing.
         
         Args:
-            tweet_rewards: Snapshot data with tweet_id, author, uid, score, total_usd
+            tweet_rewards: Snapshot data with tweet_id, author, uid, score, total_usd,
+                          and engagement metrics
             
         Returns:
             List of tweets in tweets_with_targets format with daily USD/alpha targets
@@ -598,6 +608,16 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 'usd_target': daily_usd,
                 'total_usd_target': tweet_reward.get('total_usd', 0.0),
                 'alpha_target': daily_usd / alpha_price,
+                # Include engagement metrics from snapshot
+                'favorite_count': tweet_reward.get('favorite_count', 0),
+                'retweet_count': tweet_reward.get('retweet_count', 0),
+                'reply_count': tweet_reward.get('reply_count', 0),
+                'quote_count': tweet_reward.get('quote_count', 0),
+                'bookmark_count': tweet_reward.get('bookmark_count', 0),
+                'retweets': tweet_reward.get('retweets', []),
+                'quotes': tweet_reward.get('quotes', []),
+                'created_at': tweet_reward.get('created_at', ''),
+                'lang': tweet_reward.get('lang', 'und')
             })
         
         return tweets_with_targets
