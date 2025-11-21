@@ -57,7 +57,7 @@ SOCIAL_DISCOVERY_MAX_WORKERS = 10
 
 # Twitter emissions
 EMISSIONS_PERIOD = 7  # 7 days
-REWARDS_DELAY_DAYS = 2  # Wait period before rewards start after brief closes
+REWARDS_DELAY_DAYS = 1  # Wait period before rewards start after brief closes
 REWARD_SMOOTHING_EXPONENT = 0.65
 
 # LLM caching

@@ -18,10 +18,26 @@ def sample_snapshot_data():
         'pool_name': 'test_pool',
         'created_at': '2025-11-09T12:00:00+00:00',
         'tweet_rewards': [
-            {'tweet_id': '123', 'author': 'user1', 'uid': 1, 'score': 0.85, 'total_usd': 50.25},
-            {'tweet_id': '456', 'author': 'user2', 'uid': 1, 'score': 0.75, 'total_usd': 50.25},
-            {'tweet_id': '789', 'author': 'user3', 'uid': 2, 'score': 1.20, 'total_usd': 200.75},
-            {'tweet_id': '101', 'author': 'user4', 'uid': 3, 'score': 0.60, 'total_usd': 50.25}
+            {
+                'tweet_id': '123', 'author': 'user1', 'uid': 1, 'score': 0.85, 'total_usd': 50.25,
+                'favorite_count': 10, 'retweet_count': 5, 'reply_count': 3, 'quote_count': 2, 'bookmark_count': 1,
+                'retweets': ['acc1'], 'quotes': [], 'created_at': '2025-11-01T10:00:00Z', 'lang': 'en'
+            },
+            {
+                'tweet_id': '456', 'author': 'user2', 'uid': 1, 'score': 0.75, 'total_usd': 50.25,
+                'favorite_count': 0, 'retweet_count': 0, 'reply_count': 0, 'quote_count': 0, 'bookmark_count': 0,
+                'retweets': [], 'quotes': [], 'created_at': '2025-11-02T11:00:00Z', 'lang': 'en'
+            },
+            {
+                'tweet_id': '789', 'author': 'user3', 'uid': 2, 'score': 1.20, 'total_usd': 200.75,
+                'favorite_count': 20, 'retweet_count': 10, 'reply_count': 5, 'quote_count': 3, 'bookmark_count': 2,
+                'retweets': ['acc1', 'acc2'], 'quotes': ['acc3'], 'created_at': '2025-11-03T12:00:00Z', 'lang': 'en'
+            },
+            {
+                'tweet_id': '101', 'author': 'user4', 'uid': 3, 'score': 0.60, 'total_usd': 50.25,
+                'favorite_count': 5, 'retweet_count': 2, 'reply_count': 1, 'quote_count': 0, 'bookmark_count': 0,
+                'retweets': ['acc2'], 'quotes': [], 'created_at': '2025-11-04T13:00:00Z', 'lang': 'und'
+            }
         ]
     }
 
@@ -101,20 +117,19 @@ def test_snapshot_data_structure(sample_snapshot_data):
     # Verify required keys
     required_keys = {'brief_id', 'pool_name', 'created_at', 'tweet_rewards'}
     assert required_keys.issubset(sample_snapshot_data.keys())
-    
-    # Verify tweet_rewards is a list
     assert isinstance(sample_snapshot_data['tweet_rewards'], list)
     
-    # Verify tweet_rewards structure
+    # Verify each tweet has required fields with correct types
+    required_tweet_fields = {
+        'tweet_id': str, 'author': str, 'uid': int, 'score': (int, float), 'total_usd': (int, float),
+        'favorite_count': int, 'retweet_count': int, 'reply_count': int, 'quote_count': int,
+        'bookmark_count': int, 'retweets': list, 'quotes': list, 'created_at': str, 'lang': str
+    }
+    
     for tweet in sample_snapshot_data['tweet_rewards']:
-        assert 'tweet_id' in tweet
-        assert 'author' in tweet
-        assert 'uid' in tweet
-        assert 'score' in tweet
-        assert 'total_usd' in tweet
-        assert isinstance(tweet['uid'], int)
-        assert isinstance(tweet['score'], (int, float))
-        assert isinstance(tweet['total_usd'], (int, float))
+        for field, expected_type in required_tweet_fields.items():
+            assert field in tweet, f"Missing field: {field}"
+            assert isinstance(tweet[field], expected_type), f"{field} has wrong type"
 
 
 def test_load_snapshot_deterministic_when_multiple_exist(sample_snapshot_data):
