@@ -27,7 +27,8 @@ from bitcast.validator.social_discovery import PoolManager
 from .social_map_loader import (
     load_latest_social_map,
     get_active_members,
-    get_considered_accounts
+    get_considered_accounts,
+    get_active_members_for_period
 )
 from .tweet_filter import TweetFilter
 from .engagement_analyzer import EngagementAnalyzer
@@ -229,7 +230,15 @@ def score_tweets_for_pool(
     bt.logging.debug("Loading social map")
     
     social_map, map_file = load_latest_social_map(pool_name)
-    active_members = get_active_members(social_map)
+    
+    # Get active members - union if brief has date range
+    active_members = get_active_members_for_period(
+        pool_name,
+        start_date,
+        end_date
+    )
+    
+    # Get considered accounts from latest map only (for current influence weights)
     considered_accounts = get_considered_accounts(
         social_map,
         pool_config.get('considered_accounts', 256)
