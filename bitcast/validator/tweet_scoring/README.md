@@ -36,6 +36,32 @@ for each quote: score += influencer_score × 3.0
 # Only top 256 accounts' engagement counts
 ```
 
+## Multi-Map Support for Long Briefs
+
+When a brief spans a social map update (maps refresh every ~2 weeks), the system ensures fairness:
+
+- **If map updated during brief**: Includes **active + relegated** members from latest map
+- **If no update during brief**: Includes only **active** members from latest map
+- **Considered Accounts (for engagement weighting)**: Always uses **latest map** only
+- **Benefit**: Relegated miners remain eligible (they were active when they posted)
+
+Example:
+```
+Brief: Nov 20 - Nov 25
+- Social Map created Nov 23 (during brief)
+
+Latest map (Nov 23):
+  Active members (in/promoted): 150 accounts
+  Relegated members: 28 accounts (were active before Nov 23)
+  
+Result:
+- Eligible members: 150 + 28 = 178 total
+- Engagement weights: From latest map (300 considered accounts)
+- @alice (relegated on Nov 23) can still earn from tweets posted Nov 20-22
+```
+
+This prevents miners from being retroactively penalized for status changes after they've already posted qualifying content.
+
 ## Usage
 
 ### Command Line
@@ -107,7 +133,8 @@ for tweet in results[:5]:
 ## Data Flow
 
 ```
-Social Map → Active Members + Considered Accounts
+Maps at brief start + during brief → Union of Active Members (who can post)
+Latest Social Map → Considered Accounts (for engagement weighting)
                       ↓
             Fetch Tweets (parallel)
                       ↓
@@ -115,7 +142,7 @@ Social Map → Active Members + Considered Accounts
                       ↓
          Analyze Engagement (RTs/QRTs)
                       ↓
-        Calculate Weighted Scores
+    Calculate Weighted Scores (using latest map weights)
                       ↓
              Save Results
 ```
