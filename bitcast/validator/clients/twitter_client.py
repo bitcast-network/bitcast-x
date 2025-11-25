@@ -73,7 +73,7 @@ class TwitterClient:
         """Make API request with retry logic for rate limits."""
         for attempt in range(self.max_retries):
             try:
-                response = requests.get(url, headers=self.headers, params=params)
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
                 
                 if response.status_code in [429, 500, 502, 503, 504]:
                     if attempt < self.max_retries - 1:
@@ -101,6 +101,12 @@ class TwitterClient:
                         continue
                     return None, "Invalid response structure"
                 
+            except requests.exceptions.Timeout:
+                if attempt < self.max_retries - 1:
+                    bt.logging.warning(f"Request timeout, retrying...")
+                    time.sleep(self.retry_delay)
+                    continue
+                return None, "Request timeout"
             except Exception as e:
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay)
@@ -204,8 +210,11 @@ class TwitterClient:
         user_info = None
         cursor = None
         api_fetch_succeeded = False
+        max_pages = 10  # Limit pagination to prevent excessive API calls
+        page_count = 0
         
-        while len(tweets) < tweet_limit:
+        while len(tweets) < tweet_limit and page_count < max_pages:
+            page_count += 1
             if cursor:
                 params["cursor"] = cursor
             
@@ -254,8 +263,10 @@ class TwitterClient:
                 if entry_id.startswith('tweet-'):
                     tweet_data = self._parse_tweet(entry, username)
                     if tweet_data:
-                        tweets.append(tweet_data)
-                        tweets_found += 1
+                        # Filter by author during pagination if validation is enabled
+                        if not validate_author or tweet_data.get('author', '').lower() == username:
+                            tweets.append(tweet_data)
+                            tweets_found += 1
                         
                         # Check cutoff only for non-pinned tweets
                         is_pinned = entry_id in pinned_entry_ids
@@ -279,8 +290,10 @@ class TwitterClient:
                     conversation_tweets = self._parse_profile_conversation(entry, username)
                     for tweet_data in conversation_tweets:
                         if tweet_data:
-                            tweets.append(tweet_data)
-                            tweets_found += 1
+                            # Filter by author during pagination if validation is enabled
+                            if not validate_author or tweet_data.get('author', '').lower() == username:
+                                tweets.append(tweet_data)
+                                tweets_found += 1
                             
                             # Check cutoff (profile-conversation entries are not pinned)
                             if tweet_data.get('created_at'):
@@ -435,11 +448,35 @@ class TwitterClient:
             quoted_user = None
             quoted_tweet_id = None
             if is_quote:
-                url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
-                match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
-                if match:
-                    quoted_user = match.group(1).lower()
-                    quoted_tweet_id = match.group(2)
+                # Check multiple sources for quoted tweet ID (Twitter API returns it in different places)
+                # 1. Direct field in legacy object (most reliable)
+                quoted_tweet_id = legacy.get('quoted_status_id_str')
+                
+                # 2. Nested object (alternative structure)
+                if not quoted_tweet_id:
+                    quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
+                    quoted_tweet_id = quoted_status_result.get('rest_id')
+                
+                # 3. Parse from permalink URL (fallback)
+                if not quoted_tweet_id:
+                    url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
+                    match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
+                    if match:
+                        quoted_user = match.group(1).lower()
+                        quoted_tweet_id = match.group(2)
+                
+                # Extract quoted user if not already found
+                if quoted_tweet_id and not quoted_user:
+                    # Try to get from quoted_status_result
+                    try:
+                        quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
+                        quoted_user = quoted_status_result['core']['user_results']['result']['legacy']['screen_name'].lower()
+                    except (KeyError, AttributeError, TypeError):
+                        # Fallback to permalink URL
+                        url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
+                        match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
+                        if match:
+                            quoted_user = match.group(1).lower()
             
             # Extract actual author from core.user_results (not the timeline owner)
             # This is crucial for detecting retweets that don't have "RT @" prefix
