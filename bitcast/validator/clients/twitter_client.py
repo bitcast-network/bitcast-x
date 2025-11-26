@@ -144,6 +144,84 @@ class TwitterClient:
         
         return validated_tweets
     
+    def _post_process_tweets(
+        self, 
+        tweets: List[Dict], 
+        username: str, 
+        validate_author: bool,
+        tweet_limit: int,
+        cutoff_date: datetime
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Apply consistent filtering, sorting, and limiting to tweets from any source.
+        
+        Processes tweets through validation, sorting, date filtering, limiting, and
+        deletion filtering to ensure consistent output regardless of whether tweets
+        came from fresh cache, stale cache, or API fetch.
+        
+        Args:
+            tweets: Raw tweet list (from cache or API)
+            username: Twitter username for author validation
+            validate_author: Whether to filter by author
+            tweet_limit: Maximum tweets to return
+            cutoff_date: Oldest tweet date to include
+        
+        Returns:
+            Tuple of (visible_tweets, all_tweets_for_cache)
+            - visible_tweets: Tweets to return (excludes deleted tweets with missing_count >= 2)
+            - all_tweets_for_cache: All tweets including deleted ones for tracking
+        """
+        all_tweets = tweets.copy()
+        
+        # 1. Validate author if requested
+        if validate_author:
+            original_count = len(all_tweets)
+            all_tweets = self._validate_tweet_authors(all_tweets, username)
+            if len(all_tweets) < original_count:
+                filtered_count = original_count - len(all_tweets)
+                bt.logging.debug(f"Filtered {filtered_count} tweets from other authors")
+        
+        # 2. Sort by date (most recent first)
+        def get_tweet_date(tweet):
+            try:
+                if tweet.get('created_at'):
+                    return datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            except ValueError:
+                return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
+        
+        all_tweets.sort(key=get_tweet_date, reverse=True)
+        
+        # 3. Apply date cutoff filter
+        tweets_before_cutoff = all_tweets
+        all_tweets = []
+        for tweet in tweets_before_cutoff:
+            if tweet.get('created_at'):
+                try:
+                    tweet_date = datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                    cutoff_with_tz = cutoff_date.replace(tzinfo=tweet_date.tzinfo)
+                    if tweet_date >= cutoff_with_tz:
+                        all_tweets.append(tweet)
+                except ValueError:
+                    all_tweets.append(tweet)  # Keep if can't parse date
+            else:
+                all_tweets.append(tweet)  # Keep if no date
+        
+        if len(all_tweets) < len(tweets_before_cutoff):
+            bt.logging.debug(f"Filtered {len(tweets_before_cutoff) - len(all_tweets)} tweets older than {cutoff_date.strftime('%Y-%m-%d')}")
+        
+        # 4. Apply tweet limit
+        if len(all_tweets) > tweet_limit:
+            bt.logging.debug(f"Limiting to {tweet_limit} tweets (had {len(all_tweets)})")
+            all_tweets = all_tweets[:tweet_limit]
+        
+        # 5. Filter deleted tweets (missing_count >= 2) for return
+        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
+        if len(visible_tweets) < len(all_tweets):
+            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} deleted tweets")
+        
+        return visible_tweets, all_tweets
+    
     def fetch_user_tweets(self, username: str, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
@@ -176,16 +254,32 @@ class TwitterClient:
             # If updated within past freshness period, use cache completely (unless force refresh enabled)
             if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
                 bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
-                cached_tweets = cached_data['tweets']
                 
-                # Apply author validation to cached data
-                if validate_author:
-                    cached_tweets = self._validate_tweet_authors(cached_tweets, username)
+                # Apply post-processing: sorting, filtering, limiting, and deletion removal
+                visible_tweets, tweets_to_cache = self._post_process_tweets(
+                    tweets=cached_data['tweets'],
+                    username=username,
+                    validate_author=validate_author,
+                    tweet_limit=tweet_limit,
+                    cutoff_date=cutoff_date
+                )
+                
+                # Update cache with post-processed tweets while preserving original timestamp
+                cache_data = {
+                    'user_info': cached_data['user_info'],
+                    'tweets': tweets_to_cache,
+                    'last_updated': last_updated  # Keep original to maintain freshness window
+                }
+                cache_user_tweets(username, cache_data)
                 
                 return {
                     'user_info': cached_data['user_info'],
-                    'tweets': cached_tweets,
-                    'cache_info': {'cache_hit': True, 'new_tweets': 0}
+                    'tweets': visible_tweets,
+                    'cache_info': {
+                        'cache_hit': True, 
+                        'new_tweets': 0,
+                        'cached_tweets': len(cached_data['tweets'])
+                    }
                 }
             
             # Cache is stale - use incremental update with lookback buffer
@@ -367,37 +461,22 @@ class TwitterClient:
                 all_tweets.append(cached_tweet)
                 cached_count += 1
             
-            # Sort by date (most recent first)
-            def get_tweet_date(tweet):
-                try:
-                    if tweet.get('created_at'):
-                        return datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                    return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
-                except ValueError:
-                    return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
-            
-            all_tweets.sort(key=get_tweet_date, reverse=True)
             bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total" + 
                            (f", {incremented_missing} missing++" if incremented_missing > 0 else ""))
         
-        # Validate author: filter to only tweets from timeline owner
-        if validate_author:
-            original_count = len(all_tweets)
-            all_tweets = self._validate_tweet_authors(all_tweets, username)
-            
-            if len(all_tweets) < original_count:
-                filtered_count = original_count - len(all_tweets)
-                bt.logging.debug(f"Filtered {filtered_count} tweets from other authors (keeping {len(all_tweets)} from @{username})")
-        
-        # Filter deleted tweets (missing_count >= 2) before returning
-        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
-        if len(visible_tweets) < len(all_tweets):
-            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} deleted tweets from @{username}")
+        # Apply post-processing: sorting, filtering, limiting, and deletion removal
+        visible_tweets, tweets_to_cache = self._post_process_tweets(
+            tweets=all_tweets,
+            username=username,
+            validate_author=validate_author,
+            tweet_limit=tweet_limit,
+            cutoff_date=cutoff_date
+        )
         
         # Cache all tweets including deleted ones
         cache_data = {
             'user_info': (cached_data.get('user_info') if cached_data else None) or user_info or {'username': username, 'followers_count': 0},
-            'tweets': all_tweets,
+            'tweets': tweets_to_cache,
             'last_updated': datetime.now()
         }
         cache_user_tweets(username, cache_data)
@@ -405,7 +484,11 @@ class TwitterClient:
         return {
             'user_info': cache_data['user_info'],
             'tweets': visible_tweets,
-            'cache_info': {'cache_hit': bool(cached_data), 'new_tweets': len(tweets), 'cached_tweets': cached_count}
+            'cache_info': {
+                'cache_hit': bool(cached_data), 
+                'new_tweets': len(tweets), 
+                'cached_tweets': cached_count
+            }
         }
     
     def _parse_tweet_result(self, tweet_result: Dict) -> Optional[Dict]:

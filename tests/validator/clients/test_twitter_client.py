@@ -189,8 +189,13 @@ class TestTwitterClient:
     @mock.patch('requests.get')
     def test_author_validation_filters_wrong_authors(self, mock_get, mock_get_cache, mock_cache):
         """Test that author validation filters out tweets from other users."""
+        from datetime import datetime, timezone
+        
         # Mock no cache
         mock_get_cache.return_value = None
+        
+        # Use recent date to pass cutoff filter (Bug #3 fix requires recent tweets)
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
         
         # Mock API response with mixed authors
         mock_response = mock.Mock()
@@ -221,7 +226,7 @@ class TestTwitterClient:
                                                                 }
                                                             },
                                                             'legacy': {
-                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'created_at': recent_date,
                                                                 'full_text': 'Tweet from testuser',
                                                                 'is_quote_status': False
                                                             }
@@ -247,7 +252,7 @@ class TestTwitterClient:
                                                                 }
                                                             },
                                                             'legacy': {
-                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'created_at': recent_date,
                                                                 'full_text': 'Reply from otheruser',
                                                                 'is_quote_status': False
                                                             }
@@ -285,8 +290,13 @@ class TestTwitterClient:
     @mock.patch('requests.get')
     def test_author_validation_disabled(self, mock_get, mock_get_cache, mock_cache):
         """Test that author validation can be disabled."""
+        from datetime import datetime, timezone
+        
         # Mock no cache
         mock_get_cache.return_value = None
+        
+        # Use recent date to pass cutoff filter (Bug #3 fix requires recent tweets)
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
         
         # Mock API response with mixed authors
         mock_response = mock.Mock()
@@ -317,7 +327,7 @@ class TestTwitterClient:
                                                                 }
                                                             },
                                                             'legacy': {
-                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'created_at': recent_date,
                                                                 'full_text': 'Tweet from testuser',
                                                                 'is_quote_status': False
                                                             }
@@ -343,7 +353,7 @@ class TestTwitterClient:
                                                                 }
                                                             },
                                                             'legacy': {
-                                                                'created_at': 'Mon Jan 01 00:00:00 +0000 2024',
+                                                                'created_at': recent_date,
                                                                 'full_text': 'Reply from otheruser',
                                                                 'is_quote_status': False
                                                             }
@@ -380,7 +390,10 @@ class TestTwitterClient:
     @mock.patch('requests.get')
     def test_author_validation_backward_compat(self, mock_get, mock_get_cache, mock_cache):
         """Test that tweets without author field get author set."""
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
+        
+        # Use recent date to pass cutoff filter (Bug #3 fix requires recent tweets)
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
         
         # Mock cached data without author field (old cache format)
         # Cache is recent enough to be used
@@ -390,7 +403,7 @@ class TestTwitterClient:
                 {
                     'tweet_id': '1',
                     'text': 'Old cached tweet',
-                    'created_at': 'Mon Jan 01 00:00:00 +0000 2024'
+                    'created_at': recent_date
                     # Note: no 'author' field
                 }
             ],
