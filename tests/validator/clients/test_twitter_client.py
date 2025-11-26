@@ -417,4 +417,364 @@ class TestTwitterClient:
         
         assert len(result['tweets']) == 1
         assert result['tweets'][0]['author'] == 'testuser'
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_dual_endpoint_fetching(self, mock_get, mock_get_cache, mock_cache):
+        """Test that dual endpoint fetching works and deduplicates correctly."""
+        from datetime import datetime, timezone
+        
+        # Mock no cache
+        mock_get_cache.return_value = None
+        
+        # Use recent date to pass cutoff filter
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
+        
+        # Mock responses from both endpoints
+        # First endpoint (/tweetsandreplies) returns tweets 1 and 2
+        mock_response_1 = mock.Mock()
+        mock_response_1.status_code = 200
+        mock_response_1.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [
+                                        {
+                                            'entryId': 'tweet-1',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '1',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'testuser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': recent_date,
+                                                                'full_text': 'Tweet from tweetsandreplies',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        {
+                                            'entryId': 'tweet-2',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '2',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'testuser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': recent_date,
+                                                                'full_text': 'Shared tweet in both endpoints',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Second endpoint (/tweets) returns tweets 2 (duplicate) and 3 (unique)
+        mock_response_2 = mock.Mock()
+        mock_response_2.status_code = 200
+        mock_response_2.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [
+                                        {
+                                            'entryId': 'tweet-2',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '2',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'testuser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': recent_date,
+                                                                'full_text': 'Shared tweet in both endpoints',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        {
+                                            'entryId': 'tweet-3',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '3',
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {
+                                                                            'screen_name': 'testuser'
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                            'legacy': {
+                                                                'created_at': recent_date,
+                                                                'full_text': 'Tweet unique to tweets endpoint',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Return different responses based on URL
+        def mock_get_side_effect(*args, **kwargs):
+            url = args[0]
+            if 'tweetsandreplies' in url:
+                return mock_response_1
+            elif 'tweets' in url:
+                return mock_response_2
+            return mock_response_1
+        
+        mock_get.side_effect = mock_get_side_effect
+        
+        client = TwitterClient(api_key="test")
+        
+        # Test dual endpoint fetching
+        with mock.patch('time.sleep'):  # Skip rate limiting delay
+            result = client.fetch_user_tweets("testuser")
+        
+        # Should have 3 unique tweets (1 from first endpoint, 2 shared, 3 from second)
+        # Deduplication should remove the duplicate tweet 2
+        assert len(result['tweets']) == 3
+        
+        # Verify all three unique tweets are present
+        tweet_ids = {tweet['tweet_id'] for tweet in result['tweets']}
+        assert tweet_ids == {'1', '2', '3'}
+        
+        # Verify both endpoints were called
+        assert mock_get.call_count == 2
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_handles_none_author_gracefully(self, mock_get, mock_get_cache, mock_cache):
+        """Test that tweets with None author don't cause crashes during validation."""
+        from datetime import datetime, timezone
+        
+        # Mock no cache
+        mock_get_cache.return_value = None
+        
+        # Use recent date to pass cutoff filter
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
+        
+        # Mock response with tweet that has no author info (None)
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [
+                                        {
+                                            'entryId': 'tweet-1',
+                                            'content': {
+                                                'itemContent': {
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '1',
+                                                            # Note: No 'core' field, so author extraction fails → author = None
+                                                            'legacy': {
+                                                                'created_at': recent_date,
+                                                                'full_text': 'Tweet with no author info',
+                                                                'is_quote_status': False
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        client = TwitterClient(api_key="test")
+        
+        # This should NOT crash with "'NoneType' object has no attribute 'lower'"
+        with mock.patch('time.sleep'):
+            result = client.fetch_user_tweets("testuser", validate_author=True)
+        
+        # With dual endpoint mode, /tweets will default author to 'testuser'
+        # So tweet should be included with defaulted author
+        assert len(result['tweets']) == 1
+        assert result['tweets'][0]['author'] == 'testuser'
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_tweets_endpoint_defaults_author_when_missing(self, mock_get, mock_get_cache, mock_cache):
+        """Test that /tweets endpoint defaults author when core field is missing."""
+        from datetime import datetime, timezone
+        
+        # Mock no cache
+        mock_get_cache.return_value = None
+        
+        # Use recent date to pass cutoff filter
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
+        
+        # Mock responses - /tweets has no core, /tweetsandreplies has core
+        tweets_response = mock.Mock()
+        tweets_response.status_code = 200
+        tweets_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [{
+                                        'entryId': 'tweet-1',
+                                        'content': {
+                                            'itemContent': {
+                                                'tweet_results': {
+                                                    'result': {
+                                                        'rest_id': '1',
+                                                        # No 'core' field - simulates /tweets endpoint structure
+                                                        'legacy': {
+                                                            'created_at': recent_date,
+                                                            'full_text': 'Tweet from /tweets endpoint',
+                                                            'is_quote_status': False
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }]
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        
+        tweetsandreplies_response = mock.Mock()
+        tweetsandreplies_response.status_code = 200
+        tweetsandreplies_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': []
+                                }]
+                            }
+                        },
+                        'legacy': {
+                            'screen_name': 'testuser',
+                            'followers_count': 100
+                        }
+                    }
+                }
+            }
+        }
+        
+        def mock_get_side_effect(*args, **kwargs):
+            url = args[0]
+            if '/user/tweets' in url and '/tweetsandreplies' not in url:
+                return tweets_response
+            else:
+                return tweetsandreplies_response
+        
+        mock_get.side_effect = mock_get_side_effect
+        
+        client = TwitterClient(api_key="test")
+        
+        with mock.patch('time.sleep'):
+            result = client.fetch_user_tweets("testuser")
+        
+        # Should have 1 tweet with author defaulted to 'testuser'
+        assert len(result['tweets']) == 1
+        assert result['tweets'][0]['author'] == 'testuser'
+        assert result['tweets'][0]['text'] == 'Tweet from /tweets endpoint'
 

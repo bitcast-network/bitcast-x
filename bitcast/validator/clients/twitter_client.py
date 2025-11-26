@@ -9,6 +9,7 @@ import time
 import re
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -222,6 +223,162 @@ class TwitterClient:
         
         return visible_tweets, all_tweets
     
+    def _fetch_from_single_endpoint(
+        self,
+        url: str,
+        username: str,
+        tweet_limit: int,
+        incremental_cutoff: datetime,
+        validate_author: bool
+    ) -> Tuple[List[Dict], Optional[Dict], bool]:
+        """
+        Fetch tweets from a single Twitter API endpoint with pagination.
+        
+        Args:
+            url: API endpoint URL
+            username: Twitter username to fetch for
+            tweet_limit: Maximum tweets to fetch
+            incremental_cutoff: Date cutoff for pagination stopping
+            validate_author: Whether to filter by author during pagination
+            
+        Returns:
+            Tuple of (tweets_list, user_info, api_succeeded)
+        """
+        params = {"username": username, "limit": "40"}
+        
+        tweets = []
+        user_info = None
+        cursor = None
+        api_fetch_succeeded = False
+        max_pages = 10  # Limit pagination to prevent excessive API calls
+        page_count = 0
+        
+        while len(tweets) < tweet_limit and page_count < max_pages:
+            page_count += 1
+            if cursor:
+                params["cursor"] = cursor
+            
+            data, error = self._make_api_request(url, params)
+            if error:
+                bt.logging.error(f"API failed for @{username} at {url.split('/')[-1]}: {error}")
+                break
+            
+            api_fetch_succeeded = True
+            
+            # Extract timeline data
+            try:
+                # Response is normalized by _make_api_request to {'data': {'user': ...}}
+                timeline = data['data']['user']['result']['timeline']['timeline']
+                instructions = timeline.get('instructions', [])
+                
+                # Collect entries and track pinned tweet IDs
+                entries = []
+                pinned_entry_ids = set()
+                for instruction in instructions:
+                    inst_type = instruction.get('type')
+                    if inst_type == 'TimelinePinEntry':
+                        entry = instruction.get('entry')
+                        if entry:
+                            entries.append(entry)
+                            pinned_entry_ids.add(entry.get('entryId', ''))
+                    elif inst_type == 'TimelineAddEntries':
+                        entries.extend(instruction.get('entries', []))
+                
+            except KeyError:
+                break
+            
+            cursor = None
+            tweets_found = 0
+            
+            for entry in entries:
+                entry_id = entry.get('entryId', '')
+                
+                # Handle cursor entries
+                if entry_id.startswith('cursor-'):
+                    if entry.get('content', {}).get('cursorType') == 'Bottom':
+                        cursor = entry.get('content', {}).get('value')
+                    continue
+                
+                # Handle regular tweet entries
+                if entry_id.startswith('tweet-'):
+                    tweet_data = self._parse_tweet(entry, username)
+                    if tweet_data:
+                        # Default author for /tweets endpoint (only returns user's tweets)
+                        if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
+                            tweet_data['author'] = username
+                        
+                        # Filter by author during pagination if validation is enabled
+                        if not validate_author or (tweet_data.get('author') or '').lower() == username:
+                            tweets.append(tweet_data)
+                            tweets_found += 1
+                        
+                        # Check cutoff only for non-pinned tweets
+                        is_pinned = entry_id in pinned_entry_ids
+                        if not is_pinned and tweet_data.get('created_at'):
+                            try:
+                                tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                                cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
+                                if tweet_date < cutoff_with_tz:
+                                    bt.logging.debug(f"Reached incremental cutoff for @{username}")
+                                    cursor = None
+                                    break
+                            except ValueError:
+                                pass
+                    
+                    # Extract user info if not yet collected
+                    if not user_info:
+                        user_info = self._extract_user_info(entry, username)
+                
+                # Handle profile-conversation entries (contains multiple tweets)
+                elif entry_id.startswith('profile-conversation-'):
+                    conversation_tweets = self._parse_profile_conversation(entry, username)
+                    for tweet_data in conversation_tweets:
+                        if tweet_data:
+                            # Default author for /tweets endpoint (only returns user's tweets)
+                            if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
+                                tweet_data['author'] = username
+                            
+                            # Filter by author during pagination if validation is enabled
+                            if not validate_author or (tweet_data.get('author') or '').lower() == username:
+                                tweets.append(tweet_data)
+                                tweets_found += 1
+                            
+                            # Check cutoff (profile-conversation entries are not pinned)
+                            if tweet_data.get('created_at'):
+                                try:
+                                    tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                                    cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
+                                    if tweet_date < cutoff_with_tz:
+                                        bt.logging.debug(f"Reached incremental cutoff for @{username}")
+                                        cursor = None
+                                        break
+                                except ValueError:
+                                    pass
+                            
+                            # Extract user info if not yet collected
+                            if not user_info and 'author' in tweet_data:
+                                # Try to extract from the tweet data in profile-conversation
+                                try:
+                                    user_info = {
+                                        'username': tweet_data['author'],
+                                        'followers_count': 0  # Not available in profile-conversation items
+                                    }
+                                except (KeyError, AttributeError):
+                                    pass
+                
+                # Check tweet limit
+                if len(tweets) >= tweet_limit:
+                    bt.logging.debug(f"Reached tweet limit ({tweet_limit}) for @{username}")
+                    cursor = None
+                    break
+            
+            if not cursor or tweets_found == 0:
+                break
+            
+            time.sleep(self.rate_limit_delay)  # Rate limiting
+        
+        return tweets, user_info, api_fetch_succeeded
+    
     def fetch_user_tweets(self, username: str, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
@@ -296,142 +453,62 @@ class TwitterClient:
         if force_refresh:
             bt.logging.info(f"Force refresh enabled for @{username} - bypassing cache")
         
-        # Fetch from API
-        url = "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies"
-        params = {"username": username, "limit": "40"}
+        # Fetch from both endpoints for complete tweet coverage
+        endpoints = [
+            "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
+            "https://twitter-v24.p.rapidapi.com/user/tweets"
+        ]
         
-        tweets = []
+        # Fetch from both endpoints in parallel for complete coverage
+        all_tweets = []
         user_info = None
-        cursor = None
         api_fetch_succeeded = False
-        max_pages = 10  # Limit pagination to prevent excessive API calls
-        page_count = 0
         
-        while len(tweets) < tweet_limit and page_count < max_pages:
-            page_count += 1
-            if cursor:
-                params["cursor"] = cursor
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+            future_to_endpoint = {
+                executor.submit(
+                    self._fetch_from_single_endpoint,
+                    url, username, tweet_limit, incremental_cutoff, validate_author
+                ): url
+                for url in endpoints
+            }
             
-            data, error = self._make_api_request(url, params)
-            if error:
-                bt.logging.error(f"API failed for @{username}: {error}")
-                break
-            
-            api_fetch_succeeded = True
-            
-            # Extract timeline data
-            try:
-                # Response is normalized by _make_api_request to {'data': {'user': ...}}
-                timeline = data['data']['user']['result']['timeline']['timeline']
-                instructions = timeline.get('instructions', [])
-                
-                # Collect entries and track pinned tweet IDs
-                entries = []
-                pinned_entry_ids = set()
-                for instruction in instructions:
-                    inst_type = instruction.get('type')
-                    if inst_type == 'TimelinePinEntry':
-                        entry = instruction.get('entry')
-                        if entry:
-                            entries.append(entry)
-                            pinned_entry_ids.add(entry.get('entryId', ''))
-                    elif inst_type == 'TimelineAddEntries':
-                        entries.extend(instruction.get('entries', []))
-                
-            except KeyError:
-                break
-            
-            cursor = None
-            tweets_found = 0
-            
-            for entry in entries:
-                entry_id = entry.get('entryId', '')
-                
-                # Handle cursor entries
-                if entry_id.startswith('cursor-'):
-                    if entry.get('content', {}).get('cursorType') == 'Bottom':
-                        cursor = entry.get('content', {}).get('value')
-                    continue
-                
-                # Handle regular tweet entries
-                if entry_id.startswith('tweet-'):
-                    tweet_data = self._parse_tweet(entry, username)
-                    if tweet_data:
-                        # Filter by author during pagination if validation is enabled
-                        if not validate_author or tweet_data.get('author', '').lower() == username:
-                            tweets.append(tweet_data)
-                            tweets_found += 1
-                        
-                        # Check cutoff only for non-pinned tweets
-                        is_pinned = entry_id in pinned_entry_ids
-                        if not is_pinned and tweet_data.get('created_at'):
-                            try:
-                                tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                                cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
-                                if tweet_date < cutoff_with_tz:
-                                    bt.logging.debug(f"Reached incremental cutoff for @{username}")
-                                    cursor = None
-                                    break
-                            except ValueError:
-                                pass
+            for future in as_completed(future_to_endpoint):
+                endpoint_url = future_to_endpoint[future]
+                try:
+                    tweets, endpoint_user_info, endpoint_success = future.result()
+                    all_tweets.extend(tweets)
                     
-                    # Extract user info if not yet collected
-                    if not user_info:
-                        user_info = self._extract_user_info(entry, username)
-                
-                # Handle profile-conversation entries (contains multiple tweets)
-                elif entry_id.startswith('profile-conversation-'):
-                    conversation_tweets = self._parse_profile_conversation(entry, username)
-                    for tweet_data in conversation_tweets:
-                        if tweet_data:
-                            # Filter by author during pagination if validation is enabled
-                            if not validate_author or tweet_data.get('author', '').lower() == username:
-                                tweets.append(tweet_data)
-                                tweets_found += 1
-                            
-                            # Check cutoff (profile-conversation entries are not pinned)
-                            if tweet_data.get('created_at'):
-                                try:
-                                    tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                                    cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
-                                    if tweet_date < cutoff_with_tz:
-                                        bt.logging.debug(f"Reached incremental cutoff for @{username}")
-                                        cursor = None
-                                        break
-                                except ValueError:
-                                    pass
-                            
-                            # Extract user info if not yet collected
-                            if not user_info and 'author' in tweet_data:
-                                # Try to extract from the tweet data in profile-conversation
-                                try:
-                                    user_info = {
-                                        'username': tweet_data['author'],
-                                        'followers_count': 0  # Not available in profile-conversation items
-                                    }
-                                except (KeyError, AttributeError):
-                                    pass
-                
-                # Check tweet limit
-                if len(tweets) >= tweet_limit:
-                    bt.logging.info(f"Reached tweet limit ({tweet_limit}) for @{username}")
-                    cursor = None
-                    break
-            
-            if not cursor or tweets_found == 0:
-                break
-            
-            time.sleep(self.rate_limit_delay)  # Rate limiting
+                    # Use user_info from first successful endpoint
+                    if endpoint_user_info and not user_info:
+                        user_info = endpoint_user_info
+                    
+                    # Track if any endpoint succeeded
+                    if endpoint_success:
+                        api_fetch_succeeded = True
+                        
+                    bt.logging.debug(f"Fetched {len(tweets)} tweets from {endpoint_url.split('/')[-1]}")
+                except Exception as e:
+                    bt.logging.warning(f"Failed to fetch from {endpoint_url}: {e}")
+                    # Continue with other endpoints
         
-        # Deduplicate by tweet_id (pinned tweets appear on every page)
-        unique_map = {t['tweet_id']: t for t in tweets if t.get('tweet_id')}
+        # Deduplicate by tweet_id (handles overlap between endpoints and pinned tweets)
+        unique_map = {t['tweet_id']: t for t in all_tweets if t.get('tweet_id')}
         tweets = list(unique_map.values())
+        
+        # Log deduplication metrics for dual endpoint mode
+        if len(endpoints) > 1:
+            overlap_count = len(all_tweets) - len(tweets)
+            bt.logging.info(
+                f"Fetched {len(all_tweets)} total tweets from {len(endpoints)} endpoints for @{username}, "
+                f"{len(tweets)} unique ({overlap_count} duplicates removed)"
+            )
+        else:
+            bt.logging.info(f"Fetched {len(tweets)} tweets for @{username}")
         
         # Reset missing counter for newly fetched tweets
         for tweet in tweets:
             tweet['missing_count'] = 0
-        
-        bt.logging.info(f"Fetched {len(tweets)} new tweets for @{username}")
         
         # Smart merge: combine new tweets with cached tweets, track deleted tweets
         all_tweets = tweets.copy()
