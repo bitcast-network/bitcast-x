@@ -26,6 +26,7 @@ from bitcast.validator.utils.config import (
     EMISSIONS_PERIOD, TWEETS_SUBMIT_ENDPOINT, ENABLE_DATA_PUBLISH,
     NOCODE_UID, SIMULATE_CONNECTIONS, REWARD_SMOOTHING_EXPONENT
 )
+from bitcast.validator.utils.date_utils import parse_brief_date
 from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price
 from bitcast.validator.reward_engine.utils import (
     publish_brief_tweets,
@@ -71,8 +72,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             qrt = brief.get('qrt')
             
             # Parse brief dates
-            start_date = self._parse_brief_date(brief.get('start_date'))
-            end_date = self._parse_brief_date(brief.get('end_date'))
+            start_date = parse_brief_date(brief.get('start_date'))
+            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
             
             try:
                 # Step 1: Score tweets (always fresh)
@@ -185,8 +186,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             budget = brief.get('budget', 0)
             
             # Parse brief dates
-            start_date = self._parse_brief_date(brief.get('start_date'))
-            end_date = self._parse_brief_date(brief.get('end_date'))
+            start_date = parse_brief_date(brief.get('start_date'))
+            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
             
             bt.logging.info(f"📝 Brief {brief_id}: pool={pool_name}, budget=${budget}")
             
@@ -389,30 +390,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
         
         bt.logging.info(f"🎯 Twitter evaluation complete: {len(collection.results)} UIDs evaluated")
         return collection
-    
-    def _parse_brief_date(self, date_str: Optional[str]) -> Optional[datetime]:
-        """
-        Parse date string from brief to timezone-aware UTC datetime.
-        
-        Args:
-            date_str: Date string in format 'YYYY-MM-DD' or ISO format
-            
-        Returns:
-            Timezone-aware datetime in UTC, or None if date_str is None/empty
-        """
-        if not date_str:
-            return None
-        
-        try:
-            if 'T' in date_str:
-                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                return dt.astimezone(timezone.utc)
-            # Assume UTC for simple date format
-            dt = datetime.strptime(date_str, '%Y-%m-%d')
-            return dt.replace(tzinfo=timezone.utc)
-        except (ValueError, AttributeError) as e:
-            bt.logging.warning(f"Failed to parse date '{date_str}': {e}")
-            return None
     
     def _score_tweets_for_brief(
         self,

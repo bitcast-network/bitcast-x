@@ -22,6 +22,7 @@ from bitcast.validator.utils.config import (
     SOCIAL_DISCOVERY_MAX_WORKERS
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher
+from bitcast.validator.utils.date_utils import parse_brief_date
 from bitcast.validator.social_discovery import PoolManager
 
 from .social_map_loader import (
@@ -518,27 +519,8 @@ if __name__ == "__main__":
                        f"tag={tag or 'none'}, qrt={qrt or 'none'}")
         
         # Parse dates from brief
-        start_date_str = brief_data.get('start_date')
-        if start_date_str:
-            try:
-                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
-                start_date = start_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-                start_date = start_date.replace(tzinfo=timezone.utc)
-        else:
-            start_date = None
-        
-        end_date_str = brief_data.get('end_date')
-        if end_date_str:
-            try:
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
-                end_date = end_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-                end_date = end_date.replace(tzinfo=timezone.utc)
-        else:
-            end_date = None
+        start_date = parse_brief_date(brief_data.get('start_date'))
+        end_date = parse_brief_date(brief_data.get('end_date'), end_of_day=True)
         
         # Generate run_id for CLI execution
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

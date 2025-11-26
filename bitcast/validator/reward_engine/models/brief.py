@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from bitcast.validator.utils.date_utils import parse_brief_date
+
 
 @dataclass
 class Brief:
@@ -64,21 +66,11 @@ class Brief:
         # Parse datetime strings to timezone-aware UTC
         start_date = data.get('start_date')
         if isinstance(start_date, str):
-            try:
-                start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                start_date = start_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                start_date = datetime.strptime(start_date, '%Y-%m-%d')
-                start_date = start_date.replace(tzinfo=timezone.utc)
+            start_date = parse_brief_date(start_date)
         
         end_date = data.get('end_date')
         if isinstance(end_date, str):
-            try:
-                end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                end_date = end_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
-                end_date = end_date.replace(tzinfo=timezone.utc)
+            end_date = parse_brief_date(end_date, end_of_day=True)
         
         return cls(
             id=data['id'],
