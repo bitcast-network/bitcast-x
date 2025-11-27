@@ -29,8 +29,8 @@ if __name__ == "__main__":
 
 # Now import custom modules that use bt.logging
 from bitcast.validator.clients.twitter_client import TwitterClient
+from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 from .pool_manager import PoolManager
-from .pool_status_manager import PoolStatusManager
 from .social_map_publisher import publish_social_map, republish_latest_social_map
 from bitcast.validator.utils.config import (
     PAGERANK_MENTION_WEIGHT,
@@ -363,7 +363,6 @@ def discover_social_network(
         pool_dir = social_maps_dir / pool_name
         
         seed_accounts = []
-        previous_status = None
         
         if pool_dir.exists():
             # Look for existing social map files
@@ -372,23 +371,28 @@ def discover_social_network(
                               and not f.name.endswith('_metadata.json')
                               and not f.name.startswith('recursive_summary_')]
             if social_map_files:
-                # Use latest social map accounts
-                latest_file = max(social_map_files, key=lambda f: f.stat().st_mtime)
+                # Use latest social map by filename timestamp
+                latest_file = max(
+                    social_map_files,
+                    key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
+                )
                 with open(latest_file, 'r') as f:
                     existing_data = json.load(f)
                 
-                # Extract seed accounts (only active members: "in" or "promoted")
-                # and previous status
-                seed_accounts = [
-                    acc for acc, data in existing_data['accounts'].items()
-                    if data['status'] in ['in', 'promoted']
-                ]
-                previous_status = {
-                    acc: data['status'] 
-                    for acc, data in existing_data['accounts'].items()
-                }
+                # Extract top accounts by score as seeds
+                max_seed_accounts = pool_config.get('max_seed_accounts', 150)
                 
-                bt.logging.info(f"Using {len(seed_accounts)} existing accounts as seeds")
+                # Get all accounts sorted by score
+                all_accounts = [
+                    (acc, data.get('score', 0.0))
+                    for acc, data in existing_data['accounts'].items()
+                ]
+                
+                # Sort by score descending and take top N
+                all_accounts.sort(key=lambda x: x[1], reverse=True)
+                seed_accounts = [acc for acc, _ in all_accounts[:max_seed_accounts]]
+                
+                bt.logging.info(f"Using top {len(seed_accounts)} accounts (max: {max_seed_accounts}) from previous run as seeds")
         
         if not seed_accounts:
             seed_accounts = pool_config['initial_accounts']
@@ -403,23 +407,6 @@ def discover_social_network(
             lang=pool_config.get('lang')
         )
         
-        # Apply pool management logic
-        status_manager = PoolStatusManager()
-        status_map = status_manager.calculate_pool_membership(
-            scores=scores,
-            adjacency_matrix=adjacency_matrix,
-            usernames=usernames,
-            pool_config=pool_config,
-            previous_status=previous_status
-        )
-        
-        # Count status types for metadata
-        status_counts = {'in': 0, 'out': 0, 'promoted': 0, 'relegated': 0}
-        for status in status_map.values():
-            status_counts[status] = status_counts.get(status, 0) + 1
-        
-        active_members = status_counts['in'] + status_counts['promoted']
-        
         # Create social map data structure
         # Sort accounts by score in descending order
         sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -428,15 +415,11 @@ def discover_social_network(
             'metadata': {
                 'created_at': datetime.now().isoformat(),
                 'pool_name': pool_name,
-                'total_accounts': len(scores),
-                'active_members': active_members,
-                'promoted_count': status_counts['promoted'],
-                'relegated_count': status_counts['relegated']
+                'total_accounts': len(scores)
             },
             'accounts': {
                 username: {
-                    'score': score,
-                    'status': status_map[username]
+                    'score': score
                 }
                 for username, score in sorted_accounts
             }
@@ -571,8 +554,13 @@ def run_discovery_for_stale_pools() -> Dict[str, str]:
             if not social_map_files:
                 needs_update = True
             else:
-                latest_file = max(social_map_files, key=lambda f: f.stat().st_mtime)
-                latest_date = datetime.fromtimestamp(latest_file.stat().st_mtime, tz=timezone.utc).date()
+                # Parse timestamp from filename
+                latest_file = max(
+                    social_map_files,
+                    key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
+                )
+                latest_timestamp = parse_social_map_filename(latest_file.name)
+                latest_date = latest_timestamp.date() if latest_timestamp else datetime.min.date()
                 needs_update = (latest_date < today)
         
         # Only run if needed

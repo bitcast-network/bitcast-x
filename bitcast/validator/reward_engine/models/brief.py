@@ -26,6 +26,8 @@ class Brief:
     prompt_version: int = 1
     boost: float = 1.0
     max_tweets: Optional[int] = None
+    max_members: Optional[int] = None
+    max_considered: Optional[int] = None
     
     def __post_init__(self):
         """Validation after initialization."""
@@ -83,7 +85,9 @@ class Brief:
             qrt=data.get('qrt'),
             prompt_version=int(data.get('prompt_version', 1)),
             boost=float(data.get('boost', 1.0)),
-            max_tweets=data.get('max_tweets')
+            max_tweets=data.get('max_tweets'),
+            max_members=data.get('max_members'),
+            max_considered=data.get('max_considered')
         )
     
     def to_dict(self) -> dict:
@@ -99,6 +103,8 @@ class Brief:
             'qrt': self.qrt,
             'prompt_version': self.prompt_version,
             'boost': self.boost,
-            'max_tweets': self.max_tweets
+            'max_tweets': self.max_tweets,
+            'max_members': self.max_members,
+            'max_considered': self.max_considered
         }
 

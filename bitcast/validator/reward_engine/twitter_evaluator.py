@@ -75,6 +75,10 @@ class TwitterEvaluator(ScanBasedEvaluator):
             start_date = parse_brief_date(brief.get('start_date'))
             end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
             
+            # Extract brief-level configuration
+            brief_max_members = brief.get('max_members')
+            brief_considered = brief.get('max_considered')
+            
             try:
                 # Step 1: Score tweets (always fresh)
                 scored_tweets = self._score_tweets_for_brief(
@@ -85,7 +89,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     qrt=qrt,
                     run_id=run_id,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    max_members=brief_max_members,
+                    considered_accounts=brief_considered
                 )
                 
                 if not scored_tweets:
@@ -238,6 +244,10 @@ class TwitterEvaluator(ScanBasedEvaluator):
             
             # First emission run: score, filter, calculate, and save snapshot
             try:
+                # Extract brief-level configuration
+                brief_max_members = brief.get('max_members')
+                brief_considered = brief.get('max_considered')
+                
                 # Step 1: Score tweets
                 scored_tweets = self._score_tweets_for_brief(
                     pool_name=pool_name,
@@ -247,7 +257,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     qrt=qrt,
                     run_id=run_id,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    max_members=brief_max_members,
+                    considered_accounts=brief_considered
                 )
                 
                 if not scored_tweets:
@@ -400,7 +412,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
         qrt: Optional[str],
         run_id: Optional[str],
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        max_members: Optional[int] = None,
+        considered_accounts: Optional[int] = None
     ) -> List[Dict]:
         """
         Score tweets using tweet_scoring module.
@@ -417,6 +431,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             run_id: Run identifier
             start_date: Brief start date (inclusive)
             end_date: Brief end date (inclusive)
+            max_members: Optional brief-level max members limit
+            considered_accounts: Optional brief-level considered accounts limit
         
         Returns:
             List of dicts with keys: author, tweet_id, score
@@ -431,7 +447,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 tag=tag,
                 qrt=qrt,
                 start_date=start_date,
-                end_date=end_date
+                end_date=end_date,
+                max_members=max_members,
+                considered_accounts_limit=considered_accounts
             )
             
             # Files are saved by score_tweets_for_pool() for audit purposes

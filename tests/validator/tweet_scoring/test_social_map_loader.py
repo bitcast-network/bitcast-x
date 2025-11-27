@@ -12,7 +12,26 @@ from bitcast.validator.tweet_scoring.social_map_loader import (
 
 @pytest.fixture
 def sample_social_map():
-    """Sample social map data for testing."""
+    """Sample social map data."""
+    return {
+        'metadata': {
+            'created_at': '2025-11-27T12:00:00',
+            'pool_name': 'test',
+            'total_accounts': 5
+        },
+        'accounts': {
+            'user1': {'score': 0.30},
+            'user2': {'score': 0.25},
+            'user3': {'score': 0.20},
+            'user4': {'score': 0.15},
+            'user5': {'score': 0.10}
+        }
+    }
+
+
+@pytest.fixture
+def sample_social_map_with_status():
+    """Sample social map with legacy status field (ignored)."""
     return {
         'metadata': {
             'created_at': '2025-10-30T12:00:00',
@@ -32,15 +51,30 @@ def sample_social_map():
 class TestGetActiveMembers:
     """Test get_active_members function."""
     
-    def test_extracts_in_and_promoted(self, sample_social_map):
-        """Should extract only 'in' and 'promoted' members."""
+    def test_extracts_all_accounts(self, sample_social_map):
+        """Should extract all accounts sorted by score."""
         active = get_active_members(sample_social_map)
-        assert set(active) == {'user1', 'user2', 'user3'}
+        assert set(active) == {'user1', 'user2', 'user3', 'user4', 'user5'}
     
-    def test_returns_sorted_list(self, sample_social_map):
-        """Should return alphabetically sorted list."""
+    def test_ignores_status_field(self, sample_social_map_with_status):
+        """Should extract all accounts even if status field present (ignored)."""
+        active = get_active_members(sample_social_map_with_status)
+        # All 5 accounts returned, status field is ignored
+        assert set(active) == {'user1', 'user2', 'user3', 'user4', 'user5'}
+    
+    def test_returns_score_sorted_list(self, sample_social_map):
+        """Should return list sorted by score (highest first)."""
         active = get_active_members(sample_social_map)
-        assert active == sorted(active)
+        # user1 has highest score (0.30), user5 has lowest (0.10)
+        assert active[0] == 'user1'
+        assert active[-1] == 'user5'
+    
+    def test_respects_limit(self, sample_social_map):
+        """Should respect limit parameter."""
+        active = get_active_members(sample_social_map, limit=2)
+        assert len(active) == 2
+        assert 'user1' in active  # Highest score
+        assert 'user2' in active  # Second highest
     
     def test_empty_accounts(self):
         """Should handle empty accounts dict."""
@@ -82,12 +116,13 @@ class TestGetConsideredAccounts:
         considered = get_considered_accounts(sample_social_map, limit=0)
         assert considered == []
     
-    def test_includes_all_statuses(self, sample_social_map):
-        """Should include accounts regardless of status."""
+    def test_includes_all_accounts(self, sample_social_map):
+        """Should include all accounts when limit is high enough."""
         considered = get_considered_accounts(sample_social_map, limit=5)
         usernames = {username for username, _ in considered}
-        assert 'user4' in usernames  # 'out' status
-        assert 'user5' in usernames  # 'relegated' status
+        assert len(usernames) == 5
+        assert 'user4' in usernames
+        assert 'user5' in usernames
 
 
 class TestLoadLatestSocialMap:

@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import uvicorn
 
 from bitcast.validator.utils.config import WALLET_NAME, HOTKEY_NAME, MECHID
+from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 import os
 
 
@@ -94,8 +95,11 @@ def load_latest_social_map(pool_name: str) -> Dict:
             f"Run social discovery to generate maps."
         )
     
-    # Get latest file by modification time
-    latest_file = max(social_map_files, key=lambda f: f.stat().st_mtime)
+    # Get latest file by filename timestamp
+    latest_file = max(
+        social_map_files,
+        key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
+    )
     
     # Load and validate
     try:

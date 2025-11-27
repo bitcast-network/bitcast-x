@@ -26,7 +26,7 @@ Bitcast X is a Bittensor subnet that incentivizes X content creators to connect 
 
 **No code required!** There are two ways to mine on Bitcast X:
 
-> **Eligibility:** Only the top 150 Bittensor X accounts are eligible to mine. Visit [x.bitcast.network](https://x.bitcast.network/) to check if your account is eligible.
+> **Eligibility:** Eligibility is determined per campaign brief. Some briefs may target all accounts in the social network, while others may limit eligibility to top-ranked accounts. Visit [x.bitcast.network](https://x.bitcast.network/) to check your eligibility for active campaigns.
 
 #### Option 1: Managed Mining
 
@@ -81,8 +81,7 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
   - Retweets: 1.0x
   - Mentions: 2.0x
   - Quote tweets: 3.0x
-- **Dynamic Membership**: Accounts are promoted/relegated between pools based on their influence scores
-- **Top 300 Focus**: Engagement from the top 300 most influential accounts are considered when calculating influence scores
+- **Comprehensive Rankings**: All discovered accounts are ranked by their PageRank influence scores
 
 ### 3. Account Connection
 
@@ -94,7 +93,7 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 
 ### 4. Tweet Scoring
 
-- **Engagement Analysis**: Tracks retweets and quote tweets from top 300 influential accounts over the past 30 days
+- **Engagement Analysis**: Tracks retweets and quote tweets from the most influential accounts (configurable per pool, typically 300+) over the past 30 days
 - **Weighted Scoring**:
   - `score = (author_influence × 2) + Σ(influencer_score × engagement_weight)`
   - Retweet contribution: `influence_score × 1.0`

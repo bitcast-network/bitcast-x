@@ -365,6 +365,10 @@ class TwitterClient:
                                     }
                                 except (KeyError, AttributeError):
                                     pass
+                    
+                    # If cutoff was reached, cursor will be None - stop processing more entries
+                    if cursor is None:
+                        break
                 
                 # Check tweet limit
                 if len(tweets) >= tweet_limit:

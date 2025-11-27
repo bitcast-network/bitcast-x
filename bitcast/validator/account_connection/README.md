@@ -8,7 +8,7 @@ Monitors tweets from social discovery pools for special connection tags that lin
 - `bitcast-hk:{substrate_hotkey}` - Direct hotkey connection
 - `bitcast-x` - No-code mining platform connection
 
-By default, only scans accounts with status 'in' or 'promoted' in the social map. Use `--scan-all-accounts` to scan all accounts regardless of status.
+Scans all accounts from the social map, sorted by influence score. Eligibility filtering is handled at the brief level.
 
 ## Automatic Connection Download
 

@@ -143,7 +143,9 @@ def score_tweets_for_pool(
     qrt: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    force_cache_refresh: Optional[bool] = None
+    force_cache_refresh: Optional[bool] = None,
+    max_members: Optional[int] = None,
+    considered_accounts_limit: Optional[int] = None
 ) -> List[Dict]:
     """
     Score tweets for a pool based on RT/QRT engagement.
@@ -209,8 +211,9 @@ def score_tweets_for_pool(
     if not pool_config:
         raise ValueError(f"Pool '{pool_name}' not found in configuration")
     
-    bt.logging.debug(f"Pool config: lang={pool_config.get('lang', 'any')}, max_members={pool_config['max_members']}, "
-                    f"considered_accounts={pool_config.get('considered_accounts', 256)}")
+    bt.logging.debug(f"Pool config: lang={pool_config.get('lang', 'any')}, "
+                    f"max_seed_accounts={pool_config.get('max_seed_accounts', 150)}, "
+                    f"min_interaction_weight={pool_config.get('min_interaction_weight', 0)}")
     
     # Set up date filtering (all dates in UTC)
     if start_date and end_date:
@@ -226,18 +229,45 @@ def score_tweets_for_pool(
     if tag or qrt:
         bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}")
     
-    # Step 2: Load latest social map
+    # Step 2: Load social map(s) and determine active members
     bt.logging.debug("Loading social map")
     
-    social_map, map_file = load_latest_social_map(pool_name)
-    active_members = get_active_members(social_map)
+    # If brief has dates and max_members, check for multi-map scenario
+    # (brief may span social map refresh which happens every 2 weeks)
+    if start_date and end_date and max_members:
+        # Load all maps that were active during brief window and merge top N
+        from .social_map_loader import get_active_members_for_brief
+        active_members = get_active_members_for_brief(
+            pool_name=pool_name,
+            start_date=start_date,
+            end_date=end_date,
+            max_members=max_members
+        )
+        # Load latest map for considered accounts and metadata
+        social_map, map_file = load_latest_social_map(pool_name)
+    else:
+        # Simple case: single latest map
+        social_map, map_file = load_latest_social_map(pool_name)
+        active_members = get_active_members(social_map, limit=max_members)
+    
+    # Determine considered accounts limit with fallback:
+    # 1. Brief-level config (if provided)
+    # 2. Default (300)
+    DEFAULT_CONSIDERED = 300
+    considered_limit = considered_accounts_limit or DEFAULT_CONSIDERED
+    
     considered_accounts = get_considered_accounts(
         social_map,
-        pool_config.get('considered_accounts', 256)
+        considered_limit
     )
     
     bt.logging.debug(f"Social map: {map_file}")
-    bt.logging.info(f"  → {len(active_members)} active members, {len(considered_accounts)} considered accounts")
+    bt.logging.info(
+        f"  → {len(active_members)} active members"
+        f"{' (limited by brief: ' + str(max_members) + ')' if max_members else ''}, "
+        f"{len(considered_accounts)} considered accounts "
+        f"(limit: {considered_limit})"
+    )
     
     # Filter to only connected accounts if provided
     if connected_accounts:
@@ -420,7 +450,11 @@ def score_tweets_for_pool(
         'total_tweets_scored': len(scored_tweets),
         'tweets_with_engagement': tweets_with_engagement,
         'active_members_count': len(active_members),
+        'max_members_limit': max_members,
+        'max_members_source': 'brief' if max_members else 'default',
         'considered_accounts_count': len(considered_accounts),
+        'considered_accounts_limit': considered_limit,
+        'considered_accounts_source': 'brief' if considered_accounts_limit else 'default',
         'pool_language': pool_config.get('lang'),
         'social_map_file': map_file,
         'weights': {

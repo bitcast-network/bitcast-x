@@ -32,8 +32,7 @@ class PoolManager:
                 pools[name] = {
                     'keywords': [kw.lower() for kw in pool_data.get('keywords', [])],
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
-                    'max_members': pool_data.get('max_members', 64),  # Default to 64 if not specified
-                    'considered_accounts': pool_data.get('considered_accounts', 256),  # Default to 256 if not specified
+                    'max_seed_accounts': pool_data.get('max_seed_accounts', 150),  # Default to 150 for seed selection
                     'min_interaction_weight': pool_data.get('min_interaction_weight', 0),  # Default to 0 (no filtering)
                     'lang': pool_data.get('lang')  # Optional language filter (None if not specified)
                 }

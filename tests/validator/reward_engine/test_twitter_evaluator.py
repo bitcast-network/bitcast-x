@@ -238,7 +238,7 @@ class TestTwitterEvaluator:
         ]
         
         # Mock scoring to fail for first brief, succeed for second
-        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date):
+        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date, max_members=None, considered_accounts=None):
             if brief_id == 'error_brief':
                 raise ValueError("Scoring failed")
             return [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5}]
