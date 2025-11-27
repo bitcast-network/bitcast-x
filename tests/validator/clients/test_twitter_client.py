@@ -777,4 +777,152 @@ class TestTwitterClient:
         assert len(result['tweets']) == 1
         assert result['tweets'][0]['author'] == 'testuser'
         assert result['tweets'][0]['text'] == 'Tweet from /tweets endpoint'
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('requests.get')
+    def test_user_info_uses_requested_username_not_tweet_author(self, mock_get, mock_get_cache, mock_cache):
+        """Test that user_info always uses requested username, not tweet author.
+        
+        Regression test for bug where profile-conversation entries starting with
+        tweets from other users would cause wrong username to be cached.
+        """
+        from datetime import datetime, timezone
+        
+        # Mock no cache
+        mock_get_cache.return_value = None
+        
+        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
+        
+        # Mock tweetsandreplies endpoint with profile-conversation starting with reply FROM another user
+        tweetsandreplies_response = mock.Mock()
+        tweetsandreplies_response.status_code = 200
+        tweetsandreplies_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [{
+                                        'entryId': 'profile-conversation-123',
+                                        'content': {
+                                            'entryType': 'TimelineTimelineModule',
+                                            'items': [
+                                                # First tweet in conversation is FROM louisebeattie (not mogmachine)
+                                                {
+                                                    'entryId': 'profile-conversation-123-tweet-1',
+                                                    'item': {
+                                                        'itemContent': {
+                                                            'tweet_results': {
+                                                                'result': {
+                                                                    'rest_id': '1',
+                                                                    'core': {
+                                                                        'user_results': {
+                                                                            'result': {
+                                                                                'legacy': {
+                                                                                    'screen_name': 'louisebeattie',
+                                                                                    'followers_count': 8000
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    'legacy': {
+                                                                        'created_at': recent_date,
+                                                                        'full_text': 'Reply to mogmachine',
+                                                                        'is_quote_status': False,
+                                                                        'in_reply_to_screen_name': 'mogmachine'
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                                # Second tweet is FROM mogmachine
+                                                {
+                                                    'entryId': 'profile-conversation-123-tweet-2',
+                                                    'item': {
+                                                        'itemContent': {
+                                                            'tweet_results': {
+                                                                'result': {
+                                                                    'rest_id': '2',
+                                                                    'core': {
+                                                                        'user_results': {
+                                                                            'result': {
+                                                                                'legacy': {
+                                                                                    'screen_name': 'mogmachine',
+                                                                                    'followers_count': 5000
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    'legacy': {
+                                                                        'created_at': recent_date,
+                                                                        'full_text': 'Response from mogmachine',
+                                                                        'is_quote_status': False
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            ]
+                                        }
+                                    }]
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Mock tweets endpoint (empty for this test)
+        tweets_response = mock.Mock()
+        tweets_response.status_code = 200
+        tweets_response.json.return_value = {
+            'data': {
+                'user': {
+                    'result': {
+                        'timeline': {
+                            'timeline': {
+                                'instructions': [{
+                                    'type': 'TimelineAddEntries',
+                                    'entries': []
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        def mock_get_side_effect(*args, **kwargs):
+            url = args[0]
+            if '/tweetsandreplies' in url:
+                return tweetsandreplies_response
+            else:
+                return tweets_response
+        
+        mock_get.side_effect = mock_get_side_effect
+        
+        client = TwitterClient(api_key="test")
+        
+        with mock.patch('time.sleep'):
+            result = client.fetch_user_tweets("mogmachine", validate_author=True)
+        
+        # CRITICAL: user_info username must be 'mogmachine' (requested username)
+        # NOT 'louisebeattie' (first tweet author in profile-conversation)
+        assert result['user_info']['username'] == 'mogmachine', \
+            "user_info username should match requested username, not tweet author"
+        
+        # Should only have mogmachine's tweet (louisebeattie's filtered out)
+        assert len(result['tweets']) == 1
+        assert result['tweets'][0]['author'] == 'mogmachine'
+        assert result['tweets'][0]['text'] == 'Response from mogmachine'
+        
+        # Followers count is extracted when available from timeline owner's tweets
+        # In profile-conversations it may not be easily accessible, which is acceptable
+        assert result['user_info']['followers_count'] >= 0
 

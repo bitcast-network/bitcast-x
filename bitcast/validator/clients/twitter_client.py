@@ -247,7 +247,12 @@ class TwitterClient:
         params = {"username": username, "limit": "40"}
         
         tweets = []
-        user_info = None
+        # Initialize user_info with requested username (guaranteed correct)
+        # Followers count will be extracted from timeline owner's tweets if available
+        user_info = {
+            'username': username.lower(),
+            'followers_count': 0
+        }
         cursor = None
         api_fetch_succeeded = False
         max_pages = 10  # Limit pagination to prevent excessive API calls
@@ -325,9 +330,11 @@ class TwitterClient:
                             except ValueError:
                                 pass
                     
-                    # Extract user info if not yet collected
-                    if not user_info:
-                        user_info = self._extract_user_info(entry, username)
+                    # Extract followers count if not yet collected and tweet is from timeline owner
+                    if user_info['followers_count'] == 0 and tweet_data.get('author', '').lower() == username:
+                        followers = self._extract_followers_count(entry)
+                        if followers:
+                            user_info['followers_count'] = followers
                 
                 # Handle profile-conversation entries (contains multiple tweets)
                 elif entry_id.startswith('profile-conversation-'):
@@ -353,17 +360,6 @@ class TwitterClient:
                                         cursor = None
                                         break
                                 except ValueError:
-                                    pass
-                            
-                            # Extract user info if not yet collected
-                            if not user_info and 'author' in tweet_data:
-                                # Try to extract from the tweet data in profile-conversation
-                                try:
-                                    user_info = {
-                                        'username': tweet_data['author'],
-                                        'followers_count': 0  # Not available in profile-conversation items
-                                    }
-                                except (KeyError, AttributeError):
                                     pass
                     
                     # If cutoff was reached, cursor will be None - stop processing more entries
@@ -680,14 +676,18 @@ class TwitterClient:
         except (KeyError, AttributeError):
             return None
     
-    def _extract_user_info(self, entry: Dict, username: str) -> Optional[Dict]:
-        """Extract user info from tweet entry."""
+    def _extract_followers_count(self, entry: Dict) -> Optional[int]:
+        """Extract followers count from tweet entry.
+        
+        Args:
+            entry: Tweet entry from API response
+            
+        Returns:
+            Followers count if available, None otherwise
+        """
         try:
             user_data = entry['content']['itemContent']['tweet_results']['result']['core']['user_results']['result']['legacy']
-            return {
-                'username': user_data.get('screen_name', username).lower(),
-                'followers_count': user_data.get('followers_count', 0)
-            }
+            return user_data.get('followers_count', 0)
         except (KeyError, AttributeError):
             return None
     
