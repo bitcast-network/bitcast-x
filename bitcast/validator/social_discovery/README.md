@@ -117,11 +117,20 @@ Loads pool configurations from `pools_config.json`:
       "initial_accounts": ["opentensor"],
       "max_members": 64,
       "min_interaction_weight": 0,
+      "min_tweets": 1,
       "lang": "en"
     }
   ]
 }
 ```
+
+**Configuration Fields:**
+- `keywords`: Keywords to identify relevant accounts (hashtags, tickers, terms)
+- `initial_accounts`: Seed accounts to start discovery
+- `max_seed_accounts`: Maximum accounts to use as seeds in recursive discovery (default: 150)
+- `min_interaction_weight`: Minimum interaction weight threshold for quality filtering (default: 0)
+- `min_tweets`: Minimum number of tweets containing keywords for account relevance (default: 1)
+- `lang`: Optional language filter (e.g., 'en', 'zh')
 
 ### Network Discovery
 
@@ -322,6 +331,7 @@ ValueError: No interactions found in network
   "initial_accounts": ["user1", "user2"],
   "max_members": 64,
   "min_interaction_weight": 0,
+  "min_tweets": 1,
   "lang": "en"
 }
 ```

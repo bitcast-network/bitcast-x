@@ -289,7 +289,7 @@ def score_tweets_for_pool(
     # Step 3: Fetch tweets from connected active members
     bt.logging.debug("Fetching tweets from active members")
     
-    twitter_client = TwitterClient(force_cache_refresh=force_cache_refresh)
+    twitter_client = TwitterClient(force_cache_refresh=force_cache_refresh, posts_only=False)
     member_tweets = []
     failed_members = []
     

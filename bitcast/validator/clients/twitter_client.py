@@ -40,7 +40,8 @@ class TwitterClient:
     
     def __init__(self, api_key: Optional[str] = None, 
                  max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
-                 lookback_hours: int = 96, force_cache_refresh: Optional[bool] = None):
+                 lookback_hours: int = 96, force_cache_refresh: Optional[bool] = None,
+                 posts_only: bool = True):
         """Initialize client with API key and configuration options.
         
         Args:
@@ -50,6 +51,8 @@ class TwitterClient:
             rate_limit_delay: Delay in seconds between API calls (default: 1.0)
             lookback_hours: Hours to look back when updating stale cache (default: 96)
             force_cache_refresh: If True, always refresh cache (ignores freshness check)
+            posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
+                       If False, use both /user/tweets and /user/tweetsandreplies
         """
         self.api_key = api_key or RAPID_API_KEY
         if not self.api_key:
@@ -61,6 +64,7 @@ class TwitterClient:
         self.rate_limit_delay = rate_limit_delay
         self.lookback_hours = lookback_hours
         self.force_cache_refresh = force_cache_refresh if force_cache_refresh is not None else FORCE_CACHE_REFRESH
+        self.posts_only = posts_only
         
         self.headers = {
             "x-rapidapi-key": self.api_key,
@@ -68,7 +72,8 @@ class TwitterClient:
         }
         
         cache_mode = "forced refresh mode" if self.force_cache_refresh else f"with {TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness check"
-        bt.logging.info(f"TwitterClient initialized with centralized cache ({cache_mode})")
+        endpoint_mode = "posts-only mode" if self.posts_only else "dual-endpoint mode"
+        bt.logging.info(f"TwitterClient initialized with centralized cache ({cache_mode}, {endpoint_mode})")
     
     def _make_api_request(self, url: str, params: Dict) -> Tuple[Optional[Dict], Optional[str]]:
         """Make API request with retry logic for rate limits."""
@@ -453,13 +458,20 @@ class TwitterClient:
         if force_refresh:
             bt.logging.info(f"Force refresh enabled for @{username} - bypassing cache")
         
-        # Fetch from both endpoints for complete tweet coverage
-        endpoints = [
-            "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
-            "https://twitter-v24.p.rapidapi.com/user/tweets"
-        ]
+        # Select endpoints based on posts_only mode
+        if self.posts_only:
+            # Posts-only mode: faster, uses less quota (excludes replies)
+            endpoints = [
+                "https://twitter-v24.p.rapidapi.com/user/tweets"
+            ]
+        else:
+            # Dual-endpoint mode: complete tweet coverage (includes replies)
+            endpoints = [
+                "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
+                "https://twitter-v24.p.rapidapi.com/user/tweets"
+            ]
         
-        # Fetch from both endpoints in parallel for complete coverage
+        # Fetch from endpoint(s) in parallel
         all_tweets = []
         user_info = None
         api_fetch_succeeded = False
@@ -713,7 +725,7 @@ class TwitterClient:
         
         return tweets
     
-    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None) -> bool:
+    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None, min_tweets: int = 1) -> bool:
         """Check if user tweets about keywords and meets follower threshold.
         
         Args:
@@ -722,6 +734,7 @@ class TwitterClient:
             min_followers: Minimum follower count threshold
             lang: Optional language filter (e.g., 'en', 'zh'). If specified, user must have at least 
                   one tweet in this language, but keywords are checked across all tweets.
+            min_tweets: Minimum number of tweets containing keywords for user to be considered relevant
         
         Returns:
             True if user is relevant (meets all criteria), False otherwise
@@ -747,13 +760,24 @@ class TwitterClient:
             if not lang_tweets:
                 return False  # No tweets in target language
         
-        # Check keywords across ALL tweets (regardless of language)
+        # Count tweets with keywords across ALL tweets (regardless of language)
         keywords_lower = [kw.lower() for kw in keywords]
+        tweets_with_keywords = 0
+        
         for tweet in result['tweets']:
             text_lower = tweet['text'].lower()
-            # Use word boundaries to match whole words only
-            if any(re.search(r'\b' + re.escape(kw) + r'\b', text_lower) for kw in keywords_lower):
-                return True
+            
+            # Check if tweet contains any keyword
+            has_keyword = any(
+                kw in text_lower if kw.startswith(('#', '$'))
+                else bool(re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
+                for kw in keywords_lower
+            )
+            
+            if has_keyword:
+                tweets_with_keywords += 1
+                if tweets_with_keywords >= min_tweets:
+                    return True
         
         return False
     

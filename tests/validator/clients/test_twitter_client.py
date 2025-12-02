@@ -597,7 +597,8 @@ class TestTwitterClient:
         
         mock_get.side_effect = mock_get_side_effect
         
-        client = TwitterClient(api_key="test")
+        # Explicitly request dual-endpoint mode for this test
+        client = TwitterClient(api_key="test", posts_only=False)
         
         # Test dual endpoint fetching
         with mock.patch('time.sleep'):  # Skip rate limiting delay
@@ -768,7 +769,8 @@ class TestTwitterClient:
         
         mock_get.side_effect = mock_get_side_effect
         
-        client = TwitterClient(api_key="test")
+        # Explicitly request dual-endpoint mode for this test
+        client = TwitterClient(api_key="test", posts_only=False)
         
         with mock.patch('time.sleep'):
             result = client.fetch_user_tweets("testuser")
@@ -907,7 +909,8 @@ class TestTwitterClient:
         
         mock_get.side_effect = mock_get_side_effect
         
-        client = TwitterClient(api_key="test")
+        # Explicitly request dual-endpoint mode for this test
+        client = TwitterClient(api_key="test", posts_only=False)
         
         with mock.patch('time.sleep'):
             result = client.fetch_user_tweets("mogmachine", validate_author=True)

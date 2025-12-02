@@ -79,7 +79,7 @@ class TestTwitterNetworkAnalyzer:
         def mock_fetch(username):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
-        def mock_relevance(username, keywords, min_followers, lang=None):
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
             return True  # All users are relevant
         
         mock_client.fetch_user_tweets.side_effect = mock_fetch
@@ -123,7 +123,7 @@ class TestTwitterNetworkAnalyzer:
         def mock_fetch(username):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
-        def mock_relevance(username, keywords, min_followers, lang=None):
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
             return True  # All users are relevant
         
         mock_client.fetch_user_tweets.side_effect = mock_fetch

@@ -125,7 +125,8 @@ def recursive_social_discovery(
     max_iterations: int = 10,
     convergence_threshold: float = 0.95,
     run_id_prefix: Optional[str] = None,
-    save_summary: bool = True
+    save_summary: bool = True,
+    posts_only: bool = True
 ) -> Tuple[str, int, bool, ConvergenceMetrics]:
     """
     Recursively run social discovery until convergence or max iterations.
@@ -139,6 +140,7 @@ def recursive_social_discovery(
         convergence_threshold: Stability threshold for convergence (0.0 to 1.0)
         run_id_prefix: Optional prefix for run IDs
         save_summary: Whether to save convergence summary to file
+        posts_only: If True, use only /user/tweets endpoint (faster, saves quota). Default: True
         
     Returns:
         Tuple of (final_social_map_path, iterations_run, converged, metrics)
@@ -186,7 +188,7 @@ def recursive_social_discovery(
         
         # Run discovery for this iteration
         try:
-            social_map_path = discover_social_network(pool_name, run_id)
+            social_map_path = discover_social_network(pool_name, run_id, posts_only=posts_only)
             final_social_map_path = social_map_path
         except Exception as e:
             bt.logging.error(f"❌ Discovery failed at iteration {iteration + 1}: {e}")
@@ -364,6 +366,11 @@ if __name__ == "__main__":
             action="store_true",
             help="Don't save convergence summary file"
         )
+        parser.add_argument(
+            "--dual-endpoint",
+            action="store_true",
+            help="Use both /user/tweets and /user/tweetsandreplies endpoints (default: posts-only)"
+        )
         
         # Build args list from environment variables for wallet config
         # Start with command-line args, then add environment-based defaults
@@ -389,13 +396,17 @@ if __name__ == "__main__":
         initialize_global_publisher(wallet)
         bt.logging.info("🌐 Global publisher initialized for standalone mode")
         
+        # Determine posts_only mode
+        posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
+        
         # Run recursive discovery
         path, iterations, converged, metrics = recursive_social_discovery(
             pool_name=config.pool_name,
             max_iterations=config.max_iterations,
             convergence_threshold=config.convergence_threshold,
             run_id_prefix=config.run_id_prefix,
-            save_summary=not config.no_summary
+            save_summary=not config.no_summary,
+            posts_only=posts_only
         )
         
         print("\n" + "=" * 80)

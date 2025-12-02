@@ -131,7 +131,7 @@ class ConnectionScanner:
         self.lookback_days = lookback_days
         self.force_refresh = force_refresh
         self.scan_all = scan_all
-        self.twitter_client = TwitterClient()
+        self.twitter_client = TwitterClient(posts_only=False)
         self.database = ConnectionDatabase(db_path=db_path)
         self.tag_parser = TagParser()
         

@@ -6,6 +6,7 @@
       "initial_accounts": ["opentensor"],
       "max_seed_accounts": 150,
       "min_interaction_weight": 2,
+      "min_tweets": 1,
       "lang": null,
       "active": true
     }

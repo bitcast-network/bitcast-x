@@ -34,6 +34,7 @@ class PoolManager:
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
                     'max_seed_accounts': pool_data.get('max_seed_accounts', 150),  # Default to 150 for seed selection
                     'min_interaction_weight': pool_data.get('min_interaction_weight', 0),  # Default to 0 (no filtering)
+                    'min_tweets': pool_data.get('min_tweets', 1),  # Default to 1 (at least one tweet with keywords)
                     'lang': pool_data.get('lang')  # Optional language filter (None if not specified)
                 }
             
