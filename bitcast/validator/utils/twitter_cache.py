@@ -89,7 +89,7 @@ def cache_user_tweets(username: str, data: Dict[str, Any]) -> None:
     # Add timestamp for cache validation
     data_with_timestamp = {
         **data,
-        'last_updated': datetime.now(),
+        'last_updated': data.get('last_updated', datetime.now()),
         'cache_timestamp': datetime.now().isoformat()
     }
     
