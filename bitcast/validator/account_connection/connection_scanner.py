@@ -238,22 +238,12 @@ class ConnectionScanner:
             for tweet in recent_tweets:
                 tweet_id = tweet.get('tweet_id')
                 text = tweet.get('text', '')
-                author = tweet.get('author', '').lower() if tweet.get('author') else None
-                retweeted_user = tweet.get('retweeted_user')
                 
                 if not tweet_id or not text:
                     continue
                 
                 # Skip retweets - we only want original content
-                if retweeted_user:
-                    continue
-                
-                # Skip tweets not authored by this account
-                # (Twitter API may return replies/mentions to the account)
-                if not author or author != username:
-                    bt.logging.debug(
-                        f"Skipping tweet {tweet_id} - author '{author}' != '{username}'"
-                    )
+                if tweet.get('retweeted_user'):
                     continue
                 
                 # Parse tags from tweet text

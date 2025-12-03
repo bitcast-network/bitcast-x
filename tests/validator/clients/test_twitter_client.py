@@ -277,113 +277,13 @@ class TestTwitterClient:
         
         client = TwitterClient(api_key="test")
         
-        # Test with validate_author=True (default)
+        # Author validation is always enabled - only tweets from 'testuser' are returned
         result = client.fetch_user_tweets("testuser")
         
         # Should only include tweet from testuser
         assert len(result['tweets']) == 1
         assert result['tweets'][0]['text'] == 'Tweet from testuser'
         assert result['tweets'][0]['author'] == 'testuser'
-    
-    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
-    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
-    @mock.patch('requests.get')
-    def test_author_validation_disabled(self, mock_get, mock_get_cache, mock_cache):
-        """Test that author validation can be disabled."""
-        from datetime import datetime, timezone
-        
-        # Mock no cache
-        mock_get_cache.return_value = None
-        
-        # Use recent date to pass cutoff filter (Bug #3 fix requires recent tweets)
-        recent_date = datetime.now(timezone.utc).strftime('%a %b %d %H:%M:%S +0000 %Y')
-        
-        # Mock API response with mixed authors
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'data': {
-                'user': {
-                    'result': {
-                        'timeline': {
-                            'timeline': {
-                                'instructions': [{
-                                    'type': 'TimelineAddEntries',
-                                    'entries': [
-                                        {
-                                            'entryId': 'tweet-1',
-                                            'content': {
-                                                'itemContent': {
-                                                    'tweet_results': {
-                                                        'result': {
-                                                            'rest_id': '1',
-                                                            'core': {
-                                                                'user_results': {
-                                                                    'result': {
-                                                                        'legacy': {
-                                                                            'screen_name': 'testuser'
-                                                                        }
-                                                                    }
-                                                                }
-                                                            },
-                                                            'legacy': {
-                                                                'created_at': recent_date,
-                                                                'full_text': 'Tweet from testuser',
-                                                                'is_quote_status': False
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        {
-                                            'entryId': 'tweet-2',
-                                            'content': {
-                                                'itemContent': {
-                                                    'tweet_results': {
-                                                        'result': {
-                                                            'rest_id': '2',
-                                                            'core': {
-                                                                'user_results': {
-                                                                    'result': {
-                                                                        'legacy': {
-                                                                            'screen_name': 'otheruser'
-                                                                        }
-                                                                    }
-                                                                }
-                                                            },
-                                                            'legacy': {
-                                                                'created_at': recent_date,
-                                                                'full_text': 'Reply from otheruser',
-                                                                'is_quote_status': False
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    ]
-                                }]
-                            }
-                        },
-                        'legacy': {
-                            'screen_name': 'testuser',
-                            'followers_count': 100
-                        }
-                    }
-                }
-            }
-        }
-        mock_get.return_value = mock_response
-        
-        client = TwitterClient(api_key="test")
-        
-        # Test with validate_author=False
-        with mock.patch('time.sleep'):  # Skip rate limiting delay
-            result = client.fetch_user_tweets("testuser", validate_author=False)
-        
-        # Should include both tweets (if API parsing succeeds for both)
-        assert len(result['tweets']) >= 1  # At least testuser's tweet
     
     @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
     @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
@@ -676,7 +576,7 @@ class TestTwitterClient:
         
         # This should NOT crash with "'NoneType' object has no attribute 'lower'"
         with mock.patch('time.sleep'):
-            result = client.fetch_user_tweets("testuser", validate_author=True)
+            result = client.fetch_user_tweets("testuser")
         
         # With dual endpoint mode, /tweets will default author to 'testuser'
         # So tweet should be included with defaulted author
@@ -913,7 +813,7 @@ class TestTwitterClient:
         client = TwitterClient(api_key="test", posts_only=False)
         
         with mock.patch('time.sleep'):
-            result = client.fetch_user_tweets("mogmachine", validate_author=True)
+            result = client.fetch_user_tweets("mogmachine")
         
         # CRITICAL: user_info username must be 'mogmachine' (requested username)
         # NOT 'louisebeattie' (first tweet author in profile-conversation)

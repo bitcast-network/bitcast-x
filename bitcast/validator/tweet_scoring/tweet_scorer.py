@@ -50,8 +50,7 @@ def fetch_user_tweets_safe(
         Tuple of (tweets_list, error_message)
     """
     try:
-        # TwitterClient.fetch_user_tweets() now validates author by default (validate_author=True)
-        # and ensures all tweets have the author field set
+        # TwitterClient.fetch_user_tweets() validates author and ensures all tweets have the author field set
         # Uses TWEET_FETCH_LIMIT from config (default: 200)
         result = client.fetch_user_tweets(username)
         return result.get('tweets', []), None
@@ -556,6 +555,10 @@ if __name__ == "__main__":
         start_date = parse_brief_date(brief_data.get('start_date'))
         end_date = parse_brief_date(brief_data.get('end_date'), end_of_day=True)
         
+        # Extract brief-level configuration
+        brief_max_members = brief_data.get('max_members')
+        brief_max_considered = brief_data.get('max_considered')
+        
         # Generate run_id for CLI execution
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"tweet_scoring_cli_{timestamp}"
@@ -594,7 +597,9 @@ if __name__ == "__main__":
             qrt=qrt,
             start_date=start_date,
             end_date=end_date,
-            force_cache_refresh=force_cache_refresh
+            force_cache_refresh=force_cache_refresh,
+            max_members=brief_max_members,
+            considered_accounts_limit=brief_max_considered
         )
         
         # Print summary

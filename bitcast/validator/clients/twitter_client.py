@@ -154,7 +154,6 @@ class TwitterClient:
         self, 
         tweets: List[Dict], 
         username: str, 
-        validate_author: bool,
         tweet_limit: int,
         cutoff_date: datetime
     ) -> Tuple[List[Dict], List[Dict]]:
@@ -168,7 +167,6 @@ class TwitterClient:
         Args:
             tweets: Raw tweet list (from cache or API)
             username: Twitter username for author validation
-            validate_author: Whether to filter by author
             tweet_limit: Maximum tweets to return
             cutoff_date: Oldest tweet date to include
         
@@ -179,13 +177,12 @@ class TwitterClient:
         """
         all_tweets = tweets.copy()
         
-        # 1. Validate author if requested
-        if validate_author:
-            original_count = len(all_tweets)
-            all_tweets = self._validate_tweet_authors(all_tweets, username)
-            if len(all_tweets) < original_count:
-                filtered_count = original_count - len(all_tweets)
-                bt.logging.debug(f"Filtered {filtered_count} tweets from other authors")
+        # 1. Validate author - filter to only tweets from this user
+        original_count = len(all_tweets)
+        all_tweets = self._validate_tweet_authors(all_tweets, username)
+        if len(all_tweets) < original_count:
+            filtered_count = original_count - len(all_tweets)
+            bt.logging.debug(f"Filtered {filtered_count} tweets from other authors")
         
         # 2. Sort by date (most recent first)
         def get_tweet_date(tweet):
@@ -233,8 +230,7 @@ class TwitterClient:
         url: str,
         username: str,
         tweet_limit: int,
-        incremental_cutoff: datetime,
-        validate_author: bool
+        incremental_cutoff: datetime
     ) -> Tuple[List[Dict], Optional[Dict], bool]:
         """
         Fetch tweets from a single Twitter API endpoint with pagination.
@@ -244,7 +240,6 @@ class TwitterClient:
             username: Twitter username to fetch for
             tweet_limit: Maximum tweets to fetch
             incremental_cutoff: Date cutoff for pagination stopping
-            validate_author: Whether to filter by author during pagination
             
         Returns:
             Tuple of (tweets_list, user_info, api_succeeded)
@@ -317,8 +312,8 @@ class TwitterClient:
                         if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
                             tweet_data['author'] = username
                         
-                        # Filter by author during pagination if validation is enabled
-                        if not validate_author or (tweet_data.get('author') or '').lower() == username:
+                        # Filter by author during pagination
+                        if (tweet_data.get('author') or '').lower() == username:
                             tweets.append(tweet_data)
                             tweets_found += 1
                         
@@ -344,32 +339,17 @@ class TwitterClient:
                 # Handle profile-conversation entries (contains multiple tweets)
                 elif entry_id.startswith('profile-conversation-'):
                     conversation_tweets = self._parse_profile_conversation(entry, username)
+                    
                     for tweet_data in conversation_tweets:
                         if tweet_data:
                             # Default author for /tweets endpoint (only returns user's tweets)
                             if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
                                 tweet_data['author'] = username
                             
-                            # Filter by author during pagination if validation is enabled
-                            if not validate_author or (tweet_data.get('author') or '').lower() == username:
+                            # Filter by author during pagination
+                            if (tweet_data.get('author') or '').lower() == username:
                                 tweets.append(tweet_data)
                                 tweets_found += 1
-                            
-                            # Check cutoff (profile-conversation entries are not pinned)
-                            if tweet_data.get('created_at'):
-                                try:
-                                    tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                                    cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
-                                    if tweet_date < cutoff_with_tz:
-                                        bt.logging.debug(f"Reached incremental cutoff for @{username}")
-                                        cursor = None
-                                        break
-                                except ValueError:
-                                    pass
-                    
-                    # If cutoff was reached, cursor will be None - stop processing more entries
-                    if cursor is None:
-                        break
                 
                 # Check tweet limit
                 if len(tweets) >= tweet_limit:
@@ -377,23 +357,23 @@ class TwitterClient:
                     cursor = None
                     break
             
-            if not cursor or tweets_found == 0:
+            if not cursor:
                 break
             
             time.sleep(self.rate_limit_delay)  # Rate limiting
         
         return tweets, user_info, api_fetch_succeeded
     
-    def fetch_user_tweets(self, username: str, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
+    def fetch_user_tweets(self, username: str, force_refresh: bool = False) -> Dict[str, Any]:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
         
         Args:
             username: Twitter username to fetch tweets for
             force_refresh: If True, bypass cache and always fetch fresh data (default: False)
-            validate_author: If True, filter tweets to only those authored by username (default: True)
-                           The tweetsandreplies API returns both user's tweets AND replies from others,
-                           so validation ensures only the timeline owner's tweets are included.
+        
+        Filters to only tweets authored by the user (the tweetsandreplies API returns
+        both user's tweets AND replies from others).
         
         Stops when either TWEET_FETCH_LIMIT is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
         Uses smart cache merging to preserve historical tweets while fetching recent updates.
@@ -421,7 +401,6 @@ class TwitterClient:
                 visible_tweets, tweets_to_cache = self._post_process_tweets(
                     tweets=cached_data['tweets'],
                     username=username,
-                    validate_author=validate_author,
                     tweet_limit=tweet_limit,
                     cutoff_date=cutoff_date
                 )
@@ -480,7 +459,7 @@ class TwitterClient:
             future_to_endpoint = {
                 executor.submit(
                     self._fetch_from_single_endpoint,
-                    url, username, tweet_limit, incremental_cutoff, validate_author
+                    url, username, tweet_limit, incremental_cutoff
                 ): url
                 for url in endpoints
             }
@@ -557,7 +536,6 @@ class TwitterClient:
         visible_tweets, tweets_to_cache = self._post_process_tweets(
             tweets=all_tweets,
             username=username,
-            validate_author=validate_author,
             tweet_limit=tweet_limit,
             cutoff_date=cutoff_date
         )
@@ -656,7 +634,11 @@ class TwitterClient:
             try:
                 author = tweet_result['core']['user_results']['result']['legacy']['screen_name'].lower()
             except (KeyError, AttributeError, TypeError):
-                pass
+                try:
+                    # Fallback: some API responses use 'core' instead of 'legacy'
+                    author = tweet_result['core']['user_results']['result']['core']['screen_name'].lower()
+                except (KeyError, AttributeError, TypeError):
+                    pass
             
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
