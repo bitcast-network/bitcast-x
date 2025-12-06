@@ -154,6 +154,64 @@ class TestTwitterNetworkAnalyzer:
         
         with pytest.raises(ValueError, match="No interactions found"):
             analyzer.analyze_network(['lonely_user'], ['test'])
+    
+    def test_analyze_network_min_interaction_weight_filter(self):
+        """Test that min_interaction_weight filters accounts with low incoming weight."""
+        mock_client = mock.Mock()
+        
+        # user1 mentions user2, user3 and retweets user4
+        # user2 mentions user3, user4
+        # Incoming weight accumulates from all edges pointing to each user
+        mock_tweets = {
+            'user1': [
+                {'text': 'Hello @user2 @user3', 'tagged_accounts': ['user2', 'user3'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user1'},
+                {'text': 'RT @user4: Great', 'tagged_accounts': [], 'retweeted_user': 'user4', 'quoted_user': None, 'author': 'user1'}
+            ],
+            'user2': [
+                {'text': 'Hello @user3 @user4', 'tagged_accounts': ['user3', 'user4'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user2'}
+            ]
+        }
+        
+        def mock_fetch(username):
+            return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
+        
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
+            return True
+        
+        mock_client.fetch_user_tweets.side_effect = mock_fetch
+        mock_client.check_user_relevance.side_effect = mock_relevance
+        
+        analyzer = TwitterNetworkAnalyzer(mock_client, max_workers=1)
+        
+        # Without filter: should have all 4 users
+        scores_no_filter, _, _ = analyzer.analyze_network(
+            ['user1', 'user2'], ['test'], min_interaction_weight=0
+        )
+        assert len(scores_no_filter) == 4
+        
+        # With moderate filter: some non-seeds may be filtered, but seeds preserved
+        scores_filtered, _, _ = analyzer.analyze_network(
+            ['user1', 'user2'], ['test'], min_interaction_weight=3.0
+        )
+        
+        # Seeds are always preserved
+        assert 'user1' in scores_filtered
+        assert 'user2' in scores_filtered
+        # user3 and user4 have sufficient incoming weight
+        assert 'user3' in scores_filtered
+        assert 'user4' in scores_filtered
+        # Total should be 4 (seeds + qualified non-seeds)
+        assert len(scores_filtered) == 4
+        
+        # With high filter: only seeds remain (non-seeds filtered out)
+        scores_high_filter, _, _ = analyzer.analyze_network(
+            ['user1', 'user2'], ['test'], min_interaction_weight=4.5
+        )
+        assert 'user1' in scores_high_filter  # seed
+        assert 'user2' in scores_high_filter  # seed
+        # user3 and user4 don't meet threshold, so filtered
+        assert 'user3' not in scores_high_filter
+        assert 'user4' not in scores_high_filter
 
 
 class TestSocialDiscoveryIntegration:

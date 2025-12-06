@@ -131,7 +131,8 @@ class TwitterNetworkAnalyzer:
         keywords: List[str], 
         min_followers: int = 0,
         lang: Optional[str] = None,
-        min_tweets: int = 1
+        min_tweets: int = 1,
+        min_interaction_weight: float = 0
     ) -> Tuple[Dict[str, float], np.ndarray, List[str]]:
         """
         Analyze Twitter network and return PageRank scores.
@@ -142,6 +143,9 @@ class TwitterNetworkAnalyzer:
             min_followers: Minimum follower threshold
             lang: Optional language filter (e.g., 'en', 'zh')
             min_tweets: Minimum number of tweets containing keywords for relevance
+            min_interaction_weight: Minimum total incoming interaction weight for quality filtering.
+                                   Accounts with incoming weight below threshold are filtered out.
+                                   Seed accounts are always preserved.
             
         Returns:
             Tuple of (scores_dict, adjacency_matrix, usernames_list)
@@ -275,12 +279,43 @@ class TwitterNetworkAnalyzer:
         else:
             all_users = discovered_users | set(seed_accounts)
         
+        # Step 4: Filter by minimum interaction weight (quality check)
+        if min_interaction_weight > 0:
+            # Calculate total incoming weight for each account
+            incoming_weights = {}
+            for (from_user, to_user), weight in interactions.items():
+                incoming_weights[to_user] = incoming_weights.get(to_user, 0) + weight
+            
+            # Filter to accounts meeting threshold
+            accounts_before = len(all_users)
+            qualified_accounts = {
+                user for user, total_weight in incoming_weights.items()
+                if total_weight >= min_interaction_weight
+            }
+            
+            # Include seed accounts that may have outgoing but no incoming interactions
+            # They are important network sources even without incoming weight
+            qualified_accounts |= (set(seed_accounts) & all_users)
+            
+            # Re-filter interactions to only include edges between qualified accounts
+            interactions = {
+                (from_user, to_user): weight
+                for (from_user, to_user), weight in interactions.items()
+                if from_user in qualified_accounts and to_user in qualified_accounts
+            }
+            
+            all_users = qualified_accounts
+            bt.logging.info(
+                f"Filtered by min_interaction_weight ({min_interaction_weight}): "
+                f"{len(all_users)}/{accounts_before} accounts remain"
+            )
+        
         bt.logging.info(f"Network: {len(all_users)} users, {len(interactions)} interactions")
         
         if not interactions:
             raise ValueError("No interactions found in network")
         
-        # Step 4: Calculate PageRank
+        # Step 5: Calculate PageRank
         G = nx.DiGraph()
         for (from_user, to_user), weight in interactions.items():
             G.add_edge(from_user, to_user, weight=weight)
@@ -412,7 +447,8 @@ def discover_social_network(
             keywords=pool_config['keywords'],
             min_followers=0,
             lang=pool_config.get('lang'),
-            min_tweets=pool_config.get('min_tweets', 1)
+            min_tweets=pool_config.get('min_tweets', 1),
+            min_interaction_weight=pool_config.get('min_interaction_weight', 0)
         )
         
         # Create social map data structure
