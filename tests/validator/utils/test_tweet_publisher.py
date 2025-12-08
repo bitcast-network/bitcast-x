@@ -28,6 +28,7 @@ class TestPublishBriefTweets:
                 {
                     "tweet_id": "123456789",
                     "author": "test_user",
+                    "text": "Sample tweet text",
                     "created_at": "Wed Nov 03 12:00:00 +0000 2025",
                     "lang": "en",
                     "score": 0.5,
@@ -36,6 +37,8 @@ class TestPublishBriefTweets:
                     "reply_count": 2,
                     "quote_count": 1,
                     "bookmark_count": 3,
+                    "view_count": 1000,
+                    "followers_count": 500,
                     "retweets": [],
                     "quotes": [],
                     "meets_brief": True,
@@ -199,21 +202,23 @@ class TestCreateTweetPayload:
         assert payload["summary"]["unique_creators"] == 1
         assert "timestamp" in payload
         
-        # Verify tweet structure (reduced fields)
+        # Verify tweet structure
         tweet = payload["tweets"][0]
         assert tweet["tweet_id"] == "123"
         assert tweet["author"] == "user1"  # Author included
+        assert tweet["text"] == "Test tweet"  # Text now included
         assert "created_at" in tweet  # Creation timestamp included
         assert "lang" in tweet  # Language included
         assert tweet["score"] == 0.5
         assert tweet["meets_brief"] is True
         assert tweet["favorite_count"] == 10
         assert tweet["retweet_count"] == 5
+        assert "view_count" in tweet  # View count included
+        assert "followers_count" in tweet  # Followers count included
         assert "usd_target" in tweet
         assert "alpha_target" in tweet
         # Fields that were removed
         assert "url" not in tweet
-        assert "text" not in tweet
         assert "reasoning" not in tweet
     
     def test_empty_tweets_handling(self):
@@ -371,12 +376,14 @@ class TestIntegration:
             tweet = published_payload["tweets"][0]
             assert tweet["tweet_id"] == "999"
             assert tweet["author"] == "integration_user"  # Author included
+            assert tweet["text"] == "Integration test tweet"  # Text now included
             assert tweet["lang"] == "en"  # Language included
             assert tweet["favorite_count"] == 100
             assert tweet["meets_brief"] is True
+            assert "view_count" in tweet  # View count included
+            assert "followers_count" in tweet  # Followers count included
             assert "usd_target" in tweet
             assert "alpha_target" in tweet
             # Removed fields should not be present
             assert "url" not in tweet
-            assert "text" not in tweet
             assert "reasoning" not in tweet

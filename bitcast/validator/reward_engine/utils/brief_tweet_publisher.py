@@ -124,6 +124,7 @@ def create_tweet_payload(
                 # Tweet metadata
                 "tweet_id": tweet_id,
                 "author": author,
+                "text": tweet.get("text", ""),
                 "created_at": tweet.get("created_at", ""),
                 "lang": tweet.get("lang", "und"),
                 
@@ -133,6 +134,10 @@ def create_tweet_payload(
                 "reply_count": tweet.get("reply_count", 0),
                 "quote_count": tweet.get("quote_count", 0),
                 "bookmark_count": tweet.get("bookmark_count", 0),
+                "view_count": tweet.get("view_count", 0),
+                
+                # Author metadata
+                "followers_count": tweet.get("followers_count", 0),
                 
                 # Scoring data
                 "score": tweet.get("score", 0.0),
