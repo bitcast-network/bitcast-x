@@ -88,7 +88,7 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, usernames = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should have scored all users
         assert len(scores) == 3
@@ -132,7 +132,7 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, usernames = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should only have user1 and user2 (user3 was only in a reply, which got filtered)
         assert len(scores) == 2
@@ -185,13 +185,13 @@ class TestTwitterNetworkAnalyzer:
         analyzer = TwitterNetworkAnalyzer(mock_client, max_workers=1)
         
         # Without filter: should have all 4 users
-        scores_no_filter, _, _ = analyzer.analyze_network(
+        scores_no_filter, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=0
         )
         assert len(scores_no_filter) == 4
         
         # With moderate filter: some non-seeds may be filtered, but seeds preserved
-        scores_filtered, _, _ = analyzer.analyze_network(
+        scores_filtered, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=3.0
         )
         
@@ -205,7 +205,7 @@ class TestTwitterNetworkAnalyzer:
         assert len(scores_filtered) == 4
         
         # With high filter: only seeds remain (non-seeds filtered out)
-        scores_high_filter, _, _ = analyzer.analyze_network(
+        scores_high_filter, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=4.5
         )
         assert 'user1' in scores_high_filter  # seed
@@ -237,9 +237,10 @@ class TestSocialDiscoveryIntegration:
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
+    @pytest.mark.asyncio
     @mock.patch('bitcast.validator.social_discovery.social_discovery.PoolManager')
     @mock.patch('bitcast.validator.social_discovery.social_discovery.TwitterNetworkAnalyzer')
-    def test_discover_social_network_success(self, mock_analyzer_class, mock_pool_manager_class):
+    async def test_discover_social_network_success(self, mock_analyzer_class, mock_pool_manager_class):
         """Test successful social discovery."""
         # Mock pool manager
         mock_pool_manager = mock.Mock()
@@ -256,7 +257,8 @@ class TestSocialDiscoveryIntegration:
         mock_analyzer.analyze_network.return_value = (
             {'user1': 0.6, 'user2': 0.4},  # scores
             np.array([[0, 1], [1, 0]]),    # adjacency matrix  
-            ['user1', 'user2']             # usernames
+            ['user1', 'user2'],            # usernames
+            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}}  # user_info_map
         )
         mock_analyzer_class.return_value = mock_analyzer
         
@@ -266,13 +268,14 @@ class TestSocialDiscoveryIntegration:
              mock.patch('pathlib.Path.exists', return_value=False), \
              mock.patch('json.dump'):
             
-            result = discover_social_network("test_pool")
+            result = await discover_social_network("test_pool")
             
             # Should have called the analyzer
             mock_analyzer.analyze_network.assert_called_once()
             assert "test_pool" in result
     
-    def test_regenerate_with_nonexistent_pool(self):
+    @pytest.mark.asyncio
+    async def test_regenerate_with_nonexistent_pool(self):
         """Test error handling for nonexistent pool."""
         with pytest.raises(Exception, match="not found"):
-            discover_social_network("nonexistent_pool")
+            await discover_social_network("nonexistent_pool")

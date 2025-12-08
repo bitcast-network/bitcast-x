@@ -88,7 +88,7 @@ class TwitterNetworkAnalyzer:
         else:
             bt.logging.info("Sequential mode (concurrency disabled)")
     
-    def _fetch_tweets_safe(self, username: str) -> Tuple[str, List[Dict], Optional[str]]:
+    def _fetch_tweets_safe(self, username: str) -> Tuple[str, List[Dict], Dict, Optional[str]]:
         """
         Fetch tweets for a user with error handling.
         
@@ -96,14 +96,14 @@ class TwitterNetworkAnalyzer:
             username: Twitter username
             
         Returns:
-            Tuple of (username_lower, tweets_list, error_message)
+            Tuple of (username_lower, tweets_list, user_info, error_message)
         """
         try:
             result = self.twitter_client.fetch_user_tweets(username.lower())
-            return username.lower(), result['tweets'], None
+            return username.lower(), result['tweets'], result['user_info'], None
         except Exception as e:
             bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
-            return username.lower(), [], str(e)
+            return username.lower(), [], {'username': username.lower(), 'followers_count': 0}, str(e)
     
     def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None, min_tweets: int = 1) -> Tuple[str, bool]:
         """
@@ -133,7 +133,7 @@ class TwitterNetworkAnalyzer:
         lang: Optional[str] = None,
         min_tweets: int = 1,
         min_interaction_weight: float = 0
-    ) -> Tuple[Dict[str, float], np.ndarray, List[str]]:
+    ) -> Tuple[Dict[str, float], np.ndarray, List[str], Dict[str, Dict]]:
         """
         Analyze Twitter network and return PageRank scores.
         
@@ -148,7 +148,7 @@ class TwitterNetworkAnalyzer:
                                    Seed accounts are always preserved.
             
         Returns:
-            Tuple of (scores_dict, adjacency_matrix, usernames_list)
+            Tuple of (scores_dict, adjacency_matrix, usernames_list, user_info_map)
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
@@ -156,6 +156,7 @@ class TwitterNetworkAnalyzer:
         # Step 1: Fetch tweets for seed accounts
         fetch_start = time.time()
         all_tweets = {}
+        user_info_map = {}
         failed_accounts = []
         
         if self.max_workers > 1:
@@ -168,16 +169,18 @@ class TwitterNetworkAnalyzer:
                 }
                 
                 for future in as_completed(future_to_username):
-                    username, tweets, error = future.result()
+                    username, tweets, user_info, error = future.result()
                     if error:
                         failed_accounts.append((username, error))
                     all_tweets[username] = tweets
+                    user_info_map[username] = user_info
         else:
             # Sequential execution
             for username in seed_accounts:
                 username_lower = username.lower()
                 result = self.twitter_client.fetch_user_tweets(username_lower)
                 all_tweets[username_lower] = result['tweets']
+                user_info_map[username_lower] = result['user_info']
         
         fetch_time = time.time() - fetch_start
         total_tweets = sum(len(tweets) for tweets in all_tweets.values())
@@ -358,7 +361,7 @@ class TwitterNetworkAnalyzer:
             f"({mode} mode with {self.max_workers} worker{'s' if self.max_workers > 1 else ''})"
         )
         
-        return rounded_scores, adjacency_matrix, usernames_sorted
+        return rounded_scores, adjacency_matrix, usernames_sorted, user_info_map
 
 
 async def discover_social_network(
@@ -442,7 +445,7 @@ async def discover_social_network(
         
         # Analyze network
         analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
-        scores, adjacency_matrix, usernames = analyzer.analyze_network(
+        scores, adjacency_matrix, usernames, user_info_map = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
             min_followers=0,
@@ -463,7 +466,8 @@ async def discover_social_network(
             },
             'accounts': {
                 username: {
-                    'score': score
+                    'score': score,
+                    'followers_count': user_info_map.get(username, {}).get('followers_count', 0)
                 }
                 for username, score in sorted_accounts
             }
