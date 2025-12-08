@@ -413,11 +413,6 @@ class TwitterClient:
                 }
                 cache_user_tweets(username, cache_data)
                 
-                # Attach followers_count to each visible tweet for downstream use
-                followers_count = cached_data['user_info'].get('followers_count', 0)
-                for tweet in visible_tweets:
-                    tweet['followers_count'] = followers_count
-                
                 return {
                     'user_info': cached_data['user_info'],
                     'tweets': visible_tweets,
@@ -553,11 +548,6 @@ class TwitterClient:
         }
         cache_user_tweets(username, cache_data)
         
-        # Attach followers_count to each visible tweet for downstream use
-        followers_count = cache_data['user_info'].get('followers_count', 0)
-        for tweet in visible_tweets:
-            tweet['followers_count'] = followers_count
-        
         return {
             'user_info': cache_data['user_info'],
             'tweets': visible_tweets,
@@ -650,15 +640,6 @@ class TwitterClient:
                 except (KeyError, AttributeError, TypeError):
                     pass
             
-            # Extract view count if available
-            view_count = 0
-            views_data = tweet_result.get('views', {})
-            if views_data and views_data.get('count'):
-                try:
-                    view_count = int(views_data['count'])
-                except (ValueError, TypeError):
-                    view_count = 0
-            
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
                 'created_at': legacy.get('created_at', ''),
@@ -675,7 +656,6 @@ class TwitterClient:
                 'reply_count': legacy.get('reply_count', 0),
                 'quote_count': legacy.get('quote_count', 0),
                 'bookmark_count': legacy.get('bookmark_count', 0),
-                'view_count': view_count,
                 'in_reply_to_status_id': legacy.get('in_reply_to_status_id_str'),
                 'in_reply_to_user': legacy.get('in_reply_to_screen_name')
             }

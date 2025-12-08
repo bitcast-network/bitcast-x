@@ -37,8 +37,6 @@ class TestPublishBriefTweets:
                     "reply_count": 2,
                     "quote_count": 1,
                     "bookmark_count": 3,
-                    "view_count": 1000,
-                    "followers_count": 500,
                     "retweets": [],
                     "quotes": [],
                     "meets_brief": True,
@@ -213,8 +211,6 @@ class TestCreateTweetPayload:
         assert tweet["meets_brief"] is True
         assert tweet["favorite_count"] == 10
         assert tweet["retweet_count"] == 5
-        assert "view_count" in tweet  # View count included
-        assert "followers_count" in tweet  # Followers count included
         assert "usd_target" in tweet
         assert "alpha_target" in tweet
         # Fields that were removed
@@ -380,8 +376,6 @@ class TestIntegration:
             assert tweet["lang"] == "en"  # Language included
             assert tweet["favorite_count"] == 100
             assert tweet["meets_brief"] is True
-            assert "view_count" in tweet  # View count included
-            assert "followers_count" in tweet  # Followers count included
             assert "usd_target" in tweet
             assert "alpha_target" in tweet
             # Removed fields should not be present
