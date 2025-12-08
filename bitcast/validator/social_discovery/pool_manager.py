@@ -21,13 +21,17 @@ class PoolManager:
         self.pools = self._load_pools()
     
     def _load_pools(self) -> Dict[str, Dict[str, Any]]:
-        """Load pool configurations from JSON."""
+        """Load pool configurations from JSON (only active pools)."""
         try:
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
             
             pools = {}
             for pool_data in config.get('pools', []):
+                # Only load pools where active is explicitly True
+                if not pool_data.get('active', False):
+                    continue
+                
                 name = pool_data.get('name', '').lower()
                 pools[name] = {
                     'keywords': [kw.lower() for kw in pool_data.get('keywords', [])],
@@ -35,10 +39,11 @@ class PoolManager:
                     'max_seed_accounts': pool_data.get('max_seed_accounts', 150),  # Default to 150 for seed selection
                     'min_interaction_weight': pool_data.get('min_interaction_weight', 0),  # Default to 0 (no filtering)
                     'min_tweets': pool_data.get('min_tweets', 1),  # Default to 1 (at least one tweet with keywords)
-                    'lang': pool_data.get('lang')  # Optional language filter (None if not specified)
+                    'lang': pool_data.get('lang'),  # Optional language filter (None if not specified)
+                    'active': True  # Include active field in config for transparency
                 }
             
-            bt.logging.info(f"Loaded {len(pools)} pools: {list(pools.keys())}")
+            bt.logging.info(f"Loaded {len(pools)} active pools: {list(pools.keys())}")
             return pools
             
         except Exception as e:

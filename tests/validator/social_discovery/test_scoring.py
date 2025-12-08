@@ -29,7 +29,8 @@ class TestPoolManager:
                 {
                     "name": "tao",
                     "keywords": ["tao", "bittensor"],
-                    "initial_accounts": ["opentensor"]
+                    "initial_accounts": ["opentensor"],
+                    "active": True
                 }
             ]
         }
@@ -225,7 +226,7 @@ class TestSocialDiscoveryIntegration:
         self.pools_config = Path(self.temp_dir) / "pools_config.json"
         config = {
             "pools": [
-                {"name": "test_pool", "keywords": ["test"], "initial_accounts": ["user1"]}
+                {"name": "test_pool", "keywords": ["test"], "initial_accounts": ["user1"], "active": True}
             ]
         }
         with open(self.pools_config, 'w') as f:
