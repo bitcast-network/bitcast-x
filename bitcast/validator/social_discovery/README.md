@@ -71,7 +71,7 @@ from bitcast.validator.social_discovery import run_discovery_for_stale_pools
 
 # Auto-run for pools needing updates (every 2 weeks on Sunday)
 # Automatically forces cache refresh for fresh data
-results = run_discovery_for_stale_pools()
+results = await run_discovery_for_stale_pools()
 # Returns: {'tao': '/path/to/social_map.json', ...}
 ```
 

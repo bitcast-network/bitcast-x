@@ -361,7 +361,7 @@ class TwitterNetworkAnalyzer:
         return rounded_scores, adjacency_matrix, usernames_sorted
 
 
-def discover_social_network(
+async def discover_social_network(
     pool_name: str = "tao", 
     run_id: Optional[str] = None,
     force_cache_refresh: bool = False,
@@ -515,20 +515,23 @@ def discover_social_network(
         # Publish social map data if enabled (fire-and-forget pattern)
         if ENABLE_DATA_PUBLISH:
             try:
-                success = asyncio.run(publish_social_map(
+                success = await publish_social_map(
                     pool_name=pool_name,
                     social_map_data=social_map_data,
                     adjacency_matrix=adjacency_matrix,
                     usernames=usernames,
                     run_id=run_id
-                ))
+                )
                 if success:
                     bt.logging.info(f"🚀 Social map data published successfully for pool {pool_name}")
                 else:
                     bt.logging.warning(f"⚠️ Social map data publishing failed for pool {pool_name} (local results saved)")
             except RuntimeError as e:
-                # No global publisher initialized - log but don't fail
-                bt.logging.debug(f"📴 Social map publishing skipped - no global publisher: {e}")
+                error_msg = str(e)
+                if "running event loop" in error_msg.lower() or "asyncio.run" in error_msg.lower():
+                    bt.logging.warning(f"📴 Social map publishing skipped - nested event loop conflict: {e}")
+                else:
+                    bt.logging.warning(f"📴 Social map publishing skipped: {e}")
             except Exception as e:
                 # Log but don't fail social discovery (fire-and-forget pattern)
                 bt.logging.warning(f"⚠️ Social map publishing failed: {e} (local results saved)")
@@ -542,7 +545,7 @@ def discover_social_network(
         raise
 
 
-def run_discovery_for_stale_pools() -> Dict[str, str]:
+async def run_discovery_for_stale_pools() -> Dict[str, str]:
     """
     Run social discovery only for pools that need updating today.
     
@@ -611,7 +614,7 @@ def run_discovery_for_stale_pools() -> Dict[str, str]:
         if needs_update:
             try:
                 bt.logging.info(f"Running discovery for {pool_name} (no map from today)")
-                social_map_path = discover_social_network(
+                social_map_path = await discover_social_network(
                     pool_name=pool_name, 
                     force_cache_refresh=True,
                     posts_only=True  # Use posts-only mode for faster discovery
@@ -678,11 +681,12 @@ if __name__ == "__main__":
         # Determine posts_only mode
         posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
         
-        saved_file = discover_social_network(
+        # In standalone mode, asyncio.run is safe (no parent event loop)
+        saved_file = asyncio.run(discover_social_network(
             pool_name=config.pool_name,
             run_id=run_id,
             posts_only=posts_only
-        )
+        ))
         print(f"✅ Social network discovered: {saved_file}")
     except Exception as e:
         print(f"❌ Error: {e}")
