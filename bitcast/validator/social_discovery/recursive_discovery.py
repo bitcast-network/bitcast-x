@@ -5,6 +5,7 @@ This module repeatedly runs the social discovery process, using the results
 of each iteration as seeds for the next, until the pool membership stabilizes.
 """
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -120,7 +121,7 @@ def load_social_map_members(
     return top_accounts, metadata
 
 
-def recursive_social_discovery(
+async def recursive_social_discovery(
     pool_name: str = "tao",
     max_iterations: int = 10,
     convergence_threshold: float = 0.95,
@@ -188,7 +189,7 @@ def recursive_social_discovery(
         
         # Run discovery for this iteration
         try:
-            social_map_path = discover_social_network(pool_name, run_id, posts_only=posts_only)
+            social_map_path = await discover_social_network(pool_name, run_id, posts_only=posts_only)
             final_social_map_path = social_map_path
         except Exception as e:
             bt.logging.error(f"❌ Discovery failed at iteration {iteration + 1}: {e}")
@@ -399,15 +400,15 @@ if __name__ == "__main__":
         # Determine posts_only mode
         posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
         
-        # Run recursive discovery
-        path, iterations, converged, metrics = recursive_social_discovery(
+        # Run recursive discovery (in standalone mode, asyncio.run is safe)
+        path, iterations, converged, metrics = asyncio.run(recursive_social_discovery(
             pool_name=config.pool_name,
             max_iterations=config.max_iterations,
             convergence_threshold=config.convergence_threshold,
             run_id_prefix=config.run_id_prefix,
             save_summary=not config.no_summary,
             posts_only=posts_only
-        )
+        ))
         
         print("\n" + "=" * 80)
         print("RECURSIVE DISCOVERY COMPLETE")
