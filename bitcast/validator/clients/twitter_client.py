@@ -164,16 +164,19 @@ class TwitterClient:
         deletion filtering to ensure consistent output regardless of whether tweets
         came from fresh cache, stale cache, or API fetch.
         
+        IMPORTANT: The cache stores ALL tweets indefinitely without limits.
+        Only the visible_tweets returned to the caller are filtered by date and limit.
+        
         Args:
             tweets: Raw tweet list (from cache or API)
             username: Twitter username for author validation
-            tweet_limit: Maximum tweets to return
-            cutoff_date: Oldest tweet date to include
+            tweet_limit: Maximum tweets to return in visible_tweets
+            cutoff_date: Oldest tweet date to include in visible_tweets
         
         Returns:
             Tuple of (visible_tweets, all_tweets_for_cache)
-            - visible_tweets: Tweets to return (excludes deleted tweets with missing_count >= 2)
-            - all_tweets_for_cache: All tweets including deleted ones for tracking
+            - visible_tweets: Tweets to return (filtered by date, limited, excludes deleted tweets)
+            - all_tweets_for_cache: ALL tweets for cache storage (no date/count limits, includes deleted)
         """
         all_tweets = tweets.copy()
         
@@ -195,35 +198,41 @@ class TwitterClient:
         
         all_tweets.sort(key=get_tweet_date, reverse=True)
         
-        # 3. Apply date cutoff filter
-        tweets_before_cutoff = all_tweets
-        all_tweets = []
-        for tweet in tweets_before_cutoff:
+        # Cache path: Store ALL tweets (no date cutoff, no count limit)
+        # Note: all_tweets is already a copy from line 181, safe to reference directly
+        tweets_to_cache = all_tweets
+        
+        # Visible tweets path: Apply date cutoff and limit for current operation
+        visible_tweets = []
+        for tweet in all_tweets:
             if tweet.get('created_at'):
                 try:
                     tweet_date = datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
                     cutoff_with_tz = cutoff_date.replace(tzinfo=tweet_date.tzinfo)
                     if tweet_date >= cutoff_with_tz:
-                        all_tweets.append(tweet)
+                        visible_tweets.append(tweet)
                 except ValueError:
-                    all_tweets.append(tweet)  # Keep if can't parse date
+                    visible_tweets.append(tweet)  # Keep if can't parse date
             else:
-                all_tweets.append(tweet)  # Keep if no date
+                visible_tweets.append(tweet)  # Keep if no date
         
-        if len(all_tweets) < len(tweets_before_cutoff):
-            bt.logging.debug(f"Filtered {len(tweets_before_cutoff) - len(all_tweets)} tweets older than {cutoff_date.strftime('%Y-%m-%d')}")
-        
-        # 4. Apply tweet limit
-        if len(all_tweets) > tweet_limit:
-            bt.logging.debug(f"Limiting to {tweet_limit} tweets (had {len(all_tweets)})")
-            all_tweets = all_tweets[:tweet_limit]
-        
-        # 5. Filter deleted tweets (missing_count >= 2) for return
-        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
         if len(visible_tweets) < len(all_tweets):
-            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} deleted tweets")
+            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} tweets older than {cutoff_date.strftime('%Y-%m-%d')} for return")
         
-        return visible_tweets, all_tweets
+        # Apply tweet limit to visible tweets only
+        if len(visible_tweets) > tweet_limit:
+            bt.logging.debug(f"Limiting returned tweets to {tweet_limit} (had {len(visible_tweets)})")
+            visible_tweets = visible_tweets[:tweet_limit]
+        
+        # Filter deleted tweets (missing_count >= 2) from visible tweets only
+        visible_tweets = [t for t in visible_tweets if t.get('missing_count', 0) < 2]
+        deleted_count = len([t for t in all_tweets if t.get('missing_count', 0) >= 2])
+        if deleted_count > 0:
+            bt.logging.debug(f"Filtered {deleted_count} deleted tweets from returned tweets (kept in cache)")
+        
+        bt.logging.debug(f"Cache will store {len(tweets_to_cache)} tweets, returning {len(visible_tweets)} tweets")
+        
+        return visible_tweets, tweets_to_cache
     
     def _fetch_from_single_endpoint(
         self,
@@ -375,7 +384,8 @@ class TwitterClient:
         Filters to only tweets authored by the user (the tweetsandreplies API returns
         both user's tweets AND replies from others).
         
-        Stops when either TWEET_FETCH_LIMIT is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
+        Fetches up to TWEET_FETCH_LIMIT tweets from API when cache is stale.
+        Returns ALL cached tweets regardless of age - callers apply their own date filtering.
         Uses smart cache merging to preserve historical tweets while fetching recent updates.
         
         Returns dict with 'user_info', 'tweets', and 'cache_info'
@@ -383,8 +393,8 @@ class TwitterClient:
         tweet_limit = TWEET_FETCH_LIMIT
         username = username.lower()
         
-        # Calculate cutoff date for lookback period
-        cutoff_date = datetime.now() - timedelta(days=TWITTER_DEFAULT_LOOKBACK_DAYS)
+        # Always return all cached tweets - caller applies date filtering as needed
+        cutoff_date = datetime.min.replace(tzinfo=None)
         
         # Check cache and determine fetch strategy
         cached_data = get_cached_user_tweets(username)
