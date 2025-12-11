@@ -17,10 +17,10 @@ import bittensor as bt
 
 from bitcast.validator.utils.config import (
     RAPID_API_KEY,
-    TWITTER_DEFAULT_LOOKBACK_DAYS,
-    TWEET_FETCH_LIMIT,
-    TWITTER_CACHE_FRESHNESS,
-    FORCE_CACHE_REFRESH
+    INITIAL_FETCH_DAYS,
+    INCREMENTAL_FETCH_DAYS,
+    MAX_TWEETS_PER_FETCH,
+    TWITTER_CACHE_FRESHNESS
 )
 from bitcast.validator.utils.twitter_cache import (
     get_cached_user_tweets,
@@ -40,7 +40,6 @@ class TwitterClient:
     
     def __init__(self, api_key: Optional[str] = None, 
                  max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
-                 lookback_hours: int = 96, force_cache_refresh: Optional[bool] = None,
                  posts_only: bool = True):
         """Initialize client with API key and configuration options.
         
@@ -49,8 +48,6 @@ class TwitterClient:
             max_retries: Maximum number of API request retries (default: 3)
             retry_delay: Delay in seconds between retries (default: 2.0)
             rate_limit_delay: Delay in seconds between API calls (default: 1.0)
-            lookback_hours: Hours to look back when updating stale cache (default: 96)
-            force_cache_refresh: If True, always refresh cache (ignores freshness check)
             posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
                        If False, use both /user/tweets and /user/tweetsandreplies
         """
@@ -62,8 +59,6 @@ class TwitterClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limit_delay = rate_limit_delay
-        self.lookback_hours = lookback_hours
-        self.force_cache_refresh = force_cache_refresh if force_cache_refresh is not None else FORCE_CACHE_REFRESH
         self.posts_only = posts_only
         
         self.headers = {
@@ -71,9 +66,8 @@ class TwitterClient:
             "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
         }
         
-        cache_mode = "forced refresh mode" if self.force_cache_refresh else f"with {TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness check"
         endpoint_mode = "posts-only mode" if self.posts_only else "dual-endpoint mode"
-        bt.logging.info(f"TwitterClient initialized with centralized cache ({cache_mode}, {endpoint_mode})")
+        bt.logging.info(f"TwitterClient initialized with centralized cache ({TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness, {endpoint_mode})")
     
     def _make_api_request(self, url: str, params: Dict) -> Tuple[Optional[Dict], Optional[str]]:
         """Make API request with retry logic for rate limits."""
@@ -153,30 +147,27 @@ class TwitterClient:
     def _post_process_tweets(
         self, 
         tweets: List[Dict], 
-        username: str, 
-        tweet_limit: int,
-        cutoff_date: datetime
+        username: str
     ) -> Tuple[List[Dict], List[Dict]]:
         """
-        Apply consistent filtering, sorting, and limiting to tweets from any source.
+        Apply consistent filtering, sorting, and deletion removal to tweets from any source.
         
-        Processes tweets through validation, sorting, date filtering, limiting, and
-        deletion filtering to ensure consistent output regardless of whether tweets
-        came from fresh cache, stale cache, or API fetch.
+        Processes tweets through validation, sorting, and deletion filtering to ensure 
+        consistent output regardless of whether tweets came from fresh cache, stale cache, 
+        or API fetch.
         
         IMPORTANT: The cache stores ALL tweets indefinitely without limits.
-        Only the visible_tweets returned to the caller are filtered by date and limit.
+        The visible_tweets returned to the caller include ALL tweets (only deleted tweets removed).
+        Callers apply their own date filtering and limits as needed.
         
         Args:
             tweets: Raw tweet list (from cache or API)
             username: Twitter username for author validation
-            tweet_limit: Maximum tweets to return in visible_tweets
-            cutoff_date: Oldest tweet date to include in visible_tweets
         
         Returns:
             Tuple of (visible_tweets, all_tweets_for_cache)
-            - visible_tweets: Tweets to return (filtered by date, limited, excludes deleted tweets)
-            - all_tweets_for_cache: ALL tweets for cache storage (no date/count limits, includes deleted)
+            - visible_tweets: ALL tweets (excludes deleted tweets with missing_count >= 2)
+            - all_tweets_for_cache: ALL tweets for cache storage (includes deleted)
         """
         all_tweets = tweets.copy()
         
@@ -199,38 +190,18 @@ class TwitterClient:
         all_tweets.sort(key=get_tweet_date, reverse=True)
         
         # Cache path: Store ALL tweets (no date cutoff, no count limit)
-        # Note: all_tweets is already a copy from line 181, safe to reference directly
+        # Note: all_tweets is already a copy from line 175, safe to reference directly
         tweets_to_cache = all_tweets
         
-        # Visible tweets path: Apply date cutoff and limit for current operation
-        visible_tweets = []
-        for tweet in all_tweets:
-            if tweet.get('created_at'):
-                try:
-                    tweet_date = datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                    cutoff_with_tz = cutoff_date.replace(tzinfo=tweet_date.tzinfo)
-                    if tweet_date >= cutoff_with_tz:
-                        visible_tweets.append(tweet)
-                except ValueError:
-                    visible_tweets.append(tweet)  # Keep if can't parse date
-            else:
-                visible_tweets.append(tweet)  # Keep if no date
-        
-        if len(visible_tweets) < len(all_tweets):
-            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} tweets older than {cutoff_date.strftime('%Y-%m-%d')} for return")
-        
-        # Apply tweet limit to visible tweets only
-        if len(visible_tweets) > tweet_limit:
-            bt.logging.debug(f"Limiting returned tweets to {tweet_limit} (had {len(visible_tweets)})")
-            visible_tweets = visible_tweets[:tweet_limit]
-        
+        # Visible tweets path: Return ALL tweets, only filter deleted ones
+        # Callers apply their own date filtering and limits as needed
         # Filter deleted tweets (missing_count >= 2) from visible tweets only
-        visible_tweets = [t for t in visible_tweets if t.get('missing_count', 0) < 2]
-        deleted_count = len([t for t in all_tweets if t.get('missing_count', 0) >= 2])
+        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
+        deleted_count = len(all_tweets) - len(visible_tweets)
         if deleted_count > 0:
             bt.logging.debug(f"Filtered {deleted_count} deleted tweets from returned tweets (kept in cache)")
         
-        bt.logging.debug(f"Cache will store {len(tweets_to_cache)} tweets, returning {len(visible_tweets)} tweets")
+        bt.logging.debug(f"Cache will store {len(tweets_to_cache)} tweets (including {deleted_count} deleted), returning {len(visible_tweets)} tweets")
         
         return visible_tweets, tweets_to_cache
     
@@ -377,75 +348,81 @@ class TwitterClient:
         """
         Fetch tweets for a user with intelligent caching and incremental updates.
         
+        Three fetch strategies:
+        - Initial (no cache): Bootstrap with 30 days of history
+        - Incremental (stale cache): Refresh last 4 days only
+        - Force refresh: Thorough 30-day update (merges with cache)
+        
         Args:
             username: Twitter username to fetch tweets for
-            force_refresh: If True, bypass cache and always fetch fresh data (default: False)
+            force_refresh: If True, fetch 30 days (thorough refresh, merges with cache)
         
         Filters to only tweets authored by the user (the tweetsandreplies API returns
         both user's tweets AND replies from others).
         
-        Fetches up to TWEET_FETCH_LIMIT tweets from API when cache is stale.
+        Fetches up to MAX_TWEETS_PER_FETCH tweets from API when cache is stale.
         Returns ALL cached tweets regardless of age - callers apply their own date filtering.
         Uses smart cache merging to preserve historical tweets while fetching recent updates.
         
         Returns dict with 'user_info', 'tweets', and 'cache_info'
         """
-        tweet_limit = TWEET_FETCH_LIMIT
         username = username.lower()
-        
-        # Always return all cached tweets - caller applies date filtering as needed
-        cutoff_date = datetime.min.replace(tzinfo=None)
         
         # Check cache and determine fetch strategy
         cached_data = get_cached_user_tweets(username)
-        incremental_cutoff = cutoff_date
+        last_updated = cached_data.get('last_updated') if cached_data else None
         
-        if cached_data and not force_refresh:
-            last_updated = cached_data.get('last_updated')
+        # Determine fetch strategy: initial / incremental / force / fresh
+        if not cached_data:
+            # INITIAL FETCH: No cache exists - bootstrap with 30 days
+            fetch_days = INITIAL_FETCH_DAYS
+            base_time = datetime.now()
+            bt.logging.info(f"Initial fetch for @{username} (last {fetch_days} days)")
             
-            # If updated within past freshness period, use cache completely (unless force refresh enabled)
-            if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
-                bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
-                
-                # Apply post-processing: sorting, filtering, limiting, and deletion removal
-                visible_tweets, tweets_to_cache = self._post_process_tweets(
-                    tweets=cached_data['tweets'],
-                    username=username,
-                    tweet_limit=tweet_limit,
-                    cutoff_date=cutoff_date
-                )
-                
-                # Update cache with post-processed tweets while preserving original timestamp
-                cache_data = {
-                    'user_info': cached_data['user_info'],
-                    'tweets': tweets_to_cache,
-                    'last_updated': last_updated  # Keep original to maintain freshness window
-                }
-                cache_user_tweets(username, cache_data)
-                
-                return {
-                    'user_info': cached_data['user_info'],
-                    'tweets': visible_tweets,
-                    'cache_info': {
-                        'cache_hit': True, 
-                        'new_tweets': 0,
-                        'cached_tweets': len(cached_data['tweets'])
-                    }
-                }
+        elif force_refresh:
+            # FORCE REFRESH: Thorough update - fetch 30 days (merges with cache)
+            fetch_days = INITIAL_FETCH_DAYS
+            base_time = last_updated
+            bt.logging.info(f"Force refresh for @{username} (fetching last {fetch_days} days)")
             
-            # Cache is stale - use incremental update with lookback buffer
-            if last_updated:
-                incremental_cutoff = max(
-                    last_updated - timedelta(hours=self.lookback_hours),
-                    cutoff_date
-                )
-                if self.force_cache_refresh:
-                    bt.logging.info(f"Force cache refresh enabled - fetching updates for @{username} (lookback to {incremental_cutoff.strftime('%Y-%m-%d %H:%M')})")
-                else:
-                    bt.logging.info(f"Updating stale cache for @{username} (lookback to {incremental_cutoff.strftime('%Y-%m-%d %H:%M')})")
+        elif last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
+            # FRESH CACHE: Use cached data without fetching
+            bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
+            
+            # Apply post-processing: sorting, validation, and deletion removal
+            visible_tweets, tweets_to_cache = self._post_process_tweets(
+                tweets=cached_data['tweets'],
+                username=username
+            )
+            
+            # Update cache with post-processed tweets while preserving original timestamp
+            cache_data = {
+                'user_info': cached_data['user_info'],
+                'tweets': tweets_to_cache,
+                'last_updated': last_updated  # Keep original to maintain freshness window
+            }
+            cache_user_tweets(username, cache_data)
+            
+            return {
+                'user_info': cached_data['user_info'],
+                'tweets': visible_tweets,
+                'cache_info': {
+                    'cache_hit': True, 
+                    'new_tweets': 0,
+                    'cached_tweets': len(cached_data['tweets'])
+                }
+            }
+        else:
+            # INCREMENTAL UPDATE: Cache is stale - refresh last 4 days
+            fetch_days = INCREMENTAL_FETCH_DAYS
+            base_time = last_updated
+            bt.logging.info(f"Incremental update for @{username} (last {fetch_days} days)")
         
-        if force_refresh:
-            bt.logging.info(f"Force refresh enabled for @{username} - bypassing cache")
+        # Calculate cutoff for API pagination stopping point
+        incremental_cutoff = base_time - timedelta(days=fetch_days)
+        
+        # API fetch limit (used for pagination)
+        tweet_limit = MAX_TWEETS_PER_FETCH
         
         # Select endpoints based on posts_only mode
         if self.posts_only:
@@ -542,12 +519,10 @@ class TwitterClient:
             bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total" + 
                            (f", {incremented_missing} missing++" if incremented_missing > 0 else ""))
         
-        # Apply post-processing: sorting, filtering, limiting, and deletion removal
+        # Apply post-processing: sorting, validation, and deletion removal
         visible_tweets, tweets_to_cache = self._post_process_tweets(
             tweets=all_tweets,
-            username=username,
-            tweet_limit=tweet_limit,
-            cutoff_date=cutoff_date
+            username=username
         )
         
         # Cache all tweets including deleted ones

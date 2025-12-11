@@ -15,7 +15,6 @@ import bittensor as bt
 
 from bitcast.validator.clients import TwitterClient
 from bitcast.validator.utils.config import (
-    TWITTER_DEFAULT_LOOKBACK_DAYS,
     PAGERANK_RETWEET_WEIGHT,
     PAGERANK_QUOTE_WEIGHT,
     BASELINE_TWEET_SCORE_FACTOR,
@@ -37,7 +36,8 @@ from .score_calculator import ScoreCalculator
 
 def fetch_user_tweets_safe(
     client: TwitterClient,
-    username: str
+    username: str,
+    force_refresh: bool = False
 ) -> Tuple[List[Dict], Optional[str]]:
     """
     Safely fetch tweets for a user with error handling.
@@ -45,14 +45,15 @@ def fetch_user_tweets_safe(
     Args:
         client: TwitterClient instance
         username: Username to fetch tweets for
+        force_refresh: If True, force cache refresh
         
     Returns:
         Tuple of (tweets_list, error_message)
     """
     try:
         # TwitterClient.fetch_user_tweets() validates author and ensures all tweets have the author field set
-        # Uses TWEET_FETCH_LIMIT from config (default: 200)
-        result = client.fetch_user_tweets(username)
+        # Uses MAX_TWEETS_PER_FETCH from config (default: 200)
+        result = client.fetch_user_tweets(username, force_refresh=force_refresh)
         return result.get('tweets', []), None
     except Exception as e:
         bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
@@ -168,14 +169,11 @@ def score_tweets_for_pool(
              Only tweets containing this tag will be scored
         qrt: Optional quoted tweet ID to filter by (e.g., '1983210945288569177')
              Only tweets that quote this specific tweet ID will be scored
-        start_date: Optional start date for brief window (inclusive)
+        start_date: Start date for brief window (inclusive, REQUIRED)
              Only tweets posted on or after this date will be scored
-             If None, uses TWITTER_DEFAULT_LOOKBACK_DAYS
-        end_date: Optional end date for brief window (inclusive)
+        end_date: End date for brief window (inclusive, REQUIRED)
              Only tweets posted on or before this date will be scored
-             If None, uses current date
-        force_cache_refresh: If True, force cache refresh (overrides FORCE_CACHE_REFRESH config)
-             If None, uses FORCE_CACHE_REFRESH config variable
+        force_cache_refresh: If True, force cache refresh (30-day fetch instead of 4-day incremental)
         
     Returns:
         List of dicts with keys: author, tweet_id, score
@@ -215,15 +213,12 @@ def score_tweets_for_pool(
                     f"min_interaction_weight={pool_config.get('min_interaction_weight', 0)}")
     
     # Set up date filtering (all dates in UTC)
-    if start_date and end_date:
-        cutoff_start = start_date
-        cutoff_end = end_date
-        bt.logging.debug(f"Brief window: {start_date.date()} to {end_date.date()}")
-    else:
-        # Fallback to lookback period
-        cutoff_start = datetime.now(timezone.utc) - timedelta(days=TWITTER_DEFAULT_LOOKBACK_DAYS)
-        cutoff_end = datetime.now(timezone.utc)
-        bt.logging.debug(f"Using lookback period: {TWITTER_DEFAULT_LOOKBACK_DAYS} days")
+    if not start_date or not end_date:
+        raise ValueError(f"Brief '{brief_id}' must specify both start_date and end_date")
+    
+    cutoff_start = start_date
+    cutoff_end = end_date
+    bt.logging.debug(f"Brief window: {start_date.date()} to {end_date.date()}")
     
     if tag or qrt:
         bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}")
@@ -288,7 +283,7 @@ def score_tweets_for_pool(
     # Step 3: Fetch tweets from connected active members
     bt.logging.debug("Fetching tweets from active members")
     
-    twitter_client = TwitterClient(force_cache_refresh=force_cache_refresh, posts_only=False)
+    twitter_client = TwitterClient(posts_only=False)
     member_tweets = []
     failed_members = []
     
@@ -297,7 +292,7 @@ def score_tweets_for_pool(
     # Use ThreadPoolExecutor for parallel fetching (like social_discovery)
     with ThreadPoolExecutor(max_workers=SOCIAL_DISCOVERY_MAX_WORKERS) as executor:
         future_to_member = {
-            executor.submit(fetch_user_tweets_safe, twitter_client, member): member
+            executor.submit(fetch_user_tweets_safe, twitter_client, member, force_cache_refresh): member
             for member in active_members
         }
         
@@ -385,9 +380,10 @@ def score_tweets_for_pool(
             f"(brief window: {start_date.date()} to {end_date.date()})"
         )
     else:
+        date_range_days = (cutoff_end - cutoff_start).days
         bt.logging.debug(
             f"Date filter: {len(member_tweets)} → {len(date_filtered)} "
-            f"(past {TWITTER_DEFAULT_LOOKBACK_DAYS} days)"
+            f"({date_range_days} day window)"
         )
     
     # Filter by content (language, optional tag, and optional QRT)
@@ -443,9 +439,9 @@ def score_tweets_for_pool(
         'pool_name': pool_name,
         'tag_filter': tag,
         'qrt_filter': qrt,
-        'start_date': start_date.isoformat() if start_date else None,
-        'end_date': end_date.isoformat() if end_date else None,
-        'lookback_days': TWITTER_DEFAULT_LOOKBACK_DAYS if not (start_date and end_date) else None,
+        'start_date': start_date.isoformat(),
+        'end_date': end_date.isoformat(),
+        'date_range_days': (end_date - start_date).days,
         'total_tweets_scored': len(scored_tweets),
         'tweets_with_engagement': tweets_with_engagement,
         'active_members_count': len(active_members),

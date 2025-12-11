@@ -211,7 +211,7 @@ class ConnectionScanner:
         username = username.lower()
         
         try:
-            # Fetch tweets using TwitterClient (uses TWEET_FETCH_LIMIT from config)
+            # Fetch tweets using TwitterClient (uses MAX_TWEETS_PER_FETCH from config)
             result = self.twitter_client.fetch_user_tweets(username, force_refresh=self.force_refresh)
             tweets = result.get('tweets', [])
             
