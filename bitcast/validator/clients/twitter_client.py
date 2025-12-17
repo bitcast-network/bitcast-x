@@ -9,6 +9,7 @@ import time
 import re
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -16,10 +17,10 @@ import bittensor as bt
 
 from bitcast.validator.utils.config import (
     RAPID_API_KEY,
-    TWITTER_DEFAULT_LOOKBACK_DAYS,
-    TWEET_FETCH_LIMIT,
-    TWITTER_CACHE_FRESHNESS,
-    FORCE_CACHE_REFRESH
+    INITIAL_FETCH_DAYS,
+    INCREMENTAL_FETCH_DAYS,
+    MAX_TWEETS_PER_FETCH,
+    TWITTER_CACHE_FRESHNESS
 )
 from bitcast.validator.utils.twitter_cache import (
     get_cached_user_tweets,
@@ -39,7 +40,7 @@ class TwitterClient:
     
     def __init__(self, api_key: Optional[str] = None, 
                  max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
-                 lookback_hours: int = 96, force_cache_refresh: Optional[bool] = None):
+                 posts_only: bool = True):
         """Initialize client with API key and configuration options.
         
         Args:
@@ -47,8 +48,8 @@ class TwitterClient:
             max_retries: Maximum number of API request retries (default: 3)
             retry_delay: Delay in seconds between retries (default: 2.0)
             rate_limit_delay: Delay in seconds between API calls (default: 1.0)
-            lookback_hours: Hours to look back when updating stale cache (default: 96)
-            force_cache_refresh: If True, always refresh cache (ignores freshness check)
+            posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
+                       If False, use both /user/tweets and /user/tweetsandreplies
         """
         self.api_key = api_key or RAPID_API_KEY
         if not self.api_key:
@@ -58,22 +59,21 @@ class TwitterClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limit_delay = rate_limit_delay
-        self.lookback_hours = lookback_hours
-        self.force_cache_refresh = force_cache_refresh if force_cache_refresh is not None else FORCE_CACHE_REFRESH
+        self.posts_only = posts_only
         
         self.headers = {
             "x-rapidapi-key": self.api_key,
             "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
         }
         
-        cache_mode = "forced refresh mode" if self.force_cache_refresh else f"with {TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness check"
-        bt.logging.info(f"TwitterClient initialized with centralized cache ({cache_mode})")
+        endpoint_mode = "posts-only mode" if self.posts_only else "dual-endpoint mode"
+        bt.logging.info(f"TwitterClient initialized with centralized cache ({TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness, {endpoint_mode})")
     
     def _make_api_request(self, url: str, params: Dict) -> Tuple[Optional[Dict], Optional[str]]:
         """Make API request with retry logic for rate limits."""
         for attempt in range(self.max_retries):
             try:
-                response = requests.get(url, headers=self.headers, params=params)
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
                 
                 if response.status_code in [429, 500, 502, 503, 504]:
                     if attempt < self.max_retries - 1:
@@ -101,6 +101,12 @@ class TwitterClient:
                         continue
                     return None, "Invalid response structure"
                 
+            except requests.exceptions.Timeout:
+                if attempt < self.max_retries - 1:
+                    bt.logging.warning(f"Request timeout, retrying...")
+                    time.sleep(self.retry_delay)
+                    continue
+                return None, "Request timeout"
             except Exception as e:
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay)
@@ -138,80 +144,108 @@ class TwitterClient:
         
         return validated_tweets
     
-    def fetch_user_tweets(self, username: str, force_refresh: bool = False, validate_author: bool = True) -> Dict[str, Any]:
+    def _post_process_tweets(
+        self, 
+        tweets: List[Dict], 
+        username: str
+    ) -> Tuple[List[Dict], List[Dict]]:
         """
-        Fetch tweets for a user with intelligent caching and incremental updates.
+        Apply consistent filtering, sorting, and deletion removal to tweets from any source.
+        
+        Processes tweets through validation, sorting, and deletion filtering to ensure 
+        consistent output regardless of whether tweets came from fresh cache, stale cache, 
+        or API fetch.
+        
+        IMPORTANT: The cache stores ALL tweets indefinitely without limits.
+        The visible_tweets returned to the caller include ALL tweets (only deleted tweets removed).
+        Callers apply their own date filtering and limits as needed.
         
         Args:
-            username: Twitter username to fetch tweets for
-            force_refresh: If True, bypass cache and always fetch fresh data (default: False)
-            validate_author: If True, filter tweets to only those authored by username (default: True)
-                           The tweetsandreplies API returns both user's tweets AND replies from others,
-                           so validation ensures only the timeline owner's tweets are included.
+            tweets: Raw tweet list (from cache or API)
+            username: Twitter username for author validation
         
-        Stops when either TWEET_FETCH_LIMIT is reached OR tweets older than TWITTER_DEFAULT_LOOKBACK_DAYS.
-        Uses smart cache merging to preserve historical tweets while fetching recent updates.
-        
-        Returns dict with 'user_info', 'tweets', and 'cache_info'
+        Returns:
+            Tuple of (visible_tweets, all_tweets_for_cache)
+            - visible_tweets: ALL tweets (excludes deleted tweets with missing_count >= 2)
+            - all_tweets_for_cache: ALL tweets for cache storage (includes deleted)
         """
-        tweet_limit = TWEET_FETCH_LIMIT
-        username = username.lower()
+        all_tweets = tweets.copy()
         
-        # Calculate cutoff date for lookback period
-        cutoff_date = datetime.now() - timedelta(days=TWITTER_DEFAULT_LOOKBACK_DAYS)
+        # 1. Validate author - filter to only tweets from this user
+        original_count = len(all_tweets)
+        all_tweets = self._validate_tweet_authors(all_tweets, username)
+        if len(all_tweets) < original_count:
+            filtered_count = original_count - len(all_tweets)
+            bt.logging.debug(f"Filtered {filtered_count} tweets from other authors")
         
-        # Check cache and determine fetch strategy
-        cached_data = get_cached_user_tweets(username)
-        incremental_cutoff = cutoff_date
+        # 2. Sort by date (most recent first)
+        def get_tweet_date(tweet):
+            try:
+                if tweet.get('created_at'):
+                    return datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
+            except ValueError:
+                return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
         
-        if cached_data and not force_refresh:
-            last_updated = cached_data.get('last_updated')
+        all_tweets.sort(key=get_tweet_date, reverse=True)
+        
+        # Cache path: Store ALL tweets (no date cutoff, no count limit)
+        # Note: all_tweets is already a copy from line 175, safe to reference directly
+        tweets_to_cache = all_tweets
+        
+        # Visible tweets path: Return ALL tweets, only filter deleted ones
+        # Callers apply their own date filtering and limits as needed
+        # Filter deleted tweets (missing_count >= 2) from visible tweets only
+        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
+        deleted_count = len(all_tweets) - len(visible_tweets)
+        if deleted_count > 0:
+            bt.logging.debug(f"Filtered {deleted_count} deleted tweets from returned tweets (kept in cache)")
+        
+        bt.logging.debug(f"Cache will store {len(tweets_to_cache)} tweets (including {deleted_count} deleted), returning {len(visible_tweets)} tweets")
+        
+        return visible_tweets, tweets_to_cache
+    
+    def _fetch_from_single_endpoint(
+        self,
+        url: str,
+        username: str,
+        tweet_limit: int,
+        incremental_cutoff: datetime
+    ) -> Tuple[List[Dict], Optional[Dict], bool]:
+        """
+        Fetch tweets from a single Twitter API endpoint with pagination.
+        
+        Args:
+            url: API endpoint URL
+            username: Twitter username to fetch for
+            tweet_limit: Maximum tweets to fetch
+            incremental_cutoff: Date cutoff for pagination stopping
             
-            # If updated within past freshness period, use cache completely (unless force refresh enabled)
-            if not self.force_cache_refresh and last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
-                bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
-                cached_tweets = cached_data['tweets']
-                
-                # Apply author validation to cached data
-                if validate_author:
-                    cached_tweets = self._validate_tweet_authors(cached_tweets, username)
-                
-                return {
-                    'user_info': cached_data['user_info'],
-                    'tweets': cached_tweets,
-                    'cache_info': {'cache_hit': True, 'new_tweets': 0}
-                }
-            
-            # Cache is stale - use incremental update with lookback buffer
-            if last_updated:
-                incremental_cutoff = max(
-                    last_updated - timedelta(hours=self.lookback_hours),
-                    cutoff_date
-                )
-                if self.force_cache_refresh:
-                    bt.logging.info(f"Force cache refresh enabled - fetching updates for @{username} (lookback to {incremental_cutoff.strftime('%Y-%m-%d %H:%M')})")
-                else:
-                    bt.logging.info(f"Updating stale cache for @{username} (lookback to {incremental_cutoff.strftime('%Y-%m-%d %H:%M')})")
-        
-        if force_refresh:
-            bt.logging.info(f"Force refresh enabled for @{username} - bypassing cache")
-        
-        # Fetch from API
-        url = "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies"
+        Returns:
+            Tuple of (tweets_list, user_info, api_succeeded)
+        """
         params = {"username": username, "limit": "40"}
         
         tweets = []
-        user_info = None
+        # Initialize user_info with requested username (guaranteed correct)
+        # Followers count will be extracted from timeline owner's tweets if available
+        user_info = {
+            'username': username.lower(),
+            'followers_count': 0
+        }
         cursor = None
         api_fetch_succeeded = False
+        max_pages = 10  # Limit pagination to prevent excessive API calls
+        page_count = 0
         
-        while len(tweets) < tweet_limit:
+        while len(tweets) < tweet_limit and page_count < max_pages:
+            page_count += 1
             if cursor:
                 params["cursor"] = cursor
             
             data, error = self._make_api_request(url, params)
             if error:
-                bt.logging.error(f"API failed for @{username}: {error}")
+                bt.logging.error(f"API failed for @{username} at {url.split('/')[-1]}: {error}")
                 break
             
             api_fetch_succeeded = True
@@ -254,8 +288,14 @@ class TwitterClient:
                 if entry_id.startswith('tweet-'):
                     tweet_data = self._parse_tweet(entry, username)
                     if tweet_data:
-                        tweets.append(tweet_data)
-                        tweets_found += 1
+                        # Default author for /tweets endpoint (only returns user's tweets)
+                        if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
+                            tweet_data['author'] = username
+                        
+                        # Filter by author during pagination
+                        if (tweet_data.get('author') or '').lower() == username:
+                            tweets.append(tweet_data)
+                            tweets_found += 1
                         
                         # Check cutoff only for non-pinned tweets
                         is_pinned = entry_id in pinned_entry_ids
@@ -270,61 +310,183 @@ class TwitterClient:
                             except ValueError:
                                 pass
                     
-                    # Extract user info if not yet collected
-                    if not user_info:
-                        user_info = self._extract_user_info(entry, username)
+                    # Extract followers count if not yet collected and tweet is from timeline owner
+                    if user_info['followers_count'] == 0 and tweet_data.get('author', '').lower() == username:
+                        followers = self._extract_followers_count(entry)
+                        if followers:
+                            user_info['followers_count'] = followers
                 
                 # Handle profile-conversation entries (contains multiple tweets)
                 elif entry_id.startswith('profile-conversation-'):
                     conversation_tweets = self._parse_profile_conversation(entry, username)
+                    
                     for tweet_data in conversation_tweets:
                         if tweet_data:
-                            tweets.append(tweet_data)
-                            tweets_found += 1
+                            # Default author for /tweets endpoint (only returns user's tweets)
+                            if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
+                                tweet_data['author'] = username
                             
-                            # Check cutoff (profile-conversation entries are not pinned)
-                            if tweet_data.get('created_at'):
-                                try:
-                                    tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                                    cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
-                                    if tweet_date < cutoff_with_tz:
-                                        bt.logging.debug(f"Reached incremental cutoff for @{username}")
-                                        cursor = None
-                                        break
-                                except ValueError:
-                                    pass
-                            
-                            # Extract user info if not yet collected
-                            if not user_info and 'author' in tweet_data:
-                                # Try to extract from the tweet data in profile-conversation
-                                try:
-                                    user_info = {
-                                        'username': tweet_data['author'],
-                                        'followers_count': 0  # Not available in profile-conversation items
-                                    }
-                                except (KeyError, AttributeError):
-                                    pass
+                            # Filter by author during pagination
+                            if (tweet_data.get('author') or '').lower() == username:
+                                tweets.append(tweet_data)
+                                tweets_found += 1
                 
                 # Check tweet limit
                 if len(tweets) >= tweet_limit:
-                    bt.logging.info(f"Reached tweet limit ({tweet_limit}) for @{username}")
+                    bt.logging.debug(f"Reached tweet limit ({tweet_limit}) for @{username}")
                     cursor = None
                     break
             
-            if not cursor or tweets_found == 0:
+            if not cursor:
                 break
             
             time.sleep(self.rate_limit_delay)  # Rate limiting
         
-        # Deduplicate by tweet_id (pinned tweets appear on every page)
-        unique_map = {t['tweet_id']: t for t in tweets if t.get('tweet_id')}
+        return tweets, user_info, api_fetch_succeeded
+    
+    def fetch_user_tweets(self, username: str, force_refresh: bool = False) -> Dict[str, Any]:
+        """
+        Fetch tweets for a user with intelligent caching and incremental updates.
+        
+        Three fetch strategies:
+        - Initial (no cache): Bootstrap with 30 days of history
+        - Incremental (stale cache): Refresh last 4 days only
+        - Force refresh: Thorough 30-day update (merges with cache)
+        
+        Args:
+            username: Twitter username to fetch tweets for
+            force_refresh: If True, fetch 30 days (thorough refresh, merges with cache)
+        
+        Filters to only tweets authored by the user (the tweetsandreplies API returns
+        both user's tweets AND replies from others).
+        
+        Fetches up to MAX_TWEETS_PER_FETCH tweets from API when cache is stale.
+        Returns ALL cached tweets regardless of age - callers apply their own date filtering.
+        Uses smart cache merging to preserve historical tweets while fetching recent updates.
+        
+        Returns dict with 'user_info', 'tweets', and 'cache_info'
+        """
+        username = username.lower()
+        
+        # Check cache and determine fetch strategy
+        cached_data = get_cached_user_tweets(username)
+        last_updated = cached_data.get('last_updated') if cached_data else None
+        
+        # Determine fetch strategy: initial / incremental / force / fresh
+        if not cached_data:
+            # INITIAL FETCH: No cache exists - bootstrap with 30 days
+            fetch_days = INITIAL_FETCH_DAYS
+            base_time = datetime.now()
+            bt.logging.info(f"Initial fetch for @{username} (last {fetch_days} days)")
+            
+        elif force_refresh:
+            # FORCE REFRESH: Thorough update - fetch 30 days (merges with cache)
+            fetch_days = INITIAL_FETCH_DAYS
+            base_time = last_updated
+            bt.logging.info(f"Force refresh for @{username} (fetching last {fetch_days} days)")
+            
+        elif last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
+            # FRESH CACHE: Use cached data without fetching
+            bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
+            
+            # Apply post-processing: sorting, validation, and deletion removal
+            visible_tweets, tweets_to_cache = self._post_process_tweets(
+                tweets=cached_data['tweets'],
+                username=username
+            )
+            
+            # Update cache with post-processed tweets while preserving original timestamp
+            cache_data = {
+                'user_info': cached_data['user_info'],
+                'tweets': tweets_to_cache,
+                'last_updated': last_updated  # Keep original to maintain freshness window
+            }
+            cache_user_tweets(username, cache_data)
+            
+            return {
+                'user_info': cached_data['user_info'],
+                'tweets': visible_tweets,
+                'cache_info': {
+                    'cache_hit': True, 
+                    'new_tweets': 0,
+                    'cached_tweets': len(cached_data['tweets'])
+                }
+            }
+        else:
+            # INCREMENTAL UPDATE: Cache is stale - refresh last 4 days
+            fetch_days = INCREMENTAL_FETCH_DAYS
+            base_time = last_updated
+            bt.logging.info(f"Incremental update for @{username} (last {fetch_days} days)")
+        
+        # Calculate cutoff for API pagination stopping point
+        incremental_cutoff = base_time - timedelta(days=fetch_days)
+        
+        # API fetch limit (used for pagination)
+        tweet_limit = MAX_TWEETS_PER_FETCH
+        
+        # Select endpoints based on posts_only mode
+        if self.posts_only:
+            # Posts-only mode: faster, uses less quota (excludes replies)
+            endpoints = [
+                "https://twitter-v24.p.rapidapi.com/user/tweets"
+            ]
+        else:
+            # Dual-endpoint mode: complete tweet coverage (includes replies)
+            endpoints = [
+                "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
+                "https://twitter-v24.p.rapidapi.com/user/tweets"
+            ]
+        
+        # Fetch from endpoint(s) in parallel
+        all_tweets = []
+        user_info = None
+        api_fetch_succeeded = False
+        
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+            future_to_endpoint = {
+                executor.submit(
+                    self._fetch_from_single_endpoint,
+                    url, username, tweet_limit, incremental_cutoff
+                ): url
+                for url in endpoints
+            }
+            
+            for future in as_completed(future_to_endpoint):
+                endpoint_url = future_to_endpoint[future]
+                try:
+                    tweets, endpoint_user_info, endpoint_success = future.result()
+                    all_tweets.extend(tweets)
+                    
+                    # Use user_info from first successful endpoint
+                    if endpoint_user_info and not user_info:
+                        user_info = endpoint_user_info
+                    
+                    # Track if any endpoint succeeded
+                    if endpoint_success:
+                        api_fetch_succeeded = True
+                        
+                    bt.logging.debug(f"Fetched {len(tweets)} tweets from {endpoint_url.split('/')[-1]}")
+                except Exception as e:
+                    bt.logging.warning(f"Failed to fetch from {endpoint_url}: {e}")
+                    # Continue with other endpoints
+        
+        # Deduplicate by tweet_id (handles overlap between endpoints and pinned tweets)
+        unique_map = {t['tweet_id']: t for t in all_tweets if t.get('tweet_id')}
         tweets = list(unique_map.values())
+        
+        # Log deduplication metrics for dual endpoint mode
+        if len(endpoints) > 1:
+            overlap_count = len(all_tweets) - len(tweets)
+            bt.logging.info(
+                f"Fetched {len(all_tweets)} total tweets from {len(endpoints)} endpoints for @{username}, "
+                f"{len(tweets)} unique ({overlap_count} duplicates removed)"
+            )
+        else:
+            bt.logging.info(f"Fetched {len(tweets)} tweets for @{username}")
         
         # Reset missing counter for newly fetched tweets
         for tweet in tweets:
             tweet['missing_count'] = 0
-        
-        bt.logging.info(f"Fetched {len(tweets)} new tweets for @{username}")
         
         # Smart merge: combine new tweets with cached tweets, track deleted tweets
         all_tweets = tweets.copy()
@@ -354,37 +516,19 @@ class TwitterClient:
                 all_tweets.append(cached_tweet)
                 cached_count += 1
             
-            # Sort by date (most recent first)
-            def get_tweet_date(tweet):
-                try:
-                    if tweet.get('created_at'):
-                        return datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                    return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
-                except ValueError:
-                    return datetime.min.replace(tzinfo=datetime.now().astimezone().tzinfo)
-            
-            all_tweets.sort(key=get_tweet_date, reverse=True)
             bt.logging.debug(f"Merged: {len(tweets)} new + {cached_count} cached = {len(all_tweets)} total" + 
                            (f", {incremented_missing} missing++" if incremented_missing > 0 else ""))
         
-        # Validate author: filter to only tweets from timeline owner
-        if validate_author:
-            original_count = len(all_tweets)
-            all_tweets = self._validate_tweet_authors(all_tweets, username)
-            
-            if len(all_tweets) < original_count:
-                filtered_count = original_count - len(all_tweets)
-                bt.logging.debug(f"Filtered {filtered_count} tweets from other authors (keeping {len(all_tweets)} from @{username})")
-        
-        # Filter deleted tweets (missing_count >= 2) before returning
-        visible_tweets = [t for t in all_tweets if t.get('missing_count', 0) < 2]
-        if len(visible_tweets) < len(all_tweets):
-            bt.logging.debug(f"Filtered {len(all_tweets) - len(visible_tweets)} deleted tweets from @{username}")
+        # Apply post-processing: sorting, validation, and deletion removal
+        visible_tweets, tweets_to_cache = self._post_process_tweets(
+            tweets=all_tweets,
+            username=username
+        )
         
         # Cache all tweets including deleted ones
         cache_data = {
             'user_info': (cached_data.get('user_info') if cached_data else None) or user_info or {'username': username, 'followers_count': 0},
-            'tweets': all_tweets,
+            'tweets': tweets_to_cache,
             'last_updated': datetime.now()
         }
         cache_user_tweets(username, cache_data)
@@ -392,7 +536,11 @@ class TwitterClient:
         return {
             'user_info': cache_data['user_info'],
             'tweets': visible_tweets,
-            'cache_info': {'cache_hit': bool(cached_data), 'new_tweets': len(tweets), 'cached_tweets': cached_count}
+            'cache_info': {
+                'cache_hit': bool(cached_data), 
+                'new_tweets': len(tweets), 
+                'cached_tweets': cached_count
+            }
         }
     
     def _parse_tweet_result(self, tweet_result: Dict) -> Optional[Dict]:
@@ -435,11 +583,35 @@ class TwitterClient:
             quoted_user = None
             quoted_tweet_id = None
             if is_quote:
-                url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
-                match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
-                if match:
-                    quoted_user = match.group(1).lower()
-                    quoted_tweet_id = match.group(2)
+                # Check multiple sources for quoted tweet ID (Twitter API returns it in different places)
+                # 1. Direct field in legacy object (most reliable)
+                quoted_tweet_id = legacy.get('quoted_status_id_str')
+                
+                # 2. Nested object (alternative structure)
+                if not quoted_tweet_id:
+                    quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
+                    quoted_tweet_id = quoted_status_result.get('rest_id')
+                
+                # 3. Parse from permalink URL (fallback)
+                if not quoted_tweet_id:
+                    url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
+                    match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
+                    if match:
+                        quoted_user = match.group(1).lower()
+                        quoted_tweet_id = match.group(2)
+                
+                # Extract quoted user if not already found
+                if quoted_tweet_id and not quoted_user:
+                    # Try to get from quoted_status_result
+                    try:
+                        quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
+                        quoted_user = quoted_status_result['core']['user_results']['result']['legacy']['screen_name'].lower()
+                    except (KeyError, AttributeError, TypeError):
+                        # Fallback to permalink URL
+                        url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
+                        match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
+                        if match:
+                            quoted_user = match.group(1).lower()
             
             # Extract actual author from core.user_results (not the timeline owner)
             # This is crucial for detecting retweets that don't have "RT @" prefix
@@ -447,7 +619,11 @@ class TwitterClient:
             try:
                 author = tweet_result['core']['user_results']['result']['legacy']['screen_name'].lower()
             except (KeyError, AttributeError, TypeError):
-                pass
+                try:
+                    # Fallback: some API responses use 'core' instead of 'legacy'
+                    author = tweet_result['core']['user_results']['result']['core']['screen_name'].lower()
+                except (KeyError, AttributeError, TypeError):
+                    pass
             
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
@@ -479,14 +655,18 @@ class TwitterClient:
         except (KeyError, AttributeError):
             return None
     
-    def _extract_user_info(self, entry: Dict, username: str) -> Optional[Dict]:
-        """Extract user info from tweet entry."""
+    def _extract_followers_count(self, entry: Dict) -> Optional[int]:
+        """Extract followers count from tweet entry.
+        
+        Args:
+            entry: Tweet entry from API response
+            
+        Returns:
+            Followers count if available, None otherwise
+        """
         try:
             user_data = entry['content']['itemContent']['tweet_results']['result']['core']['user_results']['result']['legacy']
-            return {
-                'username': user_data.get('screen_name', username).lower(),
-                'followers_count': user_data.get('followers_count', 0)
-            }
+            return user_data.get('followers_count', 0)
         except (KeyError, AttributeError):
             return None
     
@@ -512,7 +692,7 @@ class TwitterClient:
         
         return tweets
     
-    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None) -> bool:
+    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None, min_tweets: int = 1) -> bool:
         """Check if user tweets about keywords and meets follower threshold.
         
         Args:
@@ -521,6 +701,7 @@ class TwitterClient:
             min_followers: Minimum follower count threshold
             lang: Optional language filter (e.g., 'en', 'zh'). If specified, user must have at least 
                   one tweet in this language, but keywords are checked across all tweets.
+            min_tweets: Minimum number of tweets containing keywords for user to be considered relevant
         
         Returns:
             True if user is relevant (meets all criteria), False otherwise
@@ -546,13 +727,24 @@ class TwitterClient:
             if not lang_tweets:
                 return False  # No tweets in target language
         
-        # Check keywords across ALL tweets (regardless of language)
+        # Count tweets with keywords across ALL tweets (regardless of language)
         keywords_lower = [kw.lower() for kw in keywords]
+        tweets_with_keywords = 0
+        
         for tweet in result['tweets']:
             text_lower = tweet['text'].lower()
-            # Use word boundaries to match whole words only
-            if any(re.search(r'\b' + re.escape(kw) + r'\b', text_lower) for kw in keywords_lower):
-                return True
+            
+            # Check if tweet contains any keyword
+            has_keyword = any(
+                kw in text_lower if kw.startswith(('#', '$'))
+                else bool(re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
+                for kw in keywords_lower
+            )
+            
+            if has_keyword:
+                tweets_with_keywords += 1
+                if tweets_with_keywords >= min_tweets:
+                    return True
         
         return False
     

@@ -29,8 +29,8 @@ if __name__ == "__main__":
 
 # Now import custom modules that use bt.logging
 from bitcast.validator.clients.twitter_client import TwitterClient
+from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 from .pool_manager import PoolManager
-from .pool_status_manager import PoolStatusManager
 from .social_map_publisher import publish_social_map, republish_latest_social_map
 from bitcast.validator.utils.config import (
     PAGERANK_MENTION_WEIGHT,
@@ -56,19 +56,21 @@ class TwitterNetworkAnalyzer:
     - Score normalization
     """
     
-    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, force_cache_refresh: bool = False):
+    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, force_cache_refresh: bool = False, posts_only: bool = True):
         """
         Initialize analyzer with optional custom Twitter client.
         
         Args:
             twitter_client: Optional TwitterClient instance (typically for testing/mocking).
-                          If provided, force_cache_refresh is ignored.
+                          If provided, force_cache_refresh and posts_only are ignored.
             max_workers: Number of concurrent workers (1=sequential, 2+=concurrent)
                         If None, uses SOCIAL_DISCOVERY_MAX_WORKERS config
             force_cache_refresh: If True, force Twitter API cache refresh. Only applied when
                                twitter_client is not provided.
+            posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
+                       Default: True for social discovery. Only applied when twitter_client is not provided.
         """
-        self.twitter_client = twitter_client or TwitterClient(force_cache_refresh=force_cache_refresh)
+        self.twitter_client = twitter_client or TwitterClient(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -86,7 +88,7 @@ class TwitterNetworkAnalyzer:
         else:
             bt.logging.info("Sequential mode (concurrency disabled)")
     
-    def _fetch_tweets_safe(self, username: str) -> Tuple[str, List[Dict], Optional[str]]:
+    def _fetch_tweets_safe(self, username: str) -> Tuple[str, List[Dict], Dict, Optional[str]]:
         """
         Fetch tweets for a user with error handling.
         
@@ -94,16 +96,16 @@ class TwitterNetworkAnalyzer:
             username: Twitter username
             
         Returns:
-            Tuple of (username_lower, tweets_list, error_message)
+            Tuple of (username_lower, tweets_list, user_info, error_message)
         """
         try:
             result = self.twitter_client.fetch_user_tweets(username.lower())
-            return username.lower(), result['tweets'], None
+            return username.lower(), result['tweets'], result['user_info'], None
         except Exception as e:
             bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
-            return username.lower(), [], str(e)
+            return username.lower(), [], {'username': username.lower(), 'followers_count': 0}, str(e)
     
-    def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None) -> Tuple[str, bool]:
+    def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None, min_tweets: int = 1) -> Tuple[str, bool]:
         """
         Check user relevance with error handling.
         
@@ -112,12 +114,13 @@ class TwitterNetworkAnalyzer:
             keywords: Keywords to check
             min_followers: Minimum follower threshold
             lang: Optional language filter
+            min_tweets: Minimum number of tweets containing keywords
             
         Returns:
             Tuple of (username, is_relevant)
         """
         try:
-            return username, self.twitter_client.check_user_relevance(username, keywords, min_followers, lang)
+            return username, self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets)
         except Exception as e:
             bt.logging.warning(f"Relevance check failed for @{username}: {e}")
             return username, False
@@ -127,8 +130,10 @@ class TwitterNetworkAnalyzer:
         seed_accounts: List[str], 
         keywords: List[str], 
         min_followers: int = 0,
-        lang: Optional[str] = None
-    ) -> Tuple[Dict[str, float], np.ndarray, List[str]]:
+        lang: Optional[str] = None,
+        min_tweets: int = 1,
+        min_interaction_weight: float = 0
+    ) -> Tuple[Dict[str, float], np.ndarray, List[str], Dict[str, Dict]]:
         """
         Analyze Twitter network and return PageRank scores.
         
@@ -137,9 +142,13 @@ class TwitterNetworkAnalyzer:
             keywords: Keywords to filter accounts by
             min_followers: Minimum follower threshold
             lang: Optional language filter (e.g., 'en', 'zh')
+            min_tweets: Minimum number of tweets containing keywords for relevance
+            min_interaction_weight: Minimum total incoming interaction weight for quality filtering.
+                                   Accounts with incoming weight below threshold are filtered out.
+                                   Seed accounts are always preserved.
             
         Returns:
-            Tuple of (scores_dict, adjacency_matrix, usernames_list)
+            Tuple of (scores_dict, adjacency_matrix, usernames_list, user_info_map)
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
@@ -147,6 +156,7 @@ class TwitterNetworkAnalyzer:
         # Step 1: Fetch tweets for seed accounts
         fetch_start = time.time()
         all_tweets = {}
+        user_info_map = {}
         failed_accounts = []
         
         if self.max_workers > 1:
@@ -159,16 +169,18 @@ class TwitterNetworkAnalyzer:
                 }
                 
                 for future in as_completed(future_to_username):
-                    username, tweets, error = future.result()
+                    username, tweets, user_info, error = future.result()
                     if error:
                         failed_accounts.append((username, error))
                     all_tweets[username] = tweets
+                    user_info_map[username] = user_info
         else:
             # Sequential execution
             for username in seed_accounts:
                 username_lower = username.lower()
                 result = self.twitter_client.fetch_user_tweets(username_lower)
                 all_tweets[username_lower] = result['tweets']
+                user_info_map[username_lower] = result['user_info']
         
         fetch_time = time.time() - fetch_start
         total_tweets = sum(len(tweets) for tweets in all_tweets.values())
@@ -242,7 +254,7 @@ class TwitterNetworkAnalyzer:
                 bt.logging.info(f"Checking relevance concurrently ({self.max_workers} workers)...")
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
-                        executor.submit(self._check_relevance_safe, username, keywords, min_followers, lang): username
+                        executor.submit(self._check_relevance_safe, username, keywords, min_followers, lang, min_tweets): username
                         for username in all_accounts_to_check
                     }
                     
@@ -253,7 +265,7 @@ class TwitterNetworkAnalyzer:
             else:
                 # Sequential relevance checking
                 for username in all_accounts_to_check:
-                    if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang):
+                    if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets):
                         relevant_users.add(username)
             
             relevance_time = time.time() - relevance_start
@@ -270,12 +282,43 @@ class TwitterNetworkAnalyzer:
         else:
             all_users = discovered_users | set(seed_accounts)
         
+        # Step 4: Filter by minimum interaction weight (quality check)
+        if min_interaction_weight > 0:
+            # Calculate total incoming weight for each account
+            incoming_weights = {}
+            for (from_user, to_user), weight in interactions.items():
+                incoming_weights[to_user] = incoming_weights.get(to_user, 0) + weight
+            
+            # Filter to accounts meeting threshold
+            accounts_before = len(all_users)
+            qualified_accounts = {
+                user for user, total_weight in incoming_weights.items()
+                if total_weight >= min_interaction_weight
+            }
+            
+            # Include seed accounts that may have outgoing but no incoming interactions
+            # They are important network sources even without incoming weight
+            qualified_accounts |= (set(seed_accounts) & all_users)
+            
+            # Re-filter interactions to only include edges between qualified accounts
+            interactions = {
+                (from_user, to_user): weight
+                for (from_user, to_user), weight in interactions.items()
+                if from_user in qualified_accounts and to_user in qualified_accounts
+            }
+            
+            all_users = qualified_accounts
+            bt.logging.info(
+                f"Filtered by min_interaction_weight ({min_interaction_weight}): "
+                f"{len(all_users)}/{accounts_before} accounts remain"
+            )
+        
         bt.logging.info(f"Network: {len(all_users)} users, {len(interactions)} interactions")
         
         if not interactions:
             raise ValueError("No interactions found in network")
         
-        # Step 4: Calculate PageRank
+        # Step 5: Calculate PageRank
         G = nx.DiGraph()
         for (from_user, to_user), weight in interactions.items():
             G.add_edge(from_user, to_user, weight=weight)
@@ -318,13 +361,14 @@ class TwitterNetworkAnalyzer:
             f"({mode} mode with {self.max_workers} worker{'s' if self.max_workers > 1 else ''})"
         )
         
-        return rounded_scores, adjacency_matrix, usernames_sorted
+        return rounded_scores, adjacency_matrix, usernames_sorted, user_info_map
 
 
-def discover_social_network(
+async def discover_social_network(
     pool_name: str = "tao", 
     run_id: Optional[str] = None,
-    force_cache_refresh: bool = False
+    force_cache_refresh: bool = False,
+    posts_only: bool = True
 ) -> str:
     """
     Discover social network using PageRank network analysis.
@@ -333,6 +377,7 @@ def discover_social_network(
         pool_name: Name of the pool to discover social network for
         run_id: Validation cycle identifier (auto-generated if not provided)
         force_cache_refresh: If True, force Twitter API cache refresh for all accounts
+        posts_only: If True, use only /user/tweets endpoint (faster, saves quota). Default: True
         
     Returns:
         Path to saved social map file
@@ -363,7 +408,6 @@ def discover_social_network(
         pool_dir = social_maps_dir / pool_name
         
         seed_accounts = []
-        previous_status = None
         
         if pool_dir.exists():
             # Look for existing social map files
@@ -372,53 +416,43 @@ def discover_social_network(
                               and not f.name.endswith('_metadata.json')
                               and not f.name.startswith('recursive_summary_')]
             if social_map_files:
-                # Use latest social map accounts
-                latest_file = max(social_map_files, key=lambda f: f.stat().st_mtime)
+                # Use latest social map by filename timestamp
+                latest_file = max(
+                    social_map_files,
+                    key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
+                )
                 with open(latest_file, 'r') as f:
                     existing_data = json.load(f)
                 
-                # Extract seed accounts (only active members: "in" or "promoted")
-                # and previous status
-                seed_accounts = [
-                    acc for acc, data in existing_data['accounts'].items()
-                    if data['status'] in ['in', 'promoted']
-                ]
-                previous_status = {
-                    acc: data['status'] 
-                    for acc, data in existing_data['accounts'].items()
-                }
+                # Extract top accounts by score as seeds
+                max_seed_accounts = pool_config.get('max_seed_accounts', 150)
                 
-                bt.logging.info(f"Using {len(seed_accounts)} existing accounts as seeds")
+                # Get all accounts sorted by score
+                all_accounts = [
+                    (acc, data.get('score', 0.0))
+                    for acc, data in existing_data['accounts'].items()
+                ]
+                
+                # Sort by score descending and take top N
+                all_accounts.sort(key=lambda x: x[1], reverse=True)
+                seed_accounts = [acc for acc, _ in all_accounts[:max_seed_accounts]]
+                
+                bt.logging.info(f"Using top {len(seed_accounts)} accounts (max: {max_seed_accounts}) from previous run as seeds")
         
         if not seed_accounts:
             seed_accounts = pool_config['initial_accounts']
             bt.logging.info(f"Using {len(seed_accounts)} initial accounts as seeds")
         
         # Analyze network
-        analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh)
-        scores, adjacency_matrix, usernames = analyzer.analyze_network(
+        analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
+        scores, adjacency_matrix, usernames, user_info_map = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
             min_followers=0,
-            lang=pool_config.get('lang')
+            lang=pool_config.get('lang'),
+            min_tweets=pool_config.get('min_tweets', 1),
+            min_interaction_weight=pool_config.get('min_interaction_weight', 0)
         )
-        
-        # Apply pool management logic
-        status_manager = PoolStatusManager()
-        status_map = status_manager.calculate_pool_membership(
-            scores=scores,
-            adjacency_matrix=adjacency_matrix,
-            usernames=usernames,
-            pool_config=pool_config,
-            previous_status=previous_status
-        )
-        
-        # Count status types for metadata
-        status_counts = {'in': 0, 'out': 0, 'promoted': 0, 'relegated': 0}
-        for status in status_map.values():
-            status_counts[status] = status_counts.get(status, 0) + 1
-        
-        active_members = status_counts['in'] + status_counts['promoted']
         
         # Create social map data structure
         # Sort accounts by score in descending order
@@ -428,15 +462,12 @@ def discover_social_network(
             'metadata': {
                 'created_at': datetime.now().isoformat(),
                 'pool_name': pool_name,
-                'total_accounts': len(scores),
-                'active_members': active_members,
-                'promoted_count': status_counts['promoted'],
-                'relegated_count': status_counts['relegated']
+                'total_accounts': len(scores)
             },
             'accounts': {
                 username: {
                     'score': score,
-                    'status': status_map[username]
+                    'followers_count': user_info_map.get(username, {}).get('followers_count', 0)
                 }
                 for username, score in sorted_accounts
             }
@@ -488,20 +519,23 @@ def discover_social_network(
         # Publish social map data if enabled (fire-and-forget pattern)
         if ENABLE_DATA_PUBLISH:
             try:
-                success = asyncio.run(publish_social_map(
+                success = await publish_social_map(
                     pool_name=pool_name,
                     social_map_data=social_map_data,
                     adjacency_matrix=adjacency_matrix,
                     usernames=usernames,
                     run_id=run_id
-                ))
+                )
                 if success:
                     bt.logging.info(f"🚀 Social map data published successfully for pool {pool_name}")
                 else:
                     bt.logging.warning(f"⚠️ Social map data publishing failed for pool {pool_name} (local results saved)")
             except RuntimeError as e:
-                # No global publisher initialized - log but don't fail
-                bt.logging.debug(f"📴 Social map publishing skipped - no global publisher: {e}")
+                error_msg = str(e)
+                if "running event loop" in error_msg.lower() or "asyncio.run" in error_msg.lower():
+                    bt.logging.warning(f"📴 Social map publishing skipped - nested event loop conflict: {e}")
+                else:
+                    bt.logging.warning(f"📴 Social map publishing skipped: {e}")
             except Exception as e:
                 # Log but don't fail social discovery (fire-and-forget pattern)
                 bt.logging.warning(f"⚠️ Social map publishing failed: {e} (local results saved)")
@@ -515,7 +549,7 @@ def discover_social_network(
         raise
 
 
-def run_discovery_for_stale_pools() -> Dict[str, str]:
+async def run_discovery_for_stale_pools() -> Dict[str, str]:
     """
     Run social discovery only for pools that need updating today.
     
@@ -571,17 +605,23 @@ def run_discovery_for_stale_pools() -> Dict[str, str]:
             if not social_map_files:
                 needs_update = True
             else:
-                latest_file = max(social_map_files, key=lambda f: f.stat().st_mtime)
-                latest_date = datetime.fromtimestamp(latest_file.stat().st_mtime, tz=timezone.utc).date()
+                # Parse timestamp from filename
+                latest_file = max(
+                    social_map_files,
+                    key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
+                )
+                latest_timestamp = parse_social_map_filename(latest_file.name)
+                latest_date = latest_timestamp.date() if latest_timestamp else datetime.min.date()
                 needs_update = (latest_date < today)
         
         # Only run if needed
         if needs_update:
             try:
                 bt.logging.info(f"Running discovery for {pool_name} (no map from today)")
-                social_map_path = discover_social_network(
+                social_map_path = await discover_social_network(
                     pool_name=pool_name, 
-                    force_cache_refresh=True
+                    force_cache_refresh=True,
+                    posts_only=True  # Use posts-only mode for faster discovery
                 )
                 results[pool_name] = social_map_path
             except Exception as e:
@@ -606,6 +646,11 @@ if __name__ == "__main__":
             type=str,
             default="tao",
             help="Name of the pool to discover (default: tao)"
+        )
+        parser.add_argument(
+            "--dual-endpoint",
+            action="store_true",
+            help="Use both /user/tweets and /user/tweetsandreplies endpoints (default: posts-only)"
         )
         
         # Build args list from environment variables for wallet config
@@ -637,10 +682,15 @@ if __name__ == "__main__":
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"vali_x_{vali_hotkey}_{timestamp}"
         
-        saved_file = discover_social_network(
+        # Determine posts_only mode
+        posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
+        
+        # In standalone mode, asyncio.run is safe (no parent event loop)
+        saved_file = asyncio.run(discover_social_network(
             pool_name=config.pool_name,
-            run_id=run_id
-        )
+            run_id=run_id,
+            posts_only=posts_only
+        ))
         print(f"✅ Social network discovered: {saved_file}")
     except Exception as e:
         print(f"❌ Error: {e}")

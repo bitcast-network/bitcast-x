@@ -26,6 +26,7 @@ from bitcast.validator.utils.config import (
     EMISSIONS_PERIOD, TWEETS_SUBMIT_ENDPOINT, ENABLE_DATA_PUBLISH,
     NOCODE_UID, SIMULATE_CONNECTIONS, REWARD_SMOOTHING_EXPONENT
 )
+from bitcast.validator.utils.date_utils import parse_brief_date
 from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price
 from bitcast.validator.reward_engine.utils import (
     publish_brief_tweets,
@@ -71,8 +72,12 @@ class TwitterEvaluator(ScanBasedEvaluator):
             qrt = brief.get('qrt')
             
             # Parse brief dates
-            start_date = self._parse_brief_date(brief.get('start_date'))
-            end_date = self._parse_brief_date(brief.get('end_date'))
+            start_date = parse_brief_date(brief.get('start_date'))
+            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
+            
+            # Extract brief-level configuration
+            brief_max_members = brief.get('max_members')
+            brief_considered = brief.get('max_considered')
             
             try:
                 # Step 1: Score tweets (always fresh)
@@ -84,7 +89,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     qrt=qrt,
                     run_id=run_id,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    max_members=brief_max_members,
+                    considered_accounts=brief_considered
                 )
                 
                 if not scored_tweets:
@@ -185,8 +192,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             budget = brief.get('budget', 0)
             
             # Parse brief dates
-            start_date = self._parse_brief_date(brief.get('start_date'))
-            end_date = self._parse_brief_date(brief.get('end_date'))
+            start_date = parse_brief_date(brief.get('start_date'))
+            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
             
             bt.logging.info(f"📝 Brief {brief_id}: pool={pool_name}, budget=${budget}")
             
@@ -237,6 +244,10 @@ class TwitterEvaluator(ScanBasedEvaluator):
             
             # First emission run: score, filter, calculate, and save snapshot
             try:
+                # Extract brief-level configuration
+                brief_max_members = brief.get('max_members')
+                brief_considered = brief.get('max_considered')
+                
                 # Step 1: Score tweets
                 scored_tweets = self._score_tweets_for_brief(
                     pool_name=pool_name,
@@ -246,7 +257,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     qrt=qrt,
                     run_id=run_id,
                     start_date=start_date,
-                    end_date=end_date
+                    end_date=end_date,
+                    max_members=brief_max_members,
+                    considered_accounts=brief_considered
                 )
                 
                 if not scored_tweets:
@@ -304,6 +317,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                         'uid': uid,
                         'score': tweet.get('score', 0.0),
                         'total_usd': tweet.get('total_usd_target', 0.0),
+                        'text': tweet.get('text', ''),
                         'favorite_count': tweet.get('favorite_count', 0),
                         'retweet_count': tweet.get('retweet_count', 0),
                         'reply_count': tweet.get('reply_count', 0),
@@ -390,30 +404,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
         bt.logging.info(f"🎯 Twitter evaluation complete: {len(collection.results)} UIDs evaluated")
         return collection
     
-    def _parse_brief_date(self, date_str: Optional[str]) -> Optional[datetime]:
-        """
-        Parse date string from brief to timezone-aware UTC datetime.
-        
-        Args:
-            date_str: Date string in format 'YYYY-MM-DD' or ISO format
-            
-        Returns:
-            Timezone-aware datetime in UTC, or None if date_str is None/empty
-        """
-        if not date_str:
-            return None
-        
-        try:
-            if 'T' in date_str:
-                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                return dt.astimezone(timezone.utc)
-            # Assume UTC for simple date format
-            dt = datetime.strptime(date_str, '%Y-%m-%d')
-            return dt.replace(tzinfo=timezone.utc)
-        except (ValueError, AttributeError) as e:
-            bt.logging.warning(f"Failed to parse date '{date_str}': {e}")
-            return None
-    
     def _score_tweets_for_brief(
         self,
         pool_name: str,
@@ -423,7 +413,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
         qrt: Optional[str],
         run_id: Optional[str],
         start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+        end_date: Optional[datetime] = None,
+        max_members: Optional[int] = None,
+        considered_accounts: Optional[int] = None
     ) -> List[Dict]:
         """
         Score tweets using tweet_scoring module.
@@ -440,6 +432,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             run_id: Run identifier
             start_date: Brief start date (inclusive)
             end_date: Brief end date (inclusive)
+            max_members: Optional brief-level max members limit
+            considered_accounts: Optional brief-level considered accounts limit
         
         Returns:
             List of dicts with keys: author, tweet_id, score
@@ -454,7 +448,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 tag=tag,
                 qrt=qrt,
                 start_date=start_date,
-                end_date=end_date
+                end_date=end_date,
+                max_members=max_members,
+                considered_accounts_limit=considered_accounts
             )
             
             # Files are saved by score_tweets_for_pool() for audit purposes
@@ -604,6 +600,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             tweets_with_targets.append({
                 'tweet_id': tweet_reward.get('tweet_id'),
                 'author': tweet_reward.get('author'),
+                'text': tweet_reward.get('text', ''),
                 'score': tweet_reward.get('score', 0.0),
                 'usd_target': daily_usd,
                 'total_usd_target': tweet_reward.get('total_usd', 0.0),

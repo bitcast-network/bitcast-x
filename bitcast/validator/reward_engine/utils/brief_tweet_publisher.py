@@ -124,6 +124,7 @@ def create_tweet_payload(
                 # Tweet metadata
                 "tweet_id": tweet_id,
                 "author": author,
+                "text": tweet.get("text", ""),
                 "created_at": tweet.get("created_at", ""),
                 "lang": tweet.get("lang", "und"),
                 

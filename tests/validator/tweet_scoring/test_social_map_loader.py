@@ -2,17 +2,38 @@
 
 import json
 import pytest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from bitcast.validator.tweet_scoring.social_map_loader import (
     load_latest_social_map,
     get_active_members,
-    get_considered_accounts
+    get_considered_accounts,
+    get_active_members_for_period
 )
 
 
 @pytest.fixture
 def sample_social_map():
-    """Sample social map data for testing."""
+    """Sample social map data."""
+    return {
+        'metadata': {
+            'created_at': '2025-11-27T12:00:00',
+            'pool_name': 'test',
+            'total_accounts': 5
+        },
+        'accounts': {
+            'user1': {'score': 0.30},
+            'user2': {'score': 0.25},
+            'user3': {'score': 0.20},
+            'user4': {'score': 0.15},
+            'user5': {'score': 0.10}
+        }
+    }
+
+
+@pytest.fixture
+def sample_social_map_with_status():
+    """Sample social map with legacy status field (ignored)."""
     return {
         'metadata': {
             'created_at': '2025-10-30T12:00:00',
@@ -32,15 +53,30 @@ def sample_social_map():
 class TestGetActiveMembers:
     """Test get_active_members function."""
     
-    def test_extracts_in_and_promoted(self, sample_social_map):
-        """Should extract only 'in' and 'promoted' members."""
+    def test_extracts_all_accounts(self, sample_social_map):
+        """Should extract all accounts sorted by score."""
         active = get_active_members(sample_social_map)
-        assert set(active) == {'user1', 'user2', 'user3'}
+        assert set(active) == {'user1', 'user2', 'user3', 'user4', 'user5'}
     
-    def test_returns_sorted_list(self, sample_social_map):
-        """Should return alphabetically sorted list."""
+    def test_ignores_status_field(self, sample_social_map_with_status):
+        """Should extract all accounts even if status field present (ignored)."""
+        active = get_active_members(sample_social_map_with_status)
+        # All 5 accounts returned, status field is ignored
+        assert set(active) == {'user1', 'user2', 'user3', 'user4', 'user5'}
+    
+    def test_returns_score_sorted_list(self, sample_social_map):
+        """Should return list sorted by score (highest first)."""
         active = get_active_members(sample_social_map)
-        assert active == sorted(active)
+        # user1 has highest score (0.30), user5 has lowest (0.10)
+        assert active[0] == 'user1'
+        assert active[-1] == 'user5'
+    
+    def test_respects_limit(self, sample_social_map):
+        """Should respect limit parameter."""
+        active = get_active_members(sample_social_map, limit=2)
+        assert len(active) == 2
+        assert 'user1' in active  # Highest score
+        assert 'user2' in active  # Second highest
     
     def test_empty_accounts(self):
         """Should handle empty accounts dict."""
@@ -82,12 +118,13 @@ class TestGetConsideredAccounts:
         considered = get_considered_accounts(sample_social_map, limit=0)
         assert considered == []
     
-    def test_includes_all_statuses(self, sample_social_map):
-        """Should include accounts regardless of status."""
+    def test_includes_all_accounts(self, sample_social_map):
+        """Should include all accounts when limit is high enough."""
         considered = get_considered_accounts(sample_social_map, limit=5)
         usernames = {username for username, _ in considered}
-        assert 'user4' in usernames  # 'out' status
-        assert 'user5' in usernames  # 'relegated' status
+        assert len(usernames) == 5
+        assert 'user4' in usernames
+        assert 'user5' in usernames
 
 
 class TestLoadLatestSocialMap:
@@ -126,5 +163,97 @@ class TestLoadLatestSocialMap:
             
         except FileNotFoundError:
             # No social map exists - skip test
+            pytest.skip("No social map found for 'tao' pool")
+
+
+class TestGetActiveMembersForPeriod:
+    """Test get_active_members_for_period function."""
+    
+    def test_no_date_range_returns_active_only(self):
+        """Without date range, should return only active members (no relegated)."""
+        try:
+            # Get members from new function without dates
+            members = get_active_members_for_period('tao')
+            
+            # Get active members from latest map for comparison
+            social_map, _ = load_latest_social_map('tao')
+            active = get_active_members(social_map)
+            
+            # Should match exactly (backward compatible)
+            assert members == active
+            assert len(members) == len(active)
+            
+        except FileNotFoundError:
+            pytest.skip("No social map found for 'tao' pool")
+    
+    def test_with_date_range_includes_relegated_if_map_updated(self):
+        """If map updated during brief, should include active + relegated."""
+        try:
+            # Use date range that spans recent map updates (last 30 days)
+            end_date = datetime.now(timezone.utc)
+            start_date = end_date - timedelta(days=30)
+            
+            members = get_active_members_for_period(
+                'tao',
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            # Should return a list
+            assert isinstance(members, list)
+            
+            # If any maps were created during period, should have more than just active
+            social_map, _ = load_latest_social_map('tao')
+            active_only = get_active_members(social_map)
+            
+            # Should have >= active members
+            assert len(members) >= len(active_only)
+            
+        except FileNotFoundError:
+            pytest.skip("No social map found for 'tao' pool")
+    
+    def test_no_map_update_returns_active_only(self):
+        """If no map updated during period, returns only active members."""
+        try:
+            # Use a future date range (no maps will be created there)
+            start_date = datetime.now(timezone.utc) + timedelta(days=1)
+            end_date = start_date + timedelta(days=7)
+            
+            members = get_active_members_for_period(
+                'tao',
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            # Should return same as latest map active members (no relegated)
+            social_map, _ = load_latest_social_map('tao')
+            active = get_active_members(social_map)
+            
+            assert members == active
+            
+        except FileNotFoundError:
+            pytest.skip("No social map found for 'tao' pool")
+    
+    def test_nonexistent_pool_returns_empty_list(self):
+        """Should return empty list for nonexistent pool."""
+        try:
+            result = get_active_members_for_period('nonexistent_pool_xyz')
+            assert result == []
+            assert isinstance(result, list)
+        except FileNotFoundError:
+            # This is also acceptable behavior
+            pass
+    
+    def test_returns_list_type(self):
+        """Should always return a list."""
+        result = get_active_members_for_period('tao')
+        assert isinstance(result, list)
+    
+    def test_returns_sorted_list(self):
+        """Should return alphabetically sorted list."""
+        try:
+            result = get_active_members_for_period('tao')
+            assert result == sorted(result)
+        except FileNotFoundError:
             pytest.skip("No social map found for 'tao' pool")
 

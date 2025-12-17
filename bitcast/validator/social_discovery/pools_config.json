@@ -4,9 +4,10 @@
       "name": "tao",
       "keywords": ["bittensor", "$tao", "#bittensor"],
       "initial_accounts": ["opentensor"],
-      "max_members": 150,
-      "considered_accounts": 300,
+      "max_seed_accounts": 150,
       "min_interaction_weight": 2,
+      "min_tweets": 1,
+      "lang": null,
       "active": true
     }
   ]

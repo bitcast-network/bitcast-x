@@ -71,7 +71,7 @@ from bitcast.validator.social_discovery import run_discovery_for_stale_pools
 
 # Auto-run for pools needing updates (every 2 weeks on Sunday)
 # Automatically forces cache refresh for fresh data
-results = run_discovery_for_stale_pools()
+results = await run_discovery_for_stale_pools()
 # Returns: {'tao': '/path/to/social_map.json', ...}
 ```
 
@@ -117,29 +117,32 @@ Loads pool configurations from `pools_config.json`:
       "initial_accounts": ["opentensor"],
       "max_members": 64,
       "min_interaction_weight": 0,
+      "min_tweets": 1,
       "lang": "en"
     }
   ]
 }
 ```
 
-### PoolStatusManager
+**Configuration Fields:**
+- `keywords`: Keywords to identify relevant accounts (hashtags, tickers, terms)
+- `initial_accounts`: Seed accounts to start discovery
+- `max_seed_accounts`: Maximum accounts to use as seeds in recursive discovery (default: 150)
+- `min_interaction_weight`: Minimum interaction weight threshold for quality filtering (default: 0)
+- `min_tweets`: Minimum number of tweets containing keywords for account relevance (default: 1)
+- `lang`: Optional language filter (e.g., 'en', 'zh')
 
-Manages pool membership and status transitions:
-- **in**: Active member (stayed in pool)
-- **out**: Not in pool
-- **promoted**: Newly added to pool
-- **relegated**: Removed from pool
+### Network Discovery
 
-Selection criteria:
-1. Filter by `min_interaction_weight` threshold
-2. Rank by PageRank score
-3. Select top `max_members` accounts
+Discovers and ranks all accounts in the social network:
+1. Filters accounts by `min_interaction_weight` threshold (quality check)
+2. Ranks all accounts by PageRank score
+3. Saves all discovered accounts sorted by score
 
 ### RecursiveDiscovery
 
 Iteratively runs discovery until convergence:
-1. Uses previous iteration's active members as seeds
+1. Uses top N accounts (configured via `max_seed_accounts`) from previous iteration as seeds
 2. Discovers new accounts through their interactions
 3. Calculates stability metric (overlap between iterations)
 4. Stops when `stability >= convergence_threshold`
@@ -159,23 +162,20 @@ Saved to `social_maps/{pool_name}/{timestamp}.json`:
   "metadata": {
     "created_at": "2025-11-11T12:00:00",
     "pool_name": "tao",
-    "total_accounts": 150,
-    "active_members": 64,
-    "promoted_count": 5,
-    "relegated_count": 3
+    "total_accounts": 500
   },
   "accounts": {
     "opentensor": {
-      "score": 0.045678,
-      "status": "in"
+      "score": 0.045678
     },
     "username2": {
-      "score": 0.034521,
-      "status": "promoted"
+      "score": 0.034521
     }
   }
 }
 ```
+
+**Note:** Accounts are stored sorted by score (highest to lowest). All discovered accounts are included - eligibility filtering is handled at the brief level.
 
 ### Adjacency Matrix
 Saved to `social_maps/{pool_name}/{timestamp}_adjacency.json`:
@@ -331,6 +331,7 @@ ValueError: No interactions found in network
   "initial_accounts": ["user1", "user2"],
   "max_members": 64,
   "min_interaction_weight": 0,
+  "min_tweets": 1,
   "lang": "en"
 }
 ```
@@ -391,19 +392,9 @@ Scores are normalized to sum exactly to 1.0:
 - Applies to: Tweet fetching, relevance checking
 - Not applied to: Graph construction, PageRank calculation (CPU-bound)
 
-### Status Transitions
+### Account Ranking
 
-```
-First Run:
-  - Selected → promoted
-  - Not selected → out
-
-Subsequent Runs:
-  - in + selected → in
-  - in + not selected → relegated
-  - out + selected → promoted
-  - out + not selected → out
-```
+All discovered accounts are ranked by PageRank score. Accounts are stored in descending score order in the social map. Brief-level configuration determines which top N accounts are eligible for mining and whose engagement is considered for scoring.
 
 ## Integration Points
 

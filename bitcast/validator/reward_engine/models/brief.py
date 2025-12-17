@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from bitcast.validator.utils.date_utils import parse_brief_date
+
 
 @dataclass
 class Brief:
@@ -24,6 +26,8 @@ class Brief:
     prompt_version: int = 1
     boost: float = 1.0
     max_tweets: Optional[int] = None
+    max_members: Optional[int] = None
+    max_considered: Optional[int] = None
     
     def __post_init__(self):
         """Validation after initialization."""
@@ -64,21 +68,11 @@ class Brief:
         # Parse datetime strings to timezone-aware UTC
         start_date = data.get('start_date')
         if isinstance(start_date, str):
-            try:
-                start_date = datetime.fromisoformat(start_date.replace('Z', '+00:00'))
-                start_date = start_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                start_date = datetime.strptime(start_date, '%Y-%m-%d')
-                start_date = start_date.replace(tzinfo=timezone.utc)
+            start_date = parse_brief_date(start_date)
         
         end_date = data.get('end_date')
         if isinstance(end_date, str):
-            try:
-                end_date = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
-                end_date = end_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                end_date = datetime.strptime(end_date, '%Y-%m-%d')
-                end_date = end_date.replace(tzinfo=timezone.utc)
+            end_date = parse_brief_date(end_date, end_of_day=True)
         
         return cls(
             id=data['id'],
@@ -91,7 +85,9 @@ class Brief:
             qrt=data.get('qrt'),
             prompt_version=int(data.get('prompt_version', 1)),
             boost=float(data.get('boost', 1.0)),
-            max_tweets=data.get('max_tweets')
+            max_tweets=data.get('max_tweets'),
+            max_members=data.get('max_members'),
+            max_considered=data.get('max_considered')
         )
     
     def to_dict(self) -> dict:
@@ -107,6 +103,8 @@ class Brief:
             'qrt': self.qrt,
             'prompt_version': self.prompt_version,
             'boost': self.boost,
-            'max_tweets': self.max_tweets
+            'max_tweets': self.max_tweets,
+            'max_members': self.max_members,
+            'max_considered': self.max_considered
         }
 
