@@ -5,8 +5,8 @@ Provides functions to load social maps and extract member information.
 """
 
 import json
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import bittensor as bt
 
@@ -295,4 +295,3 @@ def get_active_members_for_brief(
     )
     
     return eligible_list
-

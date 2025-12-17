@@ -2,11 +2,13 @@
 
 import json
 import pytest
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from bitcast.validator.tweet_scoring.social_map_loader import (
     load_latest_social_map,
     get_active_members,
-    get_considered_accounts
+    get_considered_accounts,
+    get_active_members_for_period
 )
 
 
@@ -161,5 +163,97 @@ class TestLoadLatestSocialMap:
             
         except FileNotFoundError:
             # No social map exists - skip test
+            pytest.skip("No social map found for 'tao' pool")
+
+
+class TestGetActiveMembersForPeriod:
+    """Test get_active_members_for_period function."""
+    
+    def test_no_date_range_returns_active_only(self):
+        """Without date range, should return only active members (no relegated)."""
+        try:
+            # Get members from new function without dates
+            members = get_active_members_for_period('tao')
+            
+            # Get active members from latest map for comparison
+            social_map, _ = load_latest_social_map('tao')
+            active = get_active_members(social_map)
+            
+            # Should match exactly (backward compatible)
+            assert members == active
+            assert len(members) == len(active)
+            
+        except FileNotFoundError:
+            pytest.skip("No social map found for 'tao' pool")
+    
+    def test_with_date_range_includes_relegated_if_map_updated(self):
+        """If map updated during brief, should include active + relegated."""
+        try:
+            # Use date range that spans recent map updates (last 30 days)
+            end_date = datetime.now(timezone.utc)
+            start_date = end_date - timedelta(days=30)
+            
+            members = get_active_members_for_period(
+                'tao',
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            # Should return a list
+            assert isinstance(members, list)
+            
+            # If any maps were created during period, should have more than just active
+            social_map, _ = load_latest_social_map('tao')
+            active_only = get_active_members(social_map)
+            
+            # Should have >= active members
+            assert len(members) >= len(active_only)
+            
+        except FileNotFoundError:
+            pytest.skip("No social map found for 'tao' pool")
+    
+    def test_no_map_update_returns_active_only(self):
+        """If no map updated during period, returns only active members."""
+        try:
+            # Use a future date range (no maps will be created there)
+            start_date = datetime.now(timezone.utc) + timedelta(days=1)
+            end_date = start_date + timedelta(days=7)
+            
+            members = get_active_members_for_period(
+                'tao',
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            # Should return same as latest map active members (no relegated)
+            social_map, _ = load_latest_social_map('tao')
+            active = get_active_members(social_map)
+            
+            assert members == active
+            
+        except FileNotFoundError:
+            pytest.skip("No social map found for 'tao' pool")
+    
+    def test_nonexistent_pool_returns_empty_list(self):
+        """Should return empty list for nonexistent pool."""
+        try:
+            result = get_active_members_for_period('nonexistent_pool_xyz')
+            assert result == []
+            assert isinstance(result, list)
+        except FileNotFoundError:
+            # This is also acceptable behavior
+            pass
+    
+    def test_returns_list_type(self):
+        """Should always return a list."""
+        result = get_active_members_for_period('tao')
+        assert isinstance(result, list)
+    
+    def test_returns_sorted_list(self):
+        """Should return alphabetically sorted list."""
+        try:
+            result = get_active_members_for_period('tao')
+            assert result == sorted(result)
+        except FileNotFoundError:
             pytest.skip("No social map found for 'tao' pool")
 
