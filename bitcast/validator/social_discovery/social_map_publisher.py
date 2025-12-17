@@ -181,13 +181,15 @@ def main():
         )
         
         # Build args list from environment variables for wallet config
-        args_list = ['--logging.debug']  # Enable debug logging by default
-        if WALLET_NAME:
+        # Start with sys.argv[1:] to get actual CLI args, then add env-based defaults
+        import sys
+        args_list = sys.argv[1:] + ['--logging.debug']  # Enable debug logging by default
+        if WALLET_NAME and '--wallet.name' not in sys.argv:
             args_list.extend(['--wallet.name', WALLET_NAME])
-        if HOTKEY_NAME:
+        if HOTKEY_NAME and '--wallet.hotkey' not in sys.argv:
             args_list.extend(['--wallet.hotkey', HOTKEY_NAME])
         
-        # Parse configuration with env-based wallet args
+        # Parse configuration with CLI args + env-based wallet args
         config = bt.config(parser, args=args_list)
         bt.logging.set_config(config=config.logging)
         

@@ -14,6 +14,7 @@ import bittensor as bt
 
 from bitcast.validator.social_discovery.pool_manager import PoolManager
 from bitcast.validator.clients.twitter_client import TwitterClient
+from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 from bitcast.validator.utils.config import ENABLE_DATA_PUBLISH, WALLET_NAME, HOTKEY_NAME
 from bitcast.validator.utils.data_publisher import initialize_global_publisher
 from .connection_db import ConnectionDatabase
@@ -23,14 +24,14 @@ from .connection_publisher import publish_account_connections
 
 def get_active_pool_members(pool_name: str, scan_all: bool = False) -> List[str]:
     """
-    Load latest social map for pool and return member usernames.
+    Load latest social map for pool and return member usernames sorted by score.
     
     Args:
         pool_name: Name of the pool (e.g., "tao")
-        scan_all: If True, return all accounts regardless of status (default: False)
+        scan_all: Deprecated - kept for backward compatibility but has no effect
         
     Returns:
-        List of member usernames (lowercase). By default returns only 'in' and 'promoted' members.
+        List of all account usernames (lowercase), sorted by score descending
         
     Raises:
         ValueError: If pool not found or no social map exists
@@ -71,8 +72,11 @@ def get_active_pool_members(pool_name: str, scan_all: bool = False) -> List[str]
             f"Run social_discovery first to generate pool data."
         )
     
-    # Get latest file by modification time
-    latest_file = max(social_map_files, key=lambda f: f.stat().st_mtime)
+    # Get latest file by filename timestamp
+    latest_file = max(
+        social_map_files,
+        key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
+    )
     
     bt.logging.info(f"Loading social map from: {latest_file.name}")
     
@@ -87,19 +91,20 @@ def get_active_pool_members(pool_name: str, scan_all: bool = False) -> List[str]
     if 'accounts' not in social_map_data:
         raise ValueError(f"Invalid social map format: missing 'accounts' field")
     
-    members = []
-    for username, account_data in social_map_data['accounts'].items():
-        if scan_all:
-            members.append(username.lower())
-        else:
-            status = account_data.get('status', '')
-            if status in ['in', 'promoted']:
-                members.append(username.lower())
+    # Get all accounts with scores
+    account_scores = [
+        (username.lower(), account_data.get('score', 0.0))
+        for username, account_data in social_map_data['accounts'].items()
+    ]
     
-    scan_mode = "all accounts" if scan_all else "active members (in/promoted)"
+    # Sort by score descending
+    account_scores.sort(key=lambda x: x[1], reverse=True)
+    
+    # Return all accounts sorted by score
+    members = [username for username, _ in account_scores]
+    
     bt.logging.info(
-        f"Found {len(members)} {scan_mode} in pool '{pool_name}' "
-        f"(from {len(social_map_data['accounts'])} total accounts)"
+        f"Found {len(members)} accounts in pool '{pool_name}' (sorted by score)"
     )
     
     return members
@@ -126,7 +131,7 @@ class ConnectionScanner:
         self.lookback_days = lookback_days
         self.force_refresh = force_refresh
         self.scan_all = scan_all
-        self.twitter_client = TwitterClient()
+        self.twitter_client = TwitterClient(posts_only=False)
         self.database = ConnectionDatabase(db_path=db_path)
         self.tag_parser = TagParser()
         
@@ -206,7 +211,7 @@ class ConnectionScanner:
         username = username.lower()
         
         try:
-            # Fetch tweets using TwitterClient (uses TWEET_FETCH_LIMIT from config)
+            # Fetch tweets using TwitterClient (uses MAX_TWEETS_PER_FETCH from config)
             result = self.twitter_client.fetch_user_tweets(username, force_refresh=self.force_refresh)
             tweets = result.get('tweets', [])
             
@@ -233,22 +238,17 @@ class ConnectionScanner:
             for tweet in recent_tweets:
                 tweet_id = tweet.get('tweet_id')
                 text = tweet.get('text', '')
-                author = tweet.get('author', '').lower() if tweet.get('author') else None
-                retweeted_user = tweet.get('retweeted_user')
                 
                 if not tweet_id or not text:
                     continue
                 
                 # Skip retweets - we only want original content
-                if retweeted_user:
+                if tweet.get('retweeted_user'):
                     continue
                 
-                # Skip tweets not authored by this account
-                # (Twitter API may return replies/mentions to the account)
-                if not author or author != username:
-                    bt.logging.debug(
-                        f"Skipping tweet {tweet_id} - author '{author}' != '{username}'"
-                    )
+                # Defensive validation: Skip tweets from other authors
+                tweet_author = tweet.get('author')
+                if not tweet_author or tweet_author.lower() != username:
                     continue
                 
                 # Parse tags from tweet text
@@ -583,7 +583,7 @@ if __name__ == "__main__":
         parser.add_argument(
             "--scan-all-accounts",
             action="store_true",
-            help="Scan all accounts in social map regardless of status (default: only 'in' and 'promoted')"
+            help="Deprecated flag (kept for compatibility) - all accounts are now scanned by default"
         )
         
         # Build args list from environment variables for wallet config

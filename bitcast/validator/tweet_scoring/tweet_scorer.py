@@ -15,13 +15,13 @@ import bittensor as bt
 
 from bitcast.validator.clients import TwitterClient
 from bitcast.validator.utils.config import (
-    TWITTER_DEFAULT_LOOKBACK_DAYS,
     PAGERANK_RETWEET_WEIGHT,
     PAGERANK_QUOTE_WEIGHT,
     BASELINE_TWEET_SCORE_FACTOR,
     SOCIAL_DISCOVERY_MAX_WORKERS
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher
+from bitcast.validator.utils.date_utils import parse_brief_date
 from bitcast.validator.social_discovery import PoolManager
 
 from .social_map_loader import (
@@ -36,7 +36,8 @@ from .score_calculator import ScoreCalculator
 
 def fetch_user_tweets_safe(
     client: TwitterClient,
-    username: str
+    username: str,
+    force_refresh: bool = False
 ) -> Tuple[List[Dict], Optional[str]]:
     """
     Safely fetch tweets for a user with error handling.
@@ -44,15 +45,15 @@ def fetch_user_tweets_safe(
     Args:
         client: TwitterClient instance
         username: Username to fetch tweets for
+        force_refresh: If True, force cache refresh
         
     Returns:
         Tuple of (tweets_list, error_message)
     """
     try:
-        # TwitterClient.fetch_user_tweets() now validates author by default (validate_author=True)
-        # and ensures all tweets have the author field set
-        # Uses TWEET_FETCH_LIMIT from config (default: 200)
-        result = client.fetch_user_tweets(username)
+        # TwitterClient.fetch_user_tweets() validates author and ensures all tweets have the author field set
+        # Uses MAX_TWEETS_PER_FETCH from config (default: 200)
+        result = client.fetch_user_tweets(username, force_refresh=force_refresh)
         return result.get('tweets', []), None
     except Exception as e:
         bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
@@ -142,7 +143,9 @@ def score_tweets_for_pool(
     qrt: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    force_cache_refresh: Optional[bool] = None
+    force_cache_refresh: Optional[bool] = None,
+    max_members: Optional[int] = None,
+    considered_accounts_limit: Optional[int] = None
 ) -> List[Dict]:
     """
     Score tweets for a pool based on RT/QRT engagement.
@@ -166,14 +169,11 @@ def score_tweets_for_pool(
              Only tweets containing this tag will be scored
         qrt: Optional quoted tweet ID to filter by (e.g., '1983210945288569177')
              Only tweets that quote this specific tweet ID will be scored
-        start_date: Optional start date for brief window (inclusive)
+        start_date: Start date for brief window (inclusive, REQUIRED)
              Only tweets posted on or after this date will be scored
-             If None, uses TWITTER_DEFAULT_LOOKBACK_DAYS
-        end_date: Optional end date for brief window (inclusive)
+        end_date: End date for brief window (inclusive, REQUIRED)
              Only tweets posted on or before this date will be scored
-             If None, uses current date
-        force_cache_refresh: If True, force cache refresh (overrides FORCE_CACHE_REFRESH config)
-             If None, uses FORCE_CACHE_REFRESH config variable
+        force_cache_refresh: If True, force cache refresh (30-day fetch instead of 4-day incremental)
         
     Returns:
         List of dicts with keys: author, tweet_id, score
@@ -208,35 +208,60 @@ def score_tweets_for_pool(
     if not pool_config:
         raise ValueError(f"Pool '{pool_name}' not found in configuration")
     
-    bt.logging.debug(f"Pool config: lang={pool_config.get('lang', 'any')}, max_members={pool_config['max_members']}, "
-                    f"considered_accounts={pool_config.get('considered_accounts', 256)}")
+    bt.logging.debug(f"Pool config: lang={pool_config.get('lang', 'any')}, "
+                    f"max_seed_accounts={pool_config.get('max_seed_accounts', 150)}, "
+                    f"min_interaction_weight={pool_config.get('min_interaction_weight', 0)}")
     
     # Set up date filtering (all dates in UTC)
-    if start_date and end_date:
-        cutoff_start = start_date
-        cutoff_end = end_date
-        bt.logging.debug(f"Brief window: {start_date.date()} to {end_date.date()}")
-    else:
-        # Fallback to lookback period
-        cutoff_start = datetime.now(timezone.utc) - timedelta(days=TWITTER_DEFAULT_LOOKBACK_DAYS)
-        cutoff_end = datetime.now(timezone.utc)
-        bt.logging.debug(f"Using lookback period: {TWITTER_DEFAULT_LOOKBACK_DAYS} days")
+    if not start_date or not end_date:
+        raise ValueError(f"Brief '{brief_id}' must specify both start_date and end_date")
+    
+    cutoff_start = start_date
+    cutoff_end = end_date
+    bt.logging.debug(f"Brief window: {start_date.date()} to {end_date.date()}")
     
     if tag or qrt:
         bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}")
     
-    # Step 2: Load latest social map
+    # Step 2: Load social map(s) and determine active members
     bt.logging.debug("Loading social map")
     
-    social_map, map_file = load_latest_social_map(pool_name)
-    active_members = get_active_members(social_map)
+    # If brief has dates and max_members, check for multi-map scenario
+    # (brief may span social map refresh which happens every 2 weeks)
+    if start_date and end_date and max_members:
+        # Load all maps that were active during brief window and merge top N
+        from .social_map_loader import get_active_members_for_brief
+        active_members = get_active_members_for_brief(
+            pool_name=pool_name,
+            start_date=start_date,
+            end_date=end_date,
+            max_members=max_members
+        )
+        # Load latest map for considered accounts and metadata
+        social_map, map_file = load_latest_social_map(pool_name)
+    else:
+        # Simple case: single latest map
+        social_map, map_file = load_latest_social_map(pool_name)
+        active_members = get_active_members(social_map, limit=max_members)
+    
+    # Determine considered accounts limit with fallback:
+    # 1. Brief-level config (if provided)
+    # 2. Default (300)
+    DEFAULT_CONSIDERED = 300
+    considered_limit = considered_accounts_limit or DEFAULT_CONSIDERED
+    
     considered_accounts = get_considered_accounts(
         social_map,
-        pool_config.get('considered_accounts', 256)
+        considered_limit
     )
     
     bt.logging.debug(f"Social map: {map_file}")
-    bt.logging.info(f"  → {len(active_members)} active members, {len(considered_accounts)} considered accounts")
+    bt.logging.info(
+        f"  → {len(active_members)} active members"
+        f"{' (limited by brief: ' + str(max_members) + ')' if max_members else ''}, "
+        f"{len(considered_accounts)} considered accounts "
+        f"(limit: {considered_limit})"
+    )
     
     # Filter to only connected accounts if provided
     if connected_accounts:
@@ -258,7 +283,7 @@ def score_tweets_for_pool(
     # Step 3: Fetch tweets from connected active members
     bt.logging.debug("Fetching tweets from active members")
     
-    twitter_client = TwitterClient(force_cache_refresh=force_cache_refresh)
+    twitter_client = TwitterClient(posts_only=False)
     member_tweets = []
     failed_members = []
     
@@ -267,7 +292,7 @@ def score_tweets_for_pool(
     # Use ThreadPoolExecutor for parallel fetching (like social_discovery)
     with ThreadPoolExecutor(max_workers=SOCIAL_DISCOVERY_MAX_WORKERS) as executor:
         future_to_member = {
-            executor.submit(fetch_user_tweets_safe, twitter_client, member): member
+            executor.submit(fetch_user_tweets_safe, twitter_client, member, force_cache_refresh): member
             for member in active_members
         }
         
@@ -355,9 +380,10 @@ def score_tweets_for_pool(
             f"(brief window: {start_date.date()} to {end_date.date()})"
         )
     else:
+        date_range_days = (cutoff_end - cutoff_start).days
         bt.logging.debug(
             f"Date filter: {len(member_tweets)} → {len(date_filtered)} "
-            f"(past {TWITTER_DEFAULT_LOOKBACK_DAYS} days)"
+            f"({date_range_days} day window)"
         )
     
     # Filter by content (language, optional tag, and optional QRT)
@@ -413,13 +439,17 @@ def score_tweets_for_pool(
         'pool_name': pool_name,
         'tag_filter': tag,
         'qrt_filter': qrt,
-        'start_date': start_date.isoformat() if start_date else None,
-        'end_date': end_date.isoformat() if end_date else None,
-        'lookback_days': TWITTER_DEFAULT_LOOKBACK_DAYS if not (start_date and end_date) else None,
+        'start_date': start_date.isoformat(),
+        'end_date': end_date.isoformat(),
+        'date_range_days': (end_date - start_date).days,
         'total_tweets_scored': len(scored_tweets),
         'tweets_with_engagement': tweets_with_engagement,
         'active_members_count': len(active_members),
+        'max_members_limit': max_members,
+        'max_members_source': 'brief' if max_members else 'default',
         'considered_accounts_count': len(considered_accounts),
+        'considered_accounts_limit': considered_limit,
+        'considered_accounts_source': 'brief' if considered_accounts_limit else 'default',
         'pool_language': pool_config.get('lang'),
         'social_map_file': map_file,
         'weights': {
@@ -518,27 +548,12 @@ if __name__ == "__main__":
                        f"tag={tag or 'none'}, qrt={qrt or 'none'}")
         
         # Parse dates from brief
-        start_date_str = brief_data.get('start_date')
-        if start_date_str:
-            try:
-                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
-                start_date = start_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-                start_date = start_date.replace(tzinfo=timezone.utc)
-        else:
-            start_date = None
+        start_date = parse_brief_date(brief_data.get('start_date'))
+        end_date = parse_brief_date(brief_data.get('end_date'), end_of_day=True)
         
-        end_date_str = brief_data.get('end_date')
-        if end_date_str:
-            try:
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
-                end_date = end_date.astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
-                end_date = end_date.replace(tzinfo=timezone.utc)
-        else:
-            end_date = None
+        # Extract brief-level configuration
+        brief_max_members = brief_data.get('max_members')
+        brief_max_considered = brief_data.get('max_considered')
         
         # Generate run_id for CLI execution
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -578,7 +593,9 @@ if __name__ == "__main__":
             qrt=qrt,
             start_date=start_date,
             end_date=end_date,
-            force_cache_refresh=force_cache_refresh
+            force_cache_refresh=force_cache_refresh,
+            max_members=brief_max_members,
+            considered_accounts_limit=brief_max_considered
         )
         
         # Print summary

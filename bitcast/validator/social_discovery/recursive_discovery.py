@@ -5,6 +5,7 @@ This module repeatedly runs the social discovery process, using the results
 of each iteration as seeds for the next, until the pool membership stabilizes.
 """
 
+import asyncio
 import json
 from datetime import datetime
 from pathlib import Path
@@ -88,35 +89,45 @@ def calculate_stability(
     return overlap / total if total > 0 else 0.0
 
 
-def load_social_map_members(social_map_path: str) -> Tuple[Set[str], Dict]:
+def load_social_map_members(
+    social_map_path: str, 
+    top_n: int = 150
+) -> Tuple[Set[str], Dict]:
     """
-    Load active members and metadata from a social map file.
+    Load top accounts from a social map file sorted by score.
     
     Args:
         social_map_path: Path to social map JSON file
+        top_n: Number of top accounts to use as seeds (default: 150)
         
     Returns:
-        Tuple of (active_members_set, metadata_dict)
+        Tuple of (top_accounts_set, metadata_dict)
     """
     with open(social_map_path, 'r') as f:
         social_map = json.load(f)
     
-    active_members = {
-        username for username, data in social_map['accounts'].items()
-        if data['status'] in ['in', 'promoted']
-    }
+    # Get all accounts with scores
+    account_scores = [
+        (username, data.get('score', 0.0))
+        for username, data in social_map['accounts'].items()
+    ]
+    
+    # Sort by score descending and take top N
+    account_scores.sort(key=lambda x: x[1], reverse=True)
+    top_accounts = {username for username, _ in account_scores[:top_n]}
     
     metadata = social_map.get('metadata', {})
     
-    return active_members, metadata
+    return top_accounts, metadata
 
 
-def recursive_social_discovery(
+async def recursive_social_discovery(
     pool_name: str = "tao",
     max_iterations: int = 10,
     convergence_threshold: float = 0.95,
     run_id_prefix: Optional[str] = None,
-    save_summary: bool = True
+    save_summary: bool = True,
+    posts_only: bool = True
 ) -> Tuple[str, int, bool, ConvergenceMetrics]:
     """
     Recursively run social discovery until convergence or max iterations.
@@ -130,6 +141,7 @@ def recursive_social_discovery(
         convergence_threshold: Stability threshold for convergence (0.0 to 1.0)
         run_id_prefix: Optional prefix for run IDs
         save_summary: Whether to save convergence summary to file
+        posts_only: If True, use only /user/tweets endpoint (faster, saves quota). Default: True
         
     Returns:
         Tuple of (final_social_map_path, iterations_run, converged, metrics)
@@ -177,19 +189,18 @@ def recursive_social_discovery(
         
         # Run discovery for this iteration
         try:
-            social_map_path = discover_social_network(pool_name, run_id)
+            social_map_path = await discover_social_network(pool_name, run_id, posts_only=posts_only)
             final_social_map_path = social_map_path
         except Exception as e:
             bt.logging.error(f"❌ Discovery failed at iteration {iteration + 1}: {e}")
             raise
         
         # Load results to check convergence
-        current_active_members, metadata = load_social_map_members(social_map_path)
+        max_seed_accounts = pool_config.get('max_seed_accounts', 150)
+        current_active_members, metadata = load_social_map_members(social_map_path, top_n=max_seed_accounts)
         
         # Calculate statistics
         total_accounts = metadata.get('total_accounts', len(current_active_members))
-        promoted_count = metadata.get('promoted_count', 0)
-        relegated_count = metadata.get('relegated_count', 0)
         
         # Calculate stability if not first iteration
         stability = None
@@ -206,9 +217,7 @@ def recursive_social_discovery(
             bt.logging.info("📊 ITERATION STATISTICS")
             bt.logging.info("-" * 80)
             bt.logging.info(f"Total accounts discovered: {total_accounts}")
-            bt.logging.info(f"Active members: {len(current_active_members)}/{pool_config['max_members']}")
-            bt.logging.info(f"Promoted this iteration: {promoted_count}")
-            bt.logging.info(f"Relegated this iteration: {relegated_count}")
+            bt.logging.info(f"Seed accounts for next iteration: {len(current_active_members)}/{pool_config.get('max_seed_accounts', 150)}")
             bt.logging.info("")
             bt.logging.info("Member Set Changes:")
             bt.logging.info(f"  Unchanged from previous: {len(unchanged_members)}")
@@ -235,17 +244,24 @@ def recursive_social_discovery(
             bt.logging.info("📊 ITERATION STATISTICS (BASELINE)")
             bt.logging.info("-" * 80)
             bt.logging.info(f"Total accounts discovered: {total_accounts}")
-            bt.logging.info(f"Active members: {len(current_active_members)}/{pool_config['max_members']}")
-            bt.logging.info(f"Promoted this iteration: {promoted_count}")
+            bt.logging.info(f"Seed accounts for next iteration: {len(current_active_members)}/{pool_config.get('max_seed_accounts', 150)}")
             bt.logging.info("-" * 80)
         
         # Record metrics
+        # Calculate new and lost members for metrics
+        if prev_active_members:
+            new_count = len(current_active_members - prev_active_members)
+            lost_count = len(prev_active_members - current_active_members)
+        else:
+            new_count = len(current_active_members)
+            lost_count = 0
+        
         metrics.add_iteration(
             iteration=iteration + 1,
             active_members=current_active_members,
             total_accounts=total_accounts,
-            promoted_count=promoted_count,
-            relegated_count=relegated_count,
+            promoted_count=new_count,
+            relegated_count=lost_count,
             stability=stability
         )
         
@@ -351,6 +367,11 @@ if __name__ == "__main__":
             action="store_true",
             help="Don't save convergence summary file"
         )
+        parser.add_argument(
+            "--dual-endpoint",
+            action="store_true",
+            help="Use both /user/tweets and /user/tweetsandreplies endpoints (default: posts-only)"
+        )
         
         # Build args list from environment variables for wallet config
         # Start with command-line args, then add environment-based defaults
@@ -376,14 +397,18 @@ if __name__ == "__main__":
         initialize_global_publisher(wallet)
         bt.logging.info("🌐 Global publisher initialized for standalone mode")
         
-        # Run recursive discovery
-        path, iterations, converged, metrics = recursive_social_discovery(
+        # Determine posts_only mode
+        posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
+        
+        # Run recursive discovery (in standalone mode, asyncio.run is safe)
+        path, iterations, converged, metrics = asyncio.run(recursive_social_discovery(
             pool_name=config.pool_name,
             max_iterations=config.max_iterations,
             convergence_threshold=config.convergence_threshold,
             run_id_prefix=config.run_id_prefix,
-            save_summary=not config.no_summary
-        )
+            save_summary=not config.no_summary,
+            posts_only=posts_only
+        ))
         
         print("\n" + "=" * 80)
         print("RECURSIVE DISCOVERY COMPLETE")

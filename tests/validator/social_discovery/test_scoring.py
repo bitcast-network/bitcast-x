@@ -29,7 +29,8 @@ class TestPoolManager:
                 {
                     "name": "tao",
                     "keywords": ["tao", "bittensor"],
-                    "initial_accounts": ["opentensor"]
+                    "initial_accounts": ["opentensor"],
+                    "active": True
                 }
             ]
         }
@@ -76,10 +77,10 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username):
+        def mock_fetch(username, force_refresh=False):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
-        def mock_relevance(username, keywords, min_followers, lang=None):
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
             return True  # All users are relevant
         
         mock_client.fetch_user_tweets.side_effect = mock_fetch
@@ -87,7 +88,7 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, usernames = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should have scored all users
         assert len(scores) == 3
@@ -120,10 +121,10 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username):
+        def mock_fetch(username, force_refresh=False):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
-        def mock_relevance(username, keywords, min_followers, lang=None):
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
             return True  # All users are relevant
         
         mock_client.fetch_user_tweets.side_effect = mock_fetch
@@ -131,7 +132,7 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, usernames = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should only have user1 and user2 (user3 was only in a reply, which got filtered)
         assert len(scores) == 2
@@ -154,6 +155,64 @@ class TestTwitterNetworkAnalyzer:
         
         with pytest.raises(ValueError, match="No interactions found"):
             analyzer.analyze_network(['lonely_user'], ['test'])
+    
+    def test_analyze_network_min_interaction_weight_filter(self):
+        """Test that min_interaction_weight filters accounts with low incoming weight."""
+        mock_client = mock.Mock()
+        
+        # user1 mentions user2, user3 and retweets user4
+        # user2 mentions user3, user4
+        # Incoming weight accumulates from all edges pointing to each user
+        mock_tweets = {
+            'user1': [
+                {'text': 'Hello @user2 @user3', 'tagged_accounts': ['user2', 'user3'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user1'},
+                {'text': 'RT @user4: Great', 'tagged_accounts': [], 'retweeted_user': 'user4', 'quoted_user': None, 'author': 'user1'}
+            ],
+            'user2': [
+                {'text': 'Hello @user3 @user4', 'tagged_accounts': ['user3', 'user4'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user2'}
+            ]
+        }
+        
+        def mock_fetch(username, force_refresh=False):
+            return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
+        
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
+            return True
+        
+        mock_client.fetch_user_tweets.side_effect = mock_fetch
+        mock_client.check_user_relevance.side_effect = mock_relevance
+        
+        analyzer = TwitterNetworkAnalyzer(mock_client, max_workers=1)
+        
+        # Without filter: should have all 4 users
+        scores_no_filter, _, _, _ = analyzer.analyze_network(
+            ['user1', 'user2'], ['test'], min_interaction_weight=0
+        )
+        assert len(scores_no_filter) == 4
+        
+        # With moderate filter: some non-seeds may be filtered, but seeds preserved
+        scores_filtered, _, _, _ = analyzer.analyze_network(
+            ['user1', 'user2'], ['test'], min_interaction_weight=3.0
+        )
+        
+        # Seeds are always preserved
+        assert 'user1' in scores_filtered
+        assert 'user2' in scores_filtered
+        # user3 and user4 have sufficient incoming weight
+        assert 'user3' in scores_filtered
+        assert 'user4' in scores_filtered
+        # Total should be 4 (seeds + qualified non-seeds)
+        assert len(scores_filtered) == 4
+        
+        # With high filter: only seeds remain (non-seeds filtered out)
+        scores_high_filter, _, _, _ = analyzer.analyze_network(
+            ['user1', 'user2'], ['test'], min_interaction_weight=4.5
+        )
+        assert 'user1' in scores_high_filter  # seed
+        assert 'user2' in scores_high_filter  # seed
+        # user3 and user4 don't meet threshold, so filtered
+        assert 'user3' not in scores_high_filter
+        assert 'user4' not in scores_high_filter
 
 
 class TestSocialDiscoveryIntegration:
@@ -167,7 +226,7 @@ class TestSocialDiscoveryIntegration:
         self.pools_config = Path(self.temp_dir) / "pools_config.json"
         config = {
             "pools": [
-                {"name": "test_pool", "keywords": ["test"], "initial_accounts": ["user1"]}
+                {"name": "test_pool", "keywords": ["test"], "initial_accounts": ["user1"], "active": True}
             ]
         }
         with open(self.pools_config, 'w') as f:
@@ -178,9 +237,10 @@ class TestSocialDiscoveryIntegration:
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
+    @pytest.mark.asyncio
     @mock.patch('bitcast.validator.social_discovery.social_discovery.PoolManager')
     @mock.patch('bitcast.validator.social_discovery.social_discovery.TwitterNetworkAnalyzer')
-    def test_discover_social_network_success(self, mock_analyzer_class, mock_pool_manager_class):
+    async def test_discover_social_network_success(self, mock_analyzer_class, mock_pool_manager_class):
         """Test successful social discovery."""
         # Mock pool manager
         mock_pool_manager = mock.Mock()
@@ -197,7 +257,8 @@ class TestSocialDiscoveryIntegration:
         mock_analyzer.analyze_network.return_value = (
             {'user1': 0.6, 'user2': 0.4},  # scores
             np.array([[0, 1], [1, 0]]),    # adjacency matrix  
-            ['user1', 'user2']             # usernames
+            ['user1', 'user2'],            # usernames
+            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}}  # user_info_map
         )
         mock_analyzer_class.return_value = mock_analyzer
         
@@ -207,13 +268,14 @@ class TestSocialDiscoveryIntegration:
              mock.patch('pathlib.Path.exists', return_value=False), \
              mock.patch('json.dump'):
             
-            result = discover_social_network("test_pool")
+            result = await discover_social_network("test_pool")
             
             # Should have called the analyzer
             mock_analyzer.analyze_network.assert_called_once()
             assert "test_pool" in result
     
-    def test_regenerate_with_nonexistent_pool(self):
+    @pytest.mark.asyncio
+    async def test_regenerate_with_nonexistent_pool(self):
         """Test error handling for nonexistent pool."""
         with pytest.raises(Exception, match="not found"):
-            discover_social_network("nonexistent_pool")
+            await discover_social_network("nonexistent_pool")

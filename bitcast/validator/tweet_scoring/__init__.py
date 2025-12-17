@@ -9,7 +9,9 @@ from .tweet_scorer import score_tweets_for_pool
 from .social_map_loader import (
     load_latest_social_map,
     get_active_members,
-    get_considered_accounts
+    get_considered_accounts,
+    parse_social_map_filename,
+    get_active_members_for_brief
 )
 from .tweet_filter import TweetFilter
 from .engagement_analyzer import EngagementAnalyzer
@@ -20,6 +22,8 @@ __all__ = [
     'load_latest_social_map',
     'get_active_members',
     'get_considered_accounts',
+    'parse_social_map_filename',
+    'get_active_members_for_brief',
     'TweetFilter',
     'EngagementAnalyzer',
     'ScoreCalculator'

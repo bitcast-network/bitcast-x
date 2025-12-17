@@ -238,7 +238,7 @@ class TestTwitterEvaluator:
         ]
         
         # Mock scoring to fail for first brief, succeed for second
-        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date):
+        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date, max_members=None, considered_accounts=None):
             if brief_id == 'error_brief':
                 raise ValueError("Scoring failed")
             return [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5}]
@@ -411,30 +411,6 @@ class TestTwitterEvaluator:
             # Verify result
             assert len(result) == 1
             assert result[0]['author'] == 'user1'
-    
-    def test_parse_brief_date_valid_formats(self):
-        """Test _parse_brief_date with valid date formats."""
-        evaluator = TwitterEvaluator()
-        
-        # ISO format with timezone
-        result = evaluator._parse_brief_date('2024-01-15T00:00:00Z')
-        assert result.year == 2024
-        assert result.month == 1
-        assert result.day == 15
-        
-        # Simple YYYY-MM-DD format
-        result = evaluator._parse_brief_date('2024-01-15')
-        assert result.year == 2024
-        assert result.month == 1
-        assert result.day == 15
-    
-    def test_parse_brief_date_invalid_inputs(self):
-        """Test _parse_brief_date with invalid inputs returns None."""
-        evaluator = TwitterEvaluator()
-        
-        assert evaluator._parse_brief_date(None) is None
-        assert evaluator._parse_brief_date('') is None
-        assert evaluator._parse_brief_date('not-a-date') is None
     
     def test_convert_snapshot_to_tweets_with_targets_preserves_engagement(self):
         """Test that _convert_snapshot_to_tweets_with_targets preserves engagement metrics."""

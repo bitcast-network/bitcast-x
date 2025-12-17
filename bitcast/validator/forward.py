@@ -66,7 +66,7 @@ async def forward(self):
             )
         
         # Social discovery (bi-weekly on Sundays, for stale pools)
-        results = run_discovery_for_stale_pools()
+        results = await run_discovery_for_stale_pools()
         if results:
             bt.logging.info(f"Social discovery complete for {len(results)} pool(s): {list(results.keys())}")
         
