@@ -17,6 +17,7 @@ import bittensor as bt
 
 from bitcast.validator.utils.config import (
     RAPID_API_KEY,
+    DESEARCH_API_KEY,
     INITIAL_FETCH_DAYS,
     INCREMENTAL_FETCH_DAYS,
     MAX_TWEETS_PER_FETCH,
@@ -29,6 +30,8 @@ from bitcast.validator.utils.twitter_cache import (
     cache_user_info
 )
 
+# Add flag to switch APIs (or make Desearch.ai default)
+USE_DESEARCH_API = os.getenv('USE_DESEARCH_API', 'true').lower() == 'true'
 
 class TwitterClient:
     """
@@ -41,30 +44,33 @@ class TwitterClient:
     def __init__(self, api_key: Optional[str] = None, 
                  max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
                  posts_only: bool = True):
-        """Initialize client with API key and configuration options.
+        """Initialize client with API key and configuration options."""
+        # Use Desearch.ai by default, or RapidAPI if flag is false
+        self.use_desearch = USE_DESEARCH_API
         
-        Args:
-            api_key: RapidAPI key for Twitter API access
-            max_retries: Maximum number of API request retries (default: 3)
-            retry_delay: Delay in seconds between retries (default: 2.0)
-            rate_limit_delay: Delay in seconds between API calls (default: 1.0)
-            posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
-                       If False, use both /user/tweets and /user/tweetsandreplies
-        """
-        self.api_key = api_key or RAPID_API_KEY
-        if not self.api_key:
-            raise ValueError("RAPID_API_KEY environment variable must be set")
+        if self.use_desearch:
+            self.api_key = api_key or DESEARCH_API_KEY
+            if not self.api_key:
+                raise ValueError("DESEARCH_API_KEY environment variable must be set")
+            self.base_url = "https://api.desearch.ai"
+            self.headers = {
+                "Authorization": f"dt_{self.api_key}",
+                "Content-Type": "application/json"
+            }
+        else:
+            self.api_key = api_key or RAPID_API_KEY
+            if not self.api_key:
+                raise ValueError("RAPID_API_KEY environment variable must be set")
+            self.headers = {
+                "x-rapidapi-key": self.api_key,
+                "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
+            }
         
         # Configuration
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limit_delay = rate_limit_delay
         self.posts_only = posts_only
-        
-        self.headers = {
-            "x-rapidapi-key": self.api_key,
-            "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
-        }
         
         endpoint_mode = "posts-only mode" if self.posts_only else "dual-endpoint mode"
         bt.logging.info(f"TwitterClient initialized with centralized cache ({TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness, {endpoint_mode})")
@@ -424,18 +430,21 @@ class TwitterClient:
         # API fetch limit (used for pagination)
         tweet_limit = MAX_TWEETS_PER_FETCH
         
-        # Select endpoints based on posts_only mode
-        if self.posts_only:
-            # Posts-only mode: faster, uses less quota (excludes replies)
-            endpoints = [
-                "https://twitter-v24.p.rapidapi.com/user/tweets"
-            ]
+        # Select endpoints based on API
+        if self.use_desearch:
+            # Desearch.ai: single endpoint for user posts
+            endpoints = [f"{self.base_url}/twitter/user/posts"]
         else:
-            # Dual-endpoint mode: complete tweet coverage (includes replies)
-            endpoints = [
-                "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
-                "https://twitter-v24.p.rapidapi.com/user/tweets"
-            ]
+            # RapidAPI: existing endpoints
+            if self.posts_only:
+                endpoints = [
+                    "https://twitter-v24.p.rapidapi.com/user/tweets"
+                ]
+            else:
+                endpoints = [
+                    "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
+                    "https://twitter-v24.p.rapidapi.com/user/tweets"
+                ]
         
         # Fetch from endpoint(s) in parallel
         all_tweets = []
@@ -748,4 +757,177 @@ class TwitterClient:
         
         return False
     
+    def _parse_desearch_tweet(self, desearch_data: Dict, username: str) -> Optional[Dict]:
+        """
+        Parse Desearch.ai API response to match RapidAPI format.
+        
+        Args:
+            desearch_data: Raw tweet object from Desearch.ai API
+            username: Expected username (for validation)
+            
+        Returns:
+            Tweet dict in the same format as _parse_tweet_result
+        """
+        try:
+            # Extract user info
+            user = desearch_data.get('user', {})
+            author_username = user.get('username', '').lower()
+            
+            # Extract tweet data
+            tweet_id = str(desearch_data.get('id', ''))
+            text = desearch_data.get('text', '')
+            created_at_iso = desearch_data.get('created_at', '')
+            
+            # Convert ISO 8601 to Twitter date format
+            # "2023-01-01T00:00:00Z" -> "Wed Jan 01 00:00:00 +0000 2023"
+            created_at = self._convert_iso_to_twitter_date(created_at_iso)
+            
+            # Extract engagement metrics
+            like_count = desearch_data.get('like_count', 0)
+            retweet_count = desearch_data.get('retweet_count', 0)
+            reply_count = desearch_data.get('reply_count', 0)
+            quote_count = desearch_data.get('quote_count', 0)
+            bookmark_count = desearch_data.get('bookmark_count', 0)
+            
+            # Extract retweet info
+            is_retweet = desearch_data.get('is_retweet', False)
+            retweeted_user = None
+            retweeted_tweet_id = None
+            if is_retweet and desearch_data.get('retweet'):
+                retweet_data = desearch_data['retweet']
+                retweeted_tweet_id = str(retweet_data.get('id', ''))
+                retweet_user = retweet_data.get('user', {})
+                if retweet_user:
+                    retweeted_user = retweet_user.get('username', '').lower()
+            
+            # Extract quote info
+            is_quote = desearch_data.get('is_quote_tweet', False)
+            quoted_user = None
+            quoted_tweet_id = desearch_data.get('quoted_status_id')
+            if quoted_tweet_id:
+                quoted_tweet_id = str(quoted_tweet_id)
+                # Try to extract from quote object if available
+                if desearch_data.get('quote') and desearch_data['quote'].get('user'):
+                    quoted_user = desearch_data['quote']['user'].get('username', '').lower()
+            
+            # Extract tagged accounts from entities (if available)
+            tagged_accounts = []
+            entities = desearch_data.get('entities', {})
+            if entities:
+                user_mentions = entities.get('user_mentions', [])
+                if isinstance(user_mentions, list):
+                    tagged_accounts = [m.get('screen_name', '').lower() for m in user_mentions if m.get('screen_name')]
+            
+            # Extract reply info
+            in_reply_to_status_id = desearch_data.get('in_reply_to_status_id')
+            if in_reply_to_status_id:
+                in_reply_to_status_id = str(in_reply_to_status_id)
+            in_reply_to_user = desearch_data.get('in_reply_to_screen_name', '').lower() if desearch_data.get('in_reply_to_screen_name') else None
+            
+            return {
+                'tweet_id': tweet_id,
+                'created_at': created_at,
+                'text': text,
+                'author': author_username,
+                'tagged_accounts': tagged_accounts,
+                'retweeted_user': retweeted_user,
+                'retweeted_tweet_id': retweeted_tweet_id,
+                'quoted_user': quoted_user,
+                'quoted_tweet_id': quoted_tweet_id,
+                'lang': desearch_data.get('lang', 'und'),
+                'favorite_count': like_count,  # Map like_count to favorite_count
+                'retweet_count': retweet_count,
+                'reply_count': reply_count,
+                'quote_count': quote_count,
+                'bookmark_count': bookmark_count,
+                'in_reply_to_status_id': in_reply_to_status_id,
+                'in_reply_to_user': in_reply_to_user
+            }
+        except (KeyError, AttributeError, ValueError) as e:
+            bt.logging.debug(f"Failed to parse Desearch.ai tweet: {e}")
+            return None
+
+    def _convert_iso_to_twitter_date(self, iso_date: str) -> str:
+        """
+        Convert ISO 8601 date to Twitter date format.
+        
+        "2023-01-01T00:00:00Z" -> "Wed Jan 01 00:00:00 +0000 2023"
+        """
+        try:
+            # Handle both 'Z' and timezone offset formats
+            if iso_date.endswith('Z'):
+                dt = datetime.fromisoformat(iso_date.replace('Z', '+00:00'))
+            else:
+                dt = datetime.fromisoformat(iso_date)
+            # Format to Twitter style
+            return dt.strftime('%a %b %d %H:%M:%S %z %Y')
+        except (ValueError, AttributeError):
+            return iso_date  # Return original if conversion fails
+
+    def _fetch_from_desearch_endpoint(
+        self,
+        username: str,
+        tweet_limit: int,
+        incremental_cutoff: datetime
+    ) -> Tuple[List[Dict], Optional[Dict], bool]:
+        """
+        Fetch tweets from Desearch.ai API for a user.
+        
+        Uses: /twitter/user/posts?username={username}
+        """
+        url = f"{self.base_url}/twitter/user/posts"
+        params = {"username": username}
+        
+        tweets = []
+        user_info = {
+            'username': username.lower(),
+            'followers_count': 0
+        }
+        api_fetch_succeeded = False
+        
+        try:
+            data, error = self._make_api_request(url, params)
+            if error:
+                bt.logging.error(f"Desearch.ai API failed for @{username}: {error}")
+                return tweets, user_info, False
+            
+            api_fetch_succeeded = True
+            
+            # Desearch.ai returns a list of tweets directly (or wrapped in 'data')
+            tweet_list = data if isinstance(data, list) else data.get('data', [])
+            
+            if not isinstance(tweet_list, list):
+                bt.logging.warning(f"Unexpected Desearch.ai response format for @{username}")
+                return tweets, user_info, api_fetch_succeeded
+            
+            for tweet_data in tweet_list:
+                parsed_tweet = self._parse_desearch_tweet(tweet_data, username)
+                if not parsed_tweet:
+                    continue
+                
+                # Check date cutoff
+                try:
+                    tweet_date_str = parsed_tweet.get('created_at', '')
+                    if tweet_date_str:
+                        tweet_date = datetime.strptime(tweet_date_str, '%a %b %d %H:%M:%S %z %Y')
+                        cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
+                        if tweet_date < cutoff_with_tz:
+                            break  # Stop if we've reached the cutoff
+                except (ValueError, AttributeError):
+                    pass
+                
+                tweets.append(parsed_tweet)
+                
+                # Extract followers count from first tweet's user object
+                if user_info['followers_count'] == 0 and tweet_data.get('user'):
+                    user_info['followers_count'] = tweet_data['user'].get('followers_count', 0)
+                
+                if len(tweets) >= tweet_limit:
+                    break
+            
+            return tweets, user_info, api_fetch_succeeded
+            
+        except Exception as e:
+            bt.logging.error(f"Desearch.ai API error for @{username}: {e}")
+            return tweets, user_info, False
 

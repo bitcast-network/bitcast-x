@@ -35,6 +35,7 @@ X_ACCOUNT_CONNECTIONS_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-account-conne
 TWEETS_SUBMIT_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/brief-tweets"
 
 RAPID_API_KEY = os.getenv('RAPID_API_KEY')
+DESEARCH_API_KEY = os.getenv('DESEARCH_API_KEY')
 CHUTES_API_KEY = os.getenv('CHUTES_API_KEY')
 WANDB_API_KEY = os.getenv('WANDB_API_KEY')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
