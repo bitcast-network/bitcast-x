@@ -16,7 +16,6 @@ from typing import Dict, List, Optional, Tuple, Any
 import bittensor as bt
 
 from bitcast.validator.utils.config import (
-    RAPID_API_KEY,
     DESEARCH_API_KEY,
     INITIAL_FETCH_DAYS,
     INCREMENTAL_FETCH_DAYS,
@@ -30,8 +29,8 @@ from bitcast.validator.utils.twitter_cache import (
     cache_user_info
 )
 
-# Add flag to switch APIs (or make Desearch.ai default)
-USE_DESEARCH_API = os.getenv('USE_DESEARCH_API', 'true').lower() == 'true'
+# Desearch.ai is required for scoring
+USE_DESEARCH_API = True
 
 class TwitterClient:
     """
@@ -44,27 +43,39 @@ class TwitterClient:
     def __init__(self, api_key: Optional[str] = None, 
                  max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
                  posts_only: bool = True):
-        """Initialize client with API key and configuration options."""
-        # Use Desearch.ai by default, or RapidAPI if flag is false
-        self.use_desearch = USE_DESEARCH_API
+        """Initialize client with Desearch.ai API key (required for scoring)."""
+        # Desearch.ai is required for scoring
+        self.use_desearch = True
+        self.api_key = api_key or DESEARCH_API_KEY
+        if not self.api_key:
+            raise ValueError("DESEARCH_API_KEY environment variable must be set for scoring")
         
-        if self.use_desearch:
-            self.api_key = api_key or DESEARCH_API_KEY
-            if not self.api_key:
-                raise ValueError("DESEARCH_API_KEY environment variable must be set")
-            self.base_url = "https://api.desearch.ai"
-            self.headers = {
-                "Authorization": f"dt_{self.api_key}",
-                "Content-Type": "application/json"
-            }
+        # Strip any whitespace that might have been introduced
+        self.api_key = self.api_key.strip()
+        self.base_url = "https://api.desearch.ai"
+        # Desearch.ai requires format: dt_$API_KEY
+        # The $ is a literal character, not a variable, so we concatenate strings
+        # Check if API key already includes the full prefix
+        if self.api_key.startswith('dt_$'):
+            # Already has full prefix, use as-is
+            auth_value = self.api_key
+        elif self.api_key.startswith('$'):
+            # Has $ but missing dt_ prefix
+            auth_value = "dt_" + self.api_key
         else:
-            self.api_key = api_key or RAPID_API_KEY
-            if not self.api_key:
-                raise ValueError("RAPID_API_KEY environment variable must be set")
-            self.headers = {
-                "x-rapidapi-key": self.api_key,
-                "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
-            }
+            # No prefix, add dt_$
+            auth_value = "dt_$" + self.api_key
+        
+        self.headers = {
+            "Authorization": auth_value,
+            "Content-Type": "application/json"
+        }
+        
+        # Debug: Log auth header format for troubleshooting (first run only)
+        if not hasattr(TwitterClient, '_auth_logged'):
+            masked_auth = auth_value[:15] + '...' + auth_value[-5:] if len(auth_value) > 20 else '***'
+            bt.logging.info(f"Desearch.ai Authorization header format: {masked_auth} (key length: {len(self.api_key)})")
+            TwitterClient._auth_logged = True
         
         # Configuration
         self.max_retries = max_retries
@@ -79,6 +90,12 @@ class TwitterClient:
         """Make API request with retry logic for rate limits."""
         for attempt in range(self.max_retries):
             try:
+                # Debug: Log the authorization header (masked for security)
+                auth_header = self.headers.get('Authorization', '')
+                if auth_header:
+                    masked_auth = auth_header[:10] + '...' + auth_header[-5:] if len(auth_header) > 15 else '***'
+                    bt.logging.debug(f"Making request to {url} with Authorization: {masked_auth}")
+                
                 response = requests.get(url, headers=self.headers, params=params, timeout=30)
                 
                 if response.status_code in [429, 500, 502, 503, 504]:
@@ -91,7 +108,19 @@ class TwitterClient:
                 response.raise_for_status()
                 data = response.json()
                 
-                # Normalize response structure - Twitter API returns different formats:
+                # Handle Desearch.ai response format: {"user": {...}, "tweets": [...]}
+                if isinstance(data, dict) and 'tweets' in data:
+                    return data, None
+                
+                # Handle Desearch.ai response format (list of tweets) - legacy
+                if isinstance(data, list):
+                    return data, None
+                
+                # Handle Desearch.ai response wrapped in 'data' key
+                if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list):
+                    return data['data'], None
+                
+                # Normalize response structure - Legacy RapidAPI formats (for backward compatibility):
                 # - Standard: {"data": {"user": {...}}}
                 # - Paginated: {"user": {...}}
                 if 'data' in data and 'user' in data['data']:
@@ -430,68 +459,41 @@ class TwitterClient:
         # API fetch limit (used for pagination)
         tweet_limit = MAX_TWEETS_PER_FETCH
         
-        # Select endpoints based on API
-        if self.use_desearch:
-            # Desearch.ai: single endpoint for user posts
-            endpoints = [f"{self.base_url}/twitter/user/posts"]
-        else:
-            # RapidAPI: existing endpoints
-            if self.posts_only:
-                endpoints = [
-                    "https://twitter-v24.p.rapidapi.com/user/tweets"
-                ]
-            else:
-                endpoints = [
-                    "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
-                    "https://twitter-v24.p.rapidapi.com/user/tweets"
-                ]
-        
-        # Fetch from endpoint(s) in parallel
+        # Desearch.ai: single endpoint for user posts
+        # Fetch from Desearch.ai endpoint
         all_tweets = []
         user_info = None
         api_fetch_succeeded = False
         
-        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
-            future_to_endpoint = {
-                executor.submit(
-                    self._fetch_from_single_endpoint,
-                    url, username, tweet_limit, incremental_cutoff
-                ): url
-                for url in endpoints
-            }
+        try:
+            tweets, endpoint_user_info, endpoint_success = self._fetch_from_desearch_endpoint(
+                username, tweet_limit, incremental_cutoff
+            )
+            all_tweets.extend(tweets)
             
-            for future in as_completed(future_to_endpoint):
-                endpoint_url = future_to_endpoint[future]
-                try:
-                    tweets, endpoint_user_info, endpoint_success = future.result()
-                    all_tweets.extend(tweets)
-                    
-                    # Use user_info from first successful endpoint
-                    if endpoint_user_info and not user_info:
-                        user_info = endpoint_user_info
-                    
-                    # Track if any endpoint succeeded
-                    if endpoint_success:
-                        api_fetch_succeeded = True
-                        
-                    bt.logging.debug(f"Fetched {len(tweets)} tweets from {endpoint_url.split('/')[-1]}")
-                except Exception as e:
-                    bt.logging.warning(f"Failed to fetch from {endpoint_url}: {e}")
-                    # Continue with other endpoints
+            if endpoint_user_info:
+                user_info = endpoint_user_info
+            
+            if endpoint_success:
+                api_fetch_succeeded = True
+                
+            bt.logging.debug(f"Fetched {len(tweets)} tweets from Desearch.ai for @{username}")
+        except Exception as e:
+            bt.logging.warning(f"Failed to fetch from Desearch.ai for @{username}: {e}")
         
-        # Deduplicate by tweet_id (handles overlap between endpoints and pinned tweets)
+        # Deduplicate by tweet_id
         unique_map = {t['tweet_id']: t for t in all_tweets if t.get('tweet_id')}
         tweets = list(unique_map.values())
         
-        # Log deduplication metrics for dual endpoint mode
-        if len(endpoints) > 1:
+        # Log fetch results
+        if len(all_tweets) != len(tweets):
             overlap_count = len(all_tweets) - len(tweets)
             bt.logging.info(
-                f"Fetched {len(all_tweets)} total tweets from {len(endpoints)} endpoints for @{username}, "
+                f"Fetched {len(all_tweets)} tweets from Desearch.ai for @{username}, "
                 f"{len(tweets)} unique ({overlap_count} duplicates removed)"
             )
         else:
-            bt.logging.info(f"Fetched {len(tweets)} tweets for @{username}")
+            bt.logging.info(f"Fetched {len(tweets)} tweets from Desearch.ai for @{username}")
         
         # Reset missing counter for newly fetched tweets
         for tweet in tweets:
@@ -769,13 +771,18 @@ class TwitterClient:
             Tweet dict in the same format as _parse_tweet_result
         """
         try:
-            # Extract user info
-            user = desearch_data.get('user', {})
-            author_username = user.get('username', '').lower()
-            
             # Extract tweet data
             tweet_id = str(desearch_data.get('id', ''))
+            if not tweet_id:
+                return None
+            
             text = desearch_data.get('text', '')
+            if not text:
+                return None
+            
+            # Use the username parameter (tweets don't have nested user object in Desearch.ai response)
+            author_username = username.lower()
+            
             created_at_iso = desearch_data.get('created_at', '')
             
             # Convert ISO 8601 to Twitter date format
@@ -888,13 +895,35 @@ class TwitterClient:
         try:
             data, error = self._make_api_request(url, params)
             if error:
-                bt.logging.error(f"Desearch.ai API failed for @{username}: {error}")
+                # Check if it's a 401 error and log more details
+                if "401" in str(error) or "Unauthorized" in str(error):
+                    # Log the auth header format (masked) for debugging
+                    auth_header = self.headers.get('Authorization', '')
+                    masked_auth = auth_header[:15] + '...' + auth_header[-5:] if len(auth_header) > 20 else '***'
+                    bt.logging.error(
+                        f"Desearch.ai API 401 Unauthorized for @{username}. "
+                        f"Auth header format: {masked_auth} (key length: {len(self.api_key)}). "
+                        f"Check if DESEARCH_API_KEY in .env is correct."
+                    )
+                else:
+                    bt.logging.error(f"Desearch.ai API failed for @{username}: {error}")
                 return tweets, user_info, False
             
             api_fetch_succeeded = True
             
-            # Desearch.ai returns a list of tweets directly (or wrapped in 'data')
-            tweet_list = data if isinstance(data, list) else data.get('data', [])
+            # Desearch.ai returns {"user": {...}, "tweets": [...]}
+            if isinstance(data, dict) and 'tweets' in data:
+                tweet_list = data.get('tweets', [])
+                # Extract user info from response
+                user_data = data.get('user', {})
+                if user_data:
+                    user_info['followers_count'] = user_data.get('followers_count', 0)
+            elif isinstance(data, list):
+                # Legacy format: list of tweets
+                tweet_list = data
+            else:
+                # Try 'data' key as fallback
+                tweet_list = data.get('data', []) if isinstance(data, dict) else []
             
             if not isinstance(tweet_list, list):
                 bt.logging.warning(f"Unexpected Desearch.ai response format for @{username}")
@@ -918,7 +947,8 @@ class TwitterClient:
                 
                 tweets.append(parsed_tweet)
                 
-                # Extract followers count from first tweet's user object
+                # User info already extracted from response root 'user' key above
+                # Only extract from tweet if not already set
                 if user_info['followers_count'] == 0 and tweet_data.get('user'):
                     user_info['followers_count'] = tweet_data['user'].get('followers_count', 0)
                 

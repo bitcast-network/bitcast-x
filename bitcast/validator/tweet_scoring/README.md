@@ -272,8 +272,8 @@ python -m bitcast.validator.social_discovery.social_discovery --pool-name tao
 ```
 
 ### Twitter API errors
-- Check `RAPID_API_KEY` in `.env`
-- Verify API quota on RapidAPI
+- Check `DESEARCH_API_KEY` in `.env` (required for scoring)
+- Verify API quota on Desearch.ai
 - Wait if rate limited
 
 ### No tweets scored

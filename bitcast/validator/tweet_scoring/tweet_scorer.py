@@ -284,8 +284,7 @@ def score_tweets_for_pool(
     bt.logging.debug("Fetching tweets from active members")
     
     twitter_client = TwitterClient(posts_only=False)
-    api_method = "Desearch.ai" if twitter_client.use_desearch else "RapidAPI"
-    bt.logging.info(f"Using {api_method} for tweet fetching")
+    bt.logging.info(f"Using Desearch.ai for tweet fetching")
     member_tweets = []
     failed_members = []
     
@@ -467,8 +466,7 @@ def score_tweets_for_pool(
     
     # Final summary
     total_time = time.time() - start_time
-    api_method = "Desearch.ai" if twitter_client.use_desearch else "RapidAPI"
-    bt.logging.info(f"✅ Tweet scoring complete: {len(scored_tweets)} tweets scored ({total_time:.1f}s) using {api_method}")
+    bt.logging.info(f"✅ Tweet scoring complete: {len(scored_tweets)} tweets scored ({total_time:.1f}s) using Desearch.ai")
     bt.logging.debug(f"Output: {output_file}")
     
     # Return simplified data structure for programmatic use
@@ -603,10 +601,9 @@ if __name__ == "__main__":
         
         # Check which API was used (create a test client to check)
         test_client = TwitterClient()
-        api_method = "Desearch.ai" if test_client.use_desearch else "RapidAPI"
 
         # Print summary
-        print(f"\n✅ Tweet scoring complete: {len(results)} tweets scored (using {api_method})")
+        print(f"\n✅ Tweet scoring complete: {len(results)} tweets scored (using Desearch.ai)")
         
         if results:
             print(f"\n📊 Scored Tweets (sorted by score):")
