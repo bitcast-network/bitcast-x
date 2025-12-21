@@ -65,12 +65,13 @@ class TwitterNetworkAnalyzer:
                           If provided, force_cache_refresh and posts_only are ignored.
             max_workers: Number of concurrent workers (1=sequential, 2+=concurrent)
                         If None, uses SOCIAL_DISCOVERY_MAX_WORKERS config
-            force_cache_refresh: If True, force Twitter API cache refresh. Only applied when
-                               twitter_client is not provided.
+            force_cache_refresh: If True, force Twitter API cache refresh (30-day fetch).
+                               Passed to fetch_user_tweets() calls.
             posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
                        Default: True for social discovery. Only applied when twitter_client is not provided.
         """
-        self.twitter_client = twitter_client or TwitterClient(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
+        self.twitter_client = twitter_client or TwitterClient(posts_only=posts_only)
+        self.force_cache_refresh = force_cache_refresh
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -99,7 +100,7 @@ class TwitterNetworkAnalyzer:
             Tuple of (username_lower, tweets_list, user_info, error_message)
         """
         try:
-            result = self.twitter_client.fetch_user_tweets(username.lower())
+            result = self.twitter_client.fetch_user_tweets(username.lower(), force_refresh=self.force_cache_refresh)
             return username.lower(), result['tweets'], result['user_info'], None
         except Exception as e:
             bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
@@ -178,7 +179,7 @@ class TwitterNetworkAnalyzer:
             # Sequential execution
             for username in seed_accounts:
                 username_lower = username.lower()
-                result = self.twitter_client.fetch_user_tweets(username_lower)
+                result = self.twitter_client.fetch_user_tweets(username_lower, force_refresh=self.force_cache_refresh)
                 all_tweets[username_lower] = result['tweets']
                 user_info_map[username_lower] = result['user_info']
         
