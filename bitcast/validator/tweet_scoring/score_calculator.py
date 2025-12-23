@@ -36,11 +36,19 @@ class ScoreCalculator:
         self.retweet_weight = retweet_weight if retweet_weight is not None else PAGERANK_RETWEET_WEIGHT
         self.quote_weight = quote_weight if quote_weight is not None else PAGERANK_QUOTE_WEIGHT
         
+        # Calculate minimum influence score from considered accounts
+        # Used as fallback for accounts not in the social map
+        if considered_accounts:
+            self.min_influence_score = min(considered_accounts.values())
+        else:
+            self.min_influence_score = 0.0
+        
         bt.logging.info(
             f"ScoreCalculator initialized: "
             f"{len(considered_accounts)} accounts, "
             f"RT weight={self.retweet_weight}, "
-            f"Quote weight={self.quote_weight}"
+            f"Quote weight={self.quote_weight}, "
+            f"Min influence score={self.min_influence_score:.6f}"
         )
     
     def calculate_tweet_score(
@@ -134,9 +142,10 @@ class ScoreCalculator:
                 self.considered_accounts
             )
             
-            # Get author's influence score (default to 0 if not in considered accounts)
+            # Get author's influence score
+            # Use minimum influence score from considered accounts as fallback
             author = tweet.get('author', '')
-            author_influence_score = self.considered_accounts.get(author, 0.0)
+            author_influence_score = self.considered_accounts.get(author, self.min_influence_score)
             
             # Calculate score
             score, details = self.calculate_tweet_score(engagements, author_influence_score)
@@ -182,4 +191,3 @@ class ScoreCalculator:
         )
         
         return scored_tweets
-
