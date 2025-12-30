@@ -8,7 +8,7 @@ from bitcast.validator.tweet_scoring.social_map_loader import (
     load_latest_social_map,
     get_active_members,
     get_considered_accounts,
-    get_active_members_for_period
+    get_active_members_for_brief
 )
 
 
@@ -166,14 +166,14 @@ class TestLoadLatestSocialMap:
             pytest.skip("No social map found for 'tao' pool")
 
 
-class TestGetActiveMembersForPeriod:
-    """Test get_active_members_for_period function."""
+class TestGetActiveMembersForBrief:
+    """Test get_active_members_for_brief function."""
     
     def test_no_date_range_returns_active_only(self):
         """Without date range, should return only active members (no relegated)."""
         try:
             # Get members from new function without dates
-            members = get_active_members_for_period('tao')
+            members = get_active_members_for_brief('tao')
             
             # Get active members from latest map for comparison
             social_map, _ = load_latest_social_map('tao')
@@ -193,7 +193,7 @@ class TestGetActiveMembersForPeriod:
             end_date = datetime.now(timezone.utc)
             start_date = end_date - timedelta(days=30)
             
-            members = get_active_members_for_period(
+            members = get_active_members_for_brief(
                 'tao',
                 start_date=start_date,
                 end_date=end_date
@@ -219,7 +219,7 @@ class TestGetActiveMembersForPeriod:
             start_date = datetime.now(timezone.utc) + timedelta(days=1)
             end_date = start_date + timedelta(days=7)
             
-            members = get_active_members_for_period(
+            members = get_active_members_for_brief(
                 'tao',
                 start_date=start_date,
                 end_date=end_date
@@ -234,26 +234,24 @@ class TestGetActiveMembersForPeriod:
         except FileNotFoundError:
             pytest.skip("No social map found for 'tao' pool")
     
-    def test_nonexistent_pool_returns_empty_list(self):
-        """Should return empty list for nonexistent pool."""
-        try:
-            result = get_active_members_for_period('nonexistent_pool_xyz')
-            assert result == []
-            assert isinstance(result, list)
-        except FileNotFoundError:
-            # This is also acceptable behavior
-            pass
+    def test_nonexistent_pool_raises_error(self):
+        """Should raise FileNotFoundError for nonexistent pool."""
+        with pytest.raises(FileNotFoundError):
+            get_active_members_for_brief('nonexistent_pool_xyz')
     
     def test_returns_list_type(self):
         """Should always return a list."""
-        result = get_active_members_for_period('tao')
+        result = get_active_members_for_brief('tao')
         assert isinstance(result, list)
     
     def test_returns_sorted_list(self):
-        """Should return alphabetically sorted list."""
+        """Should return score-sorted list (same as get_active_members)."""
         try:
-            result = get_active_members_for_period('tao')
-            assert result == sorted(result)
+            result = get_active_members_for_brief('tao')
+            # Should be score-sorted (backward compatible with get_active_members)
+            social_map, _ = load_latest_social_map('tao')
+            expected = get_active_members(social_map)
+            assert result == expected
         except FileNotFoundError:
             pytest.skip("No social map found for 'tao' pool")
 
