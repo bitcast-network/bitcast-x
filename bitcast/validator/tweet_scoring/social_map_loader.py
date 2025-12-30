@@ -120,8 +120,8 @@ def get_active_members(
         for username, data in accounts.items()
     ]
     
-    # Sort by score descending
-    account_scores.sort(key=lambda x: x[1], reverse=True)
+    # Sort by score descending, then username ascending for consistent ordering
+    account_scores.sort(key=lambda x: (-x[1], x[0]))
     
     # Apply limit if specified
     if limit is not None:
@@ -170,8 +170,8 @@ def get_considered_accounts(social_map: Dict, limit: int) -> List[Tuple[str, flo
 
 def get_active_members_for_brief(
     pool_name: str,
-    start_date: datetime,
-    end_date: datetime,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
     max_members: Optional[int] = None
 ) -> List[str]:
     """
@@ -181,10 +181,12 @@ def get_active_members_for_brief(
     the top N accounts from each relevant map to ensure accounts that were eligible
     when the brief started remain eligible even if they drop in rank later.
     
+    If no date range is provided, returns active members from the latest map only.
+    
     Args:
         pool_name: Pool name
-        start_date: Brief start date (UTC)
-        end_date: Brief end date (UTC)
+        start_date: Brief start date (UTC). If None, uses latest map only.
+        end_date: Brief end date (UTC). If None, uses latest map only.
         max_members: Number of top accounts to include from each map (if None, includes all)
         
     Returns:
@@ -196,6 +198,11 @@ def get_active_members_for_brief(
         - Map from Nov 23 (mid-brief): Takes top 150
         - Merges to ~160-200 unique accounts (some overlap)
     """
+    # If no date range provided, just return active members from latest map
+    if start_date is None or end_date is None:
+        social_map, _ = load_latest_social_map(pool_name)
+        return get_active_members(social_map, limit=max_members)
+    
     social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
     
     if not social_maps_dir.exists():
@@ -279,6 +286,7 @@ def get_active_members_for_brief(
         latest_map = json.load(f)
     
     # Sort merged accounts by their score in latest map
+    # Use username as secondary sort key for consistent ordering when scores are equal
     scores_dict = {
         username: data.get('score', 0.0)
         for username, data in latest_map['accounts'].items()
@@ -286,8 +294,7 @@ def get_active_members_for_brief(
     
     eligible_list = sorted(
         list(all_eligible),
-        key=lambda x: scores_dict.get(x, 0.0),
-        reverse=True
+        key=lambda x: (-scores_dict.get(x, 0.0), x)  # Sort by score desc, then username asc
     )
     
     bt.logging.info(
