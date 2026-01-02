@@ -335,7 +335,7 @@ def score_tweets_for_pool(
     
     with ThreadPoolExecutor(max_workers=SOCIAL_DISCOVERY_MAX_WORKERS) as executor:
         future_to_account = {
-            executor.submit(fetch_user_tweets_safe, twitter_client, account): account
+            executor.submit(fetch_user_tweets_safe, twitter_client, account, force_cache_refresh): account
             for account in unique_considered
         }
         
