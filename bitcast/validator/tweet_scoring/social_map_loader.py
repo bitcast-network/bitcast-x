@@ -5,6 +5,7 @@ Provides functions to load social maps and extract member information.
 """
 
 import json
+import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -302,3 +303,51 @@ def get_active_members_for_brief(
     )
     
     return eligible_list
+
+
+def load_relationship_scores(pool_name: str) -> Tuple[Optional[np.ndarray], List[str], Dict[str, int]]:
+    """
+    Load the latest relationship scores matrix for cabal protection.
+    
+    Relationship scores represent cumulative weighted interactions between accounts,
+    used to detect and penalize coordinated "cabal" behavior where accounts
+    frequently engage with each other to artificially inflate scores.
+    
+    Args:
+        pool_name: Name of the pool
+        
+    Returns:
+        Tuple of (relationship_scores_matrix, usernames_list, username_to_idx_map)
+        Returns (None, [], {}) if relationship scores not available (backward compatibility)
+    """
+    social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
+    
+    # Find latest adjacency file
+    adjacency_files = list(social_maps_dir.glob("*_adjacency.json"))
+    if not adjacency_files:
+        bt.logging.warning(f"No adjacency files found for pool '{pool_name}', cabal protection disabled")
+        return None, [], {}
+    
+    latest_file = max(
+        adjacency_files,
+        key=lambda f: parse_social_map_filename(f.name.replace('_adjacency', '')) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    
+    with open(latest_file, 'r') as f:
+        data = json.load(f)
+    
+    # Check if relationship_scores field exists (backward compatibility)
+    if 'relationship_scores' not in data:
+        bt.logging.warning(
+            f"Adjacency file {latest_file.name} doesn't contain relationship_scores field. "
+            f"Cabal protection disabled. Re-run social discovery to enable."
+        )
+        return None, [], {}
+    
+    scores_matrix = np.array(data['relationship_scores'], dtype=float)
+    usernames = data['usernames']
+    username_to_idx = {user: i for i, user in enumerate(usernames)}
+    
+    bt.logging.info(f"Loaded relationship scores from {latest_file.name} for cabal protection")
+    
+    return scores_matrix, usernames, username_to_idx
