@@ -58,7 +58,7 @@ TWITTER_CACHE_EXPIRY = CACHE_EXPIRY_DAYS * 24 * 60 * 60  # Convert days to secon
 TWITTER_CACHE_FRESHNESS = int(os.getenv('TWITTER_CACHE_FRESHNESS', str(6 * 60 * 60)))  # Default 6 hours in seconds
 
 # Social Discovery Concurrency (1 = sequential, 2+ = concurrent)
-SOCIAL_DISCOVERY_MAX_WORKERS = 10
+SOCIAL_DISCOVERY_MAX_WORKERS = 3
 
 # Twitter emissions
 EMISSIONS_PERIOD = 7  # 7 days

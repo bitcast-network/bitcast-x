@@ -880,10 +880,10 @@ class TwitterClient:
         """
         Fetch tweets from Desearch.ai API for a user.
         
-        Uses: /twitter/user/posts?username={username}
+        Uses: /twitter/user/posts?username={username}&count=100
         """
         url = f"{self.base_url}/twitter/user/posts"
-        params = {"username": username}
+        params = {"username": username, "count": 100}
         
         tweets = []
         user_info = {

@@ -305,6 +305,9 @@ def score_tweets_for_pool(
                 failed_members.append((member, error))
             else:
                 member_tweets.extend(tweets)
+            
+            # Small delay between requests to avoid overwhelming the API
+            time.sleep(0.5)
     
     fetch_time = time.time() - fetch_start
     bt.logging.info(
@@ -343,6 +346,9 @@ def score_tweets_for_pool(
             tweets, error = future.result()
             if not error:
                 considered_tweets.extend(tweets)
+            
+            # Small delay between requests to avoid overwhelming the API
+            time.sleep(0.5)
     
     # Step 4.5: Deduplicate tweets by tweet_id
     # The tweetsandreplies endpoint can return duplicates, so we need to deduplicate
