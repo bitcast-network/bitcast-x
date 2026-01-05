@@ -878,12 +878,12 @@ class TwitterClient:
         incremental_cutoff: datetime
     ) -> Tuple[List[Dict], Optional[Dict], bool]:
         """
-        Fetch tweets from Desearch.ai API for a user.
+        Fetch tweets from Desearch.ai API for a user with pagination support.
         
-        Uses: /twitter/user/posts?username={username}&count=100
+        Uses: /twitter/user/posts?username={username}&count=100&start={start}
+        Supports pagination to fetch up to 400 tweets per user.
         """
         url = f"{self.base_url}/twitter/user/posts"
-        params = {"username": username, "count": 100}
         
         tweets = []
         user_info = {
@@ -892,68 +892,130 @@ class TwitterClient:
         }
         api_fetch_succeeded = False
         
+        # Pagination parameters
+        count_per_page = 100
+        start = 0
+        # Calculate max pages needed: ceil(tweet_limit / count_per_page)
+        max_pages = (tweet_limit + count_per_page - 1) // count_per_page
+        pages_fetched = 0
+        
         try:
-            data, error = self._make_api_request(url, params)
-            if error:
-                # Check if it's a 401 error and log more details
-                if "401" in str(error) or "Unauthorized" in str(error):
-                    # Log the auth header format (masked) for debugging
-                    auth_header = self.headers.get('Authorization', '')
-                    masked_auth = auth_header[:15] + '...' + auth_header[-5:] if len(auth_header) > 20 else '***'
-                    bt.logging.error(
-                        f"Desearch.ai API 401 Unauthorized for @{username}. "
-                        f"Auth header format: {masked_auth} (key length: {len(self.api_key)}). "
-                        f"Check if DESEARCH_API_KEY in .env is correct."
-                    )
-                else:
-                    bt.logging.error(f"Desearch.ai API failed for @{username}: {error}")
-                return tweets, user_info, False
-            
-            api_fetch_succeeded = True
-            
-            # Desearch.ai returns {"user": {...}, "tweets": [...]}
-            if isinstance(data, dict) and 'tweets' in data:
-                tweet_list = data.get('tweets', [])
-                # Extract user info from response
-                user_data = data.get('user', {})
-                if user_data:
-                    user_info['followers_count'] = user_data.get('followers_count', 0)
-            elif isinstance(data, list):
-                # Legacy format: list of tweets
-                tweet_list = data
-            else:
-                # Try 'data' key as fallback
-                tweet_list = data.get('data', []) if isinstance(data, dict) else []
-            
-            if not isinstance(tweet_list, list):
-                bt.logging.warning(f"Unexpected Desearch.ai response format for @{username}")
-                return tweets, user_info, api_fetch_succeeded
-            
-            for tweet_data in tweet_list:
-                parsed_tweet = self._parse_desearch_tweet(tweet_data, username)
-                if not parsed_tweet:
-                    continue
-                
-                # Check date cutoff
-                try:
-                    tweet_date_str = parsed_tweet.get('created_at', '')
-                    if tweet_date_str:
-                        tweet_date = datetime.strptime(tweet_date_str, '%a %b %d %H:%M:%S %z %Y')
-                        cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
-                        if tweet_date < cutoff_with_tz:
-                            break  # Stop if we've reached the cutoff
-                except (ValueError, AttributeError):
-                    pass
-                
-                tweets.append(parsed_tweet)
-                
-                # User info already extracted from response root 'user' key above
-                # Only extract from tweet if not already set
-                if user_info['followers_count'] == 0 and tweet_data.get('user'):
-                    user_info['followers_count'] = tweet_data['user'].get('followers_count', 0)
-                
+            for page in range(max_pages):
+                # Stop if we've reached the tweet limit
                 if len(tweets) >= tweet_limit:
                     break
+                
+                params = {
+                    "username": username,
+                    "count": count_per_page,
+                    "start": start
+                }
+                
+                data, error = self._make_api_request(url, params)
+                if error:
+                    # Check if it's a 401 error and log more details
+                    if "401" in str(error) or "Unauthorized" in str(error):
+                        # Log the auth header format (masked) for debugging
+                        auth_header = self.headers.get('Authorization', '')
+                        masked_auth = auth_header[:15] + '...' + auth_header[-5:] if len(auth_header) > 20 else '***'
+                        bt.logging.error(
+                            f"Desearch.ai API 401 Unauthorized for @{username}. "
+                            f"Auth header format: {masked_auth} (key length: {len(self.api_key)}). "
+                            f"Check if DESEARCH_API_KEY in .env is correct."
+                        )
+                    else:
+                        bt.logging.error(f"Desearch.ai API failed for @{username} (page {page + 1}): {error}")
+                    
+                    # If first page fails, return empty; otherwise continue with what we have
+                    if page == 0:
+                        return tweets, user_info, False
+                    break
+                
+                api_fetch_succeeded = True
+                
+                # Desearch.ai returns {"user": {...}, "tweets": [...]}
+                if isinstance(data, dict) and 'tweets' in data:
+                    tweet_list = data.get('tweets', [])
+                    # Extract user info from response (only on first page)
+                    if page == 0:
+                        user_data = data.get('user', {})
+                        if user_data:
+                            user_info['followers_count'] = user_data.get('followers_count', 0)
+                elif isinstance(data, list):
+                    # Legacy format: list of tweets
+                    tweet_list = data
+                else:
+                    # Try 'data' key as fallback
+                    tweet_list = data.get('data', []) if isinstance(data, dict) else []
+                
+                if not isinstance(tweet_list, list):
+                    bt.logging.warning(f"Unexpected Desearch.ai response format for @{username} (page {page + 1})")
+                    break
+                
+                # If no tweets returned, we've reached the end
+                if not tweet_list:
+                    bt.logging.debug(f"No more tweets for @{username} (page {page + 1})")
+                    break
+                
+                # Process tweets from this page
+                page_tweets_count = 0
+                reached_cutoff = False
+                
+                for tweet_data in tweet_list:
+                    parsed_tweet = self._parse_desearch_tweet(tweet_data, username)
+                    if not parsed_tweet:
+                        continue
+                    
+                    # Check date cutoff
+                    try:
+                        tweet_date_str = parsed_tweet.get('created_at', '')
+                        if tweet_date_str:
+                            tweet_date = datetime.strptime(tweet_date_str, '%a %b %d %H:%M:%S %z %Y')
+                            cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
+                            if tweet_date < cutoff_with_tz:
+                                reached_cutoff = True
+                                break  # Stop if we've reached the cutoff
+                    except (ValueError, AttributeError):
+                        pass
+                    
+                    tweets.append(parsed_tweet)
+                    page_tweets_count += 1
+                    
+                    # User info already extracted from response root 'user' key above
+                    # Only extract from tweet if not already set
+                    if user_info['followers_count'] == 0 and tweet_data.get('user'):
+                        user_info['followers_count'] = tweet_data['user'].get('followers_count', 0)
+                    
+                    if len(tweets) >= tweet_limit:
+                        break
+                
+                pages_fetched += 1
+                bt.logging.debug(
+                    f"Fetched {page_tweets_count} tweets from Desearch.ai for @{username} "
+                    f"(page {pages_fetched}, total: {len(tweets)})"
+                )
+                
+                # Stop if we've reached the date cutoff or tweet limit
+                if reached_cutoff or len(tweets) >= tweet_limit:
+                    break
+                
+                # If we got fewer tweets than requested, we've reached the end
+                if len(tweet_list) < count_per_page:
+                    bt.logging.debug(f"Reached end of tweets for @{username} (page {pages_fetched})")
+                    break
+                
+                # Prepare for next page
+                start += count_per_page
+                
+                # Rate limiting between pages
+                if page < max_pages - 1:
+                    time.sleep(self.rate_limit_delay)
+            
+            if api_fetch_succeeded:
+                bt.logging.debug(
+                    f"Fetched {len(tweets)} total tweets from Desearch.ai for @{username} "
+                    f"(across {pages_fetched} page(s))"
+                )
             
             return tweets, user_info, api_fetch_succeeded
             

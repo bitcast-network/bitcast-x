@@ -43,7 +43,7 @@ WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 # Twitter API Configuration - Fetching Strategy
 INITIAL_FETCH_DAYS = 30
 INCREMENTAL_FETCH_DAYS = 4
-MAX_TWEETS_PER_FETCH = 200
+MAX_TWEETS_PER_FETCH = 400  # Supports pagination to fetch up to 400 tweets via Desearch.ai
 
 # Twitter API Configuration - PageRank Weights
 PAGERANK_RETWEET_WEIGHT = 1.0
