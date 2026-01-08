@@ -457,36 +457,71 @@ class TwitterClient:
         incremental_cutoff = base_time - timedelta(days=fetch_days)
         
         # API fetch limit (used for pagination)
-        tweet_limit = MAX_TWEETS_PER_FETCH
+        # When using dual-endpoint mode, fetch 200 per endpoint (400 total)
+        # When using posts-only mode, fetch 400 from single endpoint
+        if self.posts_only:
+            tweet_limit = MAX_TWEETS_PER_FETCH  # 400 for single endpoint
+        else:
+            tweet_limit = 200  # 200 per endpoint in dual-endpoint mode
         
-        # Desearch.ai: single endpoint for user posts
-        # Fetch from Desearch.ai endpoint
+        # Desearch.ai: fetch from endpoint(s) based on posts_only mode
         all_tweets = []
         user_info = None
         api_fetch_succeeded = False
         
-        try:
-            tweets, endpoint_user_info, endpoint_success = self._fetch_from_desearch_endpoint(
-                username, tweet_limit, incremental_cutoff
-            )
-            all_tweets.extend(tweets)
-            
-            if endpoint_user_info:
-                user_info = endpoint_user_info
-            
-            if endpoint_success:
-                api_fetch_succeeded = True
-                
-            bt.logging.debug(f"Fetched {len(tweets)} tweets from Desearch.ai for @{username}")
-        except Exception as e:
-            bt.logging.warning(f"Failed to fetch from Desearch.ai for @{username}: {e}")
+        # Select endpoints based on posts_only mode
+        if self.posts_only:
+            # Posts-only mode: faster, uses less quota (excludes replies)
+            endpoints = [
+                ("/twitter/user/posts", "posts", "username")  # posts endpoint uses "username" param
+            ]
+        else:
+            # Dual-endpoint mode: complete tweet coverage (includes replies)
+            endpoints = [
+                ("/twitter/replies", "replies", "user"),  # replies endpoint uses "user" param
+                ("/twitter/user/posts", "posts", "username")  # posts endpoint uses "username" param
+            ]
         
-        # Deduplicate by tweet_id
+        # Fetch from endpoint(s) in parallel
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
+            future_to_endpoint = {
+                executor.submit(
+                    self._fetch_from_desearch_endpoint,
+                    endpoint_path, username, tweet_limit, incremental_cutoff, param_name
+                ): (endpoint_path, endpoint_name)
+                for endpoint_path, endpoint_name, param_name in endpoints
+            }
+            
+            for future in as_completed(future_to_endpoint):
+                endpoint_path, endpoint_name = future_to_endpoint[future]
+                try:
+                    tweets, endpoint_user_info, endpoint_success = future.result()
+                    all_tweets.extend(tweets)
+                    
+                    # Use user_info from first successful endpoint
+                    if endpoint_user_info and not user_info:
+                        user_info = endpoint_user_info
+                    
+                    # Track if any endpoint succeeded
+                    if endpoint_success:
+                        api_fetch_succeeded = True
+                        
+                    bt.logging.debug(f"Fetched {len(tweets)} tweets from Desearch.ai {endpoint_name} endpoint for @{username}")
+                except Exception as e:
+                    bt.logging.warning(f"Failed to fetch from Desearch.ai {endpoint_name} endpoint for @{username}: {e}")
+        
+        # Deduplicate by tweet_id (handles overlap between endpoints and pinned tweets)
         unique_map = {t['tweet_id']: t for t in all_tweets if t.get('tweet_id')}
         tweets = list(unique_map.values())
         
         # Log fetch results
-        if len(all_tweets) != len(tweets):
+        if len(endpoints) > 1:
+            overlap_count = len(all_tweets) - len(tweets)
+            bt.logging.info(
+                f"Fetched {len(all_tweets)} total tweets from {len(endpoints)} Desearch.ai endpoints for @{username}, "
+                f"{len(tweets)} unique ({overlap_count} duplicates removed)"
+            )
+        elif len(all_tweets) != len(tweets):
             overlap_count = len(all_tweets) - len(tweets)
             bt.logging.info(
                 f"Fetched {len(all_tweets)} tweets from Desearch.ai for @{username}, "
@@ -873,17 +908,26 @@ class TwitterClient:
 
     def _fetch_from_desearch_endpoint(
         self,
+        endpoint_path: str,
         username: str,
         tweet_limit: int,
-        incremental_cutoff: datetime
+        incremental_cutoff: datetime,
+        param_name: str = "username"
     ) -> Tuple[List[Dict], Optional[Dict], bool]:
         """
         Fetch tweets from Desearch.ai API for a user with pagination support.
         
-        Uses: /twitter/user/posts?username={username}&count=100&start={start}
+        Args:
+            endpoint_path: Desearch.ai endpoint path (e.g., "/twitter/user/posts" or "/twitter/replies")
+            username: Twitter username to fetch tweets for
+            tweet_limit: Maximum number of tweets to fetch
+            incremental_cutoff: Date cutoff for pagination stopping
+            param_name: Parameter name to use ("username" for posts, "user" for replies)
+        
+        Uses: {endpoint_path}?{param_name}={username}&count=100&start={start}
         Supports pagination to fetch up to 400 tweets per user.
         """
-        url = f"{self.base_url}/twitter/user/posts"
+        url = f"{self.base_url}{endpoint_path}"
         
         tweets = []
         user_info = {
@@ -906,7 +950,7 @@ class TwitterClient:
                     break
                 
                 params = {
-                    "username": username,
+                    param_name: username,
                     "count": count_per_page,
                     "start": start
                 }
