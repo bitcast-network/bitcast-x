@@ -322,6 +322,7 @@ def filter_tweets_for_brief(
             'reply_count': tweet.get('reply_count', 0),
             'quote_count': tweet.get('quote_count', 0),
             'bookmark_count': tweet.get('bookmark_count', 0),
+            'views_count': tweet.get('views_count', 0),
             # Scoring engagement lists (who retweeted/quoted from considered accounts)
             'retweets': tweet.get('retweets', []),
             'quotes': tweet.get('quotes', []),

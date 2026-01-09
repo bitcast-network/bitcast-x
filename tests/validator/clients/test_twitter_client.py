@@ -50,6 +50,10 @@ class TestTwitterClient:
                     'tweet_results': {
                         'result': {
                             'rest_id': '123',
+                            'views': {
+                                'count': '123456',
+                                'state': 'EnabledWithCount'
+                            },
                             'legacy': {
                                 'full_text': 'Hello @user1 and @user2',
                                 'entities': {
@@ -82,6 +86,7 @@ class TestTwitterClient:
         assert tweet['reply_count'] == 8
         assert tweet['quote_count'] == 3
         assert tweet['bookmark_count'] == 5
+        assert tweet['views_count'] == 123456
     
     def test_engagement_metrics_defaults(self):
         """Test engagement metrics default to 0 when missing."""
@@ -115,6 +120,7 @@ class TestTwitterClient:
         assert tweet['reply_count'] == 0
         assert tweet['quote_count'] == 0
         assert tweet['bookmark_count'] == 0
+        assert tweet['views_count'] == 0
     
     def test_retweet_parsing(self):
         """Test retweet parsing."""

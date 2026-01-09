@@ -27,7 +27,8 @@ from bitcast.validator.social_discovery import PoolManager
 from .social_map_loader import (
     load_latest_social_map,
     get_active_members,
-    get_considered_accounts
+    get_considered_accounts,
+    load_relationship_scores
 )
 from .tweet_filter import TweetFilter
 from .engagement_analyzer import EngagementAnalyzer
@@ -255,6 +256,9 @@ def score_tweets_for_pool(
         considered_limit
     )
     
+    # Load relationship scores for cabal protection
+    relationship_scores, scores_usernames, scores_username_to_idx = load_relationship_scores(pool_name)
+    
     bt.logging.debug(f"Social map: {map_file}")
     bt.logging.info(
         f"  → {len(active_members)} active members"
@@ -390,11 +394,15 @@ def score_tweets_for_pool(
     tweet_filter = TweetFilter(language=pool_config.get('lang'), tag=tag, qrt=qrt)
     content_filtered = tweet_filter.filter_tweets(date_filtered)
     
-    # Step 6: Score tweets
+    # Step 6: Score tweets with cabal protection
     bt.logging.debug("Calculating weighted scores")
     
     analyzer = EngagementAnalyzer()
-    calculator = ScoreCalculator(dict(considered_accounts))
+    calculator = ScoreCalculator(
+        considered_accounts=dict(considered_accounts),
+        relationship_scores=relationship_scores,
+        scores_username_to_idx=scores_username_to_idx
+    )
     
     scored_tweets = calculator.score_tweets_batch(
         content_filtered,
@@ -606,14 +614,14 @@ if __name__ == "__main__":
             print(f"{'Rank':<6} {'Score':<12} {'Author':<20} {'Tweet ID'}")
             print("-" * 80)
             
-            for idx, tweet in enumerate(results[:20], 1):  # Show top 20
+            for idx, tweet in enumerate(results[:100], 1):  # Show top 100
                 author = tweet['author']
                 tweet_id = tweet['tweet_id']
                 score = tweet['score']
                 print(f"{idx:<6} {score:<12.6f} @{author:<19} {tweet_id}")
             
-            if len(results) > 20:
-                print(f"\n... and {len(results) - 20} more tweets")
+            if len(results) > 100:
+                print(f"\n... and {len(results) - 100} more tweets")
         else:
             print("\n⚠️  No tweets were scored (no tweets matched the brief criteria)")
         

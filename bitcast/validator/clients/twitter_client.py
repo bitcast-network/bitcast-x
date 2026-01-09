@@ -625,6 +625,17 @@ class TwitterClient:
                 except (KeyError, AttributeError, TypeError):
                     pass
             
+            # Extract views count (at tweet_result level, not in legacy)
+            # Views object format: {"count": "123456", "state": "EnabledWithCount"} or {"state": "Enabled"}
+            # Retweets typically don't have view counts, only original tweets
+            views_obj = tweet_result.get('views', {})
+            views_count = 0
+            if views_obj.get('count'):
+                try:
+                    views_count = int(views_obj['count'])
+                except (ValueError, TypeError):
+                    views_count = 0
+            
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
                 'created_at': legacy.get('created_at', ''),
@@ -641,6 +652,7 @@ class TwitterClient:
                 'reply_count': legacy.get('reply_count', 0),
                 'quote_count': legacy.get('quote_count', 0),
                 'bookmark_count': legacy.get('bookmark_count', 0),
+                'views_count': views_count,
                 'in_reply_to_status_id': legacy.get('in_reply_to_status_id_str'),
                 'in_reply_to_user': legacy.get('in_reply_to_screen_name')
             }
