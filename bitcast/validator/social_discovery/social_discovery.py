@@ -134,9 +134,9 @@ class TwitterNetworkAnalyzer:
         lang: Optional[str] = None,
         min_tweets: int = 1,
         min_interaction_weight: float = 0
-    ) -> Tuple[Dict[str, float], np.ndarray, List[str], Dict[str, Dict]]:
+    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict]]:
         """
-        Analyze Twitter network and return PageRank scores.
+        Analyze Twitter network and return PageRank scores and relationship matrices.
         
         Args:
             seed_accounts: Initial accounts to analyze
@@ -149,7 +149,9 @@ class TwitterNetworkAnalyzer:
                                    Seed accounts are always preserved.
             
         Returns:
-            Tuple of (scores_dict, adjacency_matrix, usernames_list, user_info_map)
+            Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map)
+            - adjacency_matrix: Max interaction weights for influence (PageRank)
+            - relationship_matrix: Cumulative weighted interactions for cabal protection
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
@@ -191,7 +193,8 @@ class TwitterNetworkAnalyzer:
             bt.logging.warning(f"Failed to fetch {len(failed_accounts)} accounts: {[acc for acc, _ in failed_accounts]}")
         
         # Step 2: Build interaction network
-        interactions = {}  # (from_user, to_user) -> interaction_type
+        interaction_weights = {}  # (from_user, to_user) -> max weight for influence (PageRank)
+        relationship_scores = {}  # (from_user, to_user) -> sum of weighted interactions for cabal protection
         discovered_users = set()
         
         # Track reply filtering for logging
@@ -211,30 +214,42 @@ class TwitterNetworkAnalyzer:
                 # Handle mentions
                 for tagged_user in tweet.get('tagged_accounts', []):
                     if tagged_user != from_user:
-                        interactions[(from_user, tagged_user)] = max(
-                            interactions.get((from_user, tagged_user), 0), 
+                        key = (from_user, tagged_user)
+                        # For influence score: max weight
+                        interaction_weights[key] = max(
+                            interaction_weights.get(key, 0), 
                             self.tag_weight
                         )
+                        # For relationship score: cumulative sum
+                        relationship_scores[key] = relationship_scores.get(key, 0.0) + self.tag_weight
                         discovered_users.add(tagged_user)
                 
                 # Handle retweets
                 if tweet.get('retweeted_user'):
                     retweeted_user = tweet['retweeted_user']
                     if retweeted_user != from_user:
-                        interactions[(from_user, retweeted_user)] = max(
-                            interactions.get((from_user, retweeted_user), 0),
+                        key = (from_user, retweeted_user)
+                        # For influence score: max weight
+                        interaction_weights[key] = max(
+                            interaction_weights.get(key, 0),
                             self.retweet_weight
                         )
+                        # For relationship score: cumulative sum
+                        relationship_scores[key] = relationship_scores.get(key, 0.0) + self.retweet_weight
                         discovered_users.add(retweeted_user)
                 
                 # Handle quotes
                 if tweet.get('quoted_user'):
                     quoted_user = tweet['quoted_user']
                     if quoted_user != from_user:
-                        interactions[(from_user, quoted_user)] = max(
-                            interactions.get((from_user, quoted_user), 0),
+                        key = (from_user, quoted_user)
+                        # For influence score: max weight
+                        interaction_weights[key] = max(
+                            interaction_weights.get(key, 0),
                             self.quote_weight
                         )
+                        # For relationship score: cumulative sum
+                        relationship_scores[key] = relationship_scores.get(key, 0.0) + self.quote_weight
                         discovered_users.add(quoted_user)
         
         # Log reply filtering stats
@@ -273,9 +288,14 @@ class TwitterNetworkAnalyzer:
             bt.logging.info(f"Relevance check completed in {relevance_time:.1f}s: {len(relevant_users)}/{len(all_accounts_to_check)} relevant")
             
             # Filter interactions to only relevant users
-            interactions = {
+            interaction_weights = {
                 (from_user, to_user): weight 
-                for (from_user, to_user), weight in interactions.items()
+                for (from_user, to_user), weight in interaction_weights.items()
+                if from_user in relevant_users and to_user in relevant_users
+            }
+            relationship_scores = {
+                (from_user, to_user): score
+                for (from_user, to_user), score in relationship_scores.items()
                 if from_user in relevant_users and to_user in relevant_users
             }
             
@@ -287,7 +307,7 @@ class TwitterNetworkAnalyzer:
         if min_interaction_weight > 0:
             # Calculate total incoming weight for each account
             incoming_weights = {}
-            for (from_user, to_user), weight in interactions.items():
+            for (from_user, to_user), weight in interaction_weights.items():
                 incoming_weights[to_user] = incoming_weights.get(to_user, 0) + weight
             
             # Filter to accounts meeting threshold
@@ -302,9 +322,14 @@ class TwitterNetworkAnalyzer:
             qualified_accounts |= (set(seed_accounts) & all_users)
             
             # Re-filter interactions to only include edges between qualified accounts
-            interactions = {
+            interaction_weights = {
                 (from_user, to_user): weight
-                for (from_user, to_user), weight in interactions.items()
+                for (from_user, to_user), weight in interaction_weights.items()
+                if from_user in qualified_accounts and to_user in qualified_accounts
+            }
+            relationship_scores = {
+                (from_user, to_user): score
+                for (from_user, to_user), score in relationship_scores.items()
                 if from_user in qualified_accounts and to_user in qualified_accounts
             }
             
@@ -314,14 +339,14 @@ class TwitterNetworkAnalyzer:
                 f"{len(all_users)}/{accounts_before} accounts remain"
             )
         
-        bt.logging.info(f"Network: {len(all_users)} users, {len(interactions)} interactions")
+        bt.logging.info(f"Network: {len(all_users)} users, {len(interaction_weights)} interactions")
         
-        if not interactions:
+        if not interaction_weights:
             raise ValueError("No interactions found in network")
         
-        # Step 5: Calculate PageRank
+        # Step 5: Calculate PageRank (using max interaction weights for influence scores)
         G = nx.DiGraph()
-        for (from_user, to_user), weight in interactions.items():
+        for (from_user, to_user), weight in interaction_weights.items():
             G.add_edge(from_user, to_user, weight=weight)
         
         pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
@@ -340,17 +365,30 @@ class TwitterNetworkAnalyzer:
             rounded_scores[max_user] += 1.0 - total_rounded
             rounded_scores[max_user] = round(rounded_scores[max_user], 6)
         
-        # Step 6: Create adjacency matrix
+        # Step 6: Create adjacency matrices
         usernames_sorted = sorted(list(all_users))
         n = len(usernames_sorted)
+        
+        # Adjacency matrix: max interaction weights (for influence scores/PageRank)
         adjacency_matrix = np.zeros((n, n))
+        # Relationship scores matrix: cumulative weighted interactions (for cabal protection)
+        relationship_matrix = np.zeros((n, n))
         
         username_to_idx = {user: i for i, user in enumerate(usernames_sorted)}
-        for (from_user, to_user), weight in interactions.items():
+        
+        # Populate adjacency matrix with max weights
+        for (from_user, to_user), weight in interaction_weights.items():
             if from_user in username_to_idx and to_user in username_to_idx:
                 from_idx = username_to_idx[from_user]
                 to_idx = username_to_idx[to_user]
                 adjacency_matrix[from_idx, to_idx] = weight
+        
+        # Populate relationship scores matrix with cumulative scores
+        for (from_user, to_user), score in relationship_scores.items():
+            if from_user in username_to_idx and to_user in username_to_idx:
+                from_idx = username_to_idx[from_user]
+                to_idx = username_to_idx[to_user]
+                relationship_matrix[from_idx, to_idx] = score
         
         bt.logging.info(f"PageRank complete: {len(rounded_scores)} accounts mapped")
         
@@ -362,7 +400,7 @@ class TwitterNetworkAnalyzer:
             f"({mode} mode with {self.max_workers} worker{'s' if self.max_workers > 1 else ''})"
         )
         
-        return rounded_scores, adjacency_matrix, usernames_sorted, user_info_map
+        return rounded_scores, adjacency_matrix, relationship_matrix, usernames_sorted, user_info_map
 
 
 async def discover_social_network(
@@ -446,7 +484,7 @@ async def discover_social_network(
         
         # Analyze network
         analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
-        scores, adjacency_matrix, usernames, user_info_map = analyzer.analyze_network(
+        scores, adjacency_matrix, relationship_matrix, usernames, user_info_map = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
             min_followers=0,
@@ -483,11 +521,12 @@ async def discover_social_network(
         with open(social_map_file, 'w') as f:
             json.dump(social_map_data, f, indent=2)
         
-        # Save adjacency matrix
+        # Save adjacency matrix with relationship scores
         matrix_file = pool_dir / f"{timestamp_str}_adjacency.json"
         matrix_data = {
             'usernames': usernames,
-            'adjacency_matrix': adjacency_matrix.tolist(),
+            'adjacency_matrix': adjacency_matrix.tolist(),  # Max weights for influence
+            'relationship_scores': relationship_matrix.tolist(),  # Cumulative scores for cabal protection
             'created_at': datetime.now().isoformat()
         }
         with open(matrix_file, 'w') as f:
