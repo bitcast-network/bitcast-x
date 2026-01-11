@@ -210,7 +210,8 @@ class ScoreCalculator:
                 'retweet_count': tweet.get('retweet_count', 0),
                 'reply_count': tweet.get('reply_count', 0),
                 'quote_count': tweet.get('quote_count', 0),
-                'bookmark_count': tweet.get('bookmark_count', 0)
+                'bookmark_count': tweet.get('bookmark_count', 0),
+                'views_count': tweet.get('views_count', 0)
             }
             
             # Include quoted_tweet_id if present (for QRT filtering transparency)
