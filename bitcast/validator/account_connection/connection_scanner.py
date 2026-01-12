@@ -246,11 +246,7 @@ class ConnectionScanner:
                 if tweet.get('retweeted_user'):
                     continue
                 
-                # Defensive validation: Skip tweets from other authors
-                tweet_author = tweet.get('author')
-                if not tweet_author or tweet_author.lower() != username:
-                    continue
-                
+                # Note: TwitterClient already validates authors, so we trust the author field
                 # Parse tags from tweet text
                 tags = self.tag_parser.extract_tags(text)
                 

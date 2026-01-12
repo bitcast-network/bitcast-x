@@ -487,7 +487,6 @@ if __name__ == "__main__":
     import argparse
     from dotenv import load_dotenv
     from bitcast.validator.reward_engine.utils import get_briefs
-    from bitcast.validator.account_connection import ConnectionDatabase
     
     # Load environment variables
     env_path = Path(__file__).parents[1] / '.env'
@@ -566,29 +565,15 @@ if __name__ == "__main__":
         if force_cache_refresh:
             bt.logging.info("Force cache refresh enabled - ignoring cache freshness check")
         
-        # Load connected accounts from database (matching production behavior)
-        bt.logging.info(f"Loading connected accounts from database for pool '{pool_name}'...")
-        db = ConnectionDatabase()
+        # Use all accounts (no connected accounts filter)
+        # Score all active members from social map, not just those with connection tags
+        bt.logging.info("  → Using all active members from social map (no connected accounts filter)")
         
-        # Get all connections and extract usernames
-        # Note: CLI mode doesn't resolve UIDs (no metagraph), just checks for connection tags
-        all_connections = db.get_all_connections(pool_name=pool_name)
-        connected_accounts = {conn['account_username'].lower() for conn in all_connections}
-        
-        if connected_accounts:
-            bt.logging.info(f"  → Found {len(connected_accounts)} connected accounts in database")
-        else:
-            bt.logging.warning(
-                f"  → No connected accounts found in database for pool '{pool_name}'\n"
-                f"     No tweets will be scored. Run connection scanner first:\n"
-                f"     python -m bitcast.validator.account_connection.connection_scanner --pool-name {pool_name}"
-            )
-        
-        # Run tweet scoring (with connected accounts filter - matching production)
+        # Run tweet scoring (using all accounts)
         results = score_tweets_for_pool(
             pool_name=pool_name,
             brief_id=config.brief_id,
-            connected_accounts=connected_accounts,
+            connected_accounts=None,  # None = use all active members
             run_id=run_id,
             tag=tag,
             qrt=qrt,
