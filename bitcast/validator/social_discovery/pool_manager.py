@@ -1,30 +1,33 @@
 """
-Simple pool configuration manager for pools_config.json.
+Simple pool configuration manager that fetches from API.
 """
 
-import json
-from pathlib import Path
 from typing import Dict, List, Optional, Any
+import requests
 import bittensor as bt
+from bitcast.validator.utils.config import POOLS_API_URL
 
 
 class PoolManager:
-    """Loads and manages pool configurations from pools_config.json."""
+    """Loads and manages pool configurations from API."""
     
-    def __init__(self, config_path: Optional[str] = None):
-        """Initialize with config file path."""
-        if config_path is None:
-            # pools_config.json is now in the same directory
-            config_path = Path(__file__).parent / "pools_config.json"
+    def __init__(self, api_url: Optional[str] = None):
+        """
+        Initialize with API URL.
         
-        self.config_path = Path(config_path)
+        Args:
+            api_url: Optional API endpoint URL. Defaults to POOLS_API_URL from config.
+        """
+        self.api_url = api_url or POOLS_API_URL
         self.pools = self._load_pools()
     
     def _load_pools(self) -> Dict[str, Dict[str, Any]]:
-        """Load pool configurations from JSON (only active pools)."""
+        """Load pool configurations from API (only active pools)."""
         try:
-            with open(self.config_path, 'r') as f:
-                config = json.load(f)
+            bt.logging.info(f"Fetching pools from API: {self.api_url}")
+            response = requests.get(self.api_url, timeout=10)
+            response.raise_for_status()
+            config = response.json()
             
             pools = {}
             for pool_data in config.get('pools', []):
@@ -36,18 +39,18 @@ class PoolManager:
                 pools[name] = {
                     'keywords': [kw.lower() for kw in pool_data.get('keywords', [])],
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
-                    'max_seed_accounts': pool_data.get('max_seed_accounts', 150),  # Default to 150 for seed selection
-                    'min_interaction_weight': pool_data.get('min_interaction_weight', 0),  # Default to 0 (no filtering)
-                    'min_tweets': pool_data.get('min_tweets', 1),  # Default to 1 (at least one tweet with keywords)
-                    'lang': pool_data.get('lang'),  # Optional language filter (None if not specified)
-                    'active': True  # Include active field in config for transparency
+                    'max_seed_accounts': pool_data.get('max_seed_accounts', 150),
+                    'min_interaction_weight': pool_data.get('min_interaction_weight', 0),
+                    'min_tweets': pool_data.get('min_tweets', 1),
+                    'lang': pool_data.get('lang'),
+                    'active': True
                 }
             
-            bt.logging.info(f"Loaded {len(pools)} active pools: {list(pools.keys())}")
+            bt.logging.info(f"Loaded {len(pools)} active pools from API: {list(pools.keys())}")
             return pools
             
         except Exception as e:
-            bt.logging.error(f"Failed to load pools config: {e}")
+            bt.logging.error(f"Failed to load pools from API: {e}")
             raise
     
     def get_pool(self, pool_name: str) -> Optional[Dict[str, Any]]:

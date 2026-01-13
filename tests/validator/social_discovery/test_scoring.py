@@ -19,12 +19,12 @@ from bitcast.validator.social_discovery.pool_manager import PoolManager
 class TestPoolManager:
     """Essential pool manager tests."""
     
-    def setup_method(self):
-        """Set up test config."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.config_file = Path(self.temp_dir) / "pools_config.json"
-        
-        config = {
+    @mock.patch('bitcast.validator.social_discovery.pool_manager.requests.get')
+    def test_load_pools(self, mock_get):
+        """Test pool loading from API."""
+        # Mock API response
+        mock_response = mock.Mock()
+        mock_response.json.return_value = {
             "pools": [
                 {
                     "name": "tao",
@@ -34,18 +34,11 @@ class TestPoolManager:
                 }
             ]
         }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
         
-        with open(self.config_file, 'w') as f:
-            json.dump(config, f)
-    
-    def teardown_method(self):
-        """Cleanup."""
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_load_pools(self):
-        """Test pool loading."""
-        manager = PoolManager(str(self.config_file))
+        # Create manager (will fetch from mocked API)
+        manager = PoolManager(api_url="http://test.api/pools")
         
         pools = manager.get_pools()
         assert "tao" in pools
@@ -53,6 +46,9 @@ class TestPoolManager:
         tao_config = manager.get_pool("tao")
         assert tao_config['keywords'] == ["tao", "bittensor"]
         assert tao_config['initial_accounts'] == ["opentensor"]
+        
+        # Verify API was called
+        mock_get.assert_called_once_with("http://test.api/pools", timeout=10)
 
 
 class TestTwitterNetworkAnalyzer:
@@ -221,16 +217,6 @@ class TestSocialDiscoveryIntegration:
     def setup_method(self):
         """Set up test environment."""
         self.temp_dir = tempfile.mkdtemp()
-        
-        # Create test pool config
-        self.pools_config = Path(self.temp_dir) / "pools_config.json"
-        config = {
-            "pools": [
-                {"name": "test_pool", "keywords": ["test"], "initial_accounts": ["user1"], "active": True}
-            ]
-        }
-        with open(self.pools_config, 'w') as f:
-            json.dump(config, f)
     
     def teardown_method(self):
         """Cleanup."""
