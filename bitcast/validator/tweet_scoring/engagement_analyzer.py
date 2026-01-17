@@ -2,10 +2,10 @@
 Engagement analyzer for detecting RT/QRT relationships.
 
 Identifies which accounts retweeted or quote-tweeted specific tweets,
-with self-engagement exclusion.
+with self-engagement exclusion and optional participant exclusion.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 import bittensor as bt
 
 
@@ -16,7 +16,8 @@ class EngagementAnalyzer:
         self,
         original_tweet: Dict,
         all_tweets: List[Dict],
-        considered_accounts_map: Dict[str, float]
+        considered_accounts_map: Dict[str, float],
+        excluded_engagers: Optional[Set[str]] = None
     ) -> Dict[str, str]:
         """
         Get all engagements for a tweet from considered accounts.
@@ -27,6 +28,9 @@ class EngagementAnalyzer:
             all_tweets: All tweets to search (should include 'author' field)
             considered_accounts_map: Map of username -> influence_score
                                     for filtering
+            excluded_engagers: Optional set of usernames (lowercase) whose engagements
+                              should be excluded. Used to prevent brief participants
+                              from contributing to each other's scores.
             
         Returns:
             Dict mapping username -> engagement_type
@@ -57,6 +61,10 @@ class EngagementAnalyzer:
             
             # Skip if not from a considered account
             if tweet_author not in considered_accounts_map:
+                continue
+            
+            # Skip engagements from excluded accounts (e.g., other brief participants)
+            if excluded_engagers and tweet_author in excluded_engagers:
                 continue
             
             # Check for retweet - match by specific tweet ID

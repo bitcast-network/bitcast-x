@@ -97,7 +97,7 @@ Main analysis engine that:
 - Fetches tweets from seed accounts (concurrent/sequential)
 - Builds weighted interaction graph
 - Calculates PageRank scores
-- Normalizes scores to sum to 1.0
+- Scales scores by pool difficulty (total followers) for cross-pool comparison
 - Generates adjacency matrix
 
 **Interaction Weights:**
@@ -377,13 +377,15 @@ Uses NetworkX's PageRank implementation with:
 - **Max iterations**: 1000
 - **Convergence tolerance**: 1.0e-6
 
-### Normalization
+### Absolute Influence Scores
 
-Scores are normalized to sum exactly to 1.0:
+Scores are calculated as absolute influence for cross-pool comparison:
 1. Calculate raw PageRank scores
-2. Normalize: `score / total_score`
-3. Round to 6 decimal places
-4. Adjust highest scorer to ensure exact sum of 1.0
+2. Normalize to relative proportions: `score / total_score`
+3. Multiply by pool difficulty (scaled): `normalized_score × (total_pool_followers / 1000)`
+4. Round to 2 decimal places
+
+**Pool Difficulty**: Sum of all pool members' follower counts divided by 1000. This scaling keeps scores at a reasonable scale for UIs while still allowing fair comparison of influence across pools with different competitive landscapes. Higher difficulty pools (e.g., Ethereum with 50M followers) produce larger absolute scores than lower difficulty pools (e.g., small ecosystems with 500K followers).
 
 ### Concurrency Model
 

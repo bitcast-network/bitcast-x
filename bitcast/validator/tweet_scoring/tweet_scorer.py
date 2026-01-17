@@ -394,7 +394,7 @@ def score_tweets_for_pool(
     tweet_filter = TweetFilter(language=pool_config.get('lang'), tag=tag, qrt=qrt)
     content_filtered = tweet_filter.filter_tweets(date_filtered)
     
-    # Step 6: Score tweets with cabal protection
+    # Step 6: Score tweets with cabal protection and participant exclusion
     bt.logging.debug("Calculating weighted scores")
     
     analyzer = EngagementAnalyzer()
@@ -404,10 +404,14 @@ def score_tweets_for_pool(
         scores_username_to_idx=scores_username_to_idx
     )
     
+    # Exclude brief participants from contributing to each other's scores
+    excluded_engagers = {m.lower() for m in active_members}
+    
     scored_tweets = calculator.score_tweets_batch(
         content_filtered,
         all_tweets,
-        analyzer
+        analyzer,
+        excluded_engagers=excluded_engagers
     )
     
     # Filter out tweets with 0 score
