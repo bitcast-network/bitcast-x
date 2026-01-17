@@ -139,9 +139,10 @@ class TwitterNetworkAnalyzer:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
         
-        Scores are calculated as: PageRank × total_pool_followers
+        Scores are calculated as: PageRank × (total_pool_followers / 1000)
         This gives "absolute influence" that can be compared across pools with different
         difficulty levels (pools with more followers = higher difficulty).
+        The division by 1000 keeps scores at a reasonable scale for UIs.
         
         Args:
             seed_accounts: Initial accounts to analyze
@@ -155,7 +156,7 @@ class TwitterNetworkAnalyzer:
             
         Returns:
             Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
-            - scores_dict: Absolute influence scores (PageRank × pool_difficulty)
+            - scores_dict: Absolute influence scores (PageRank × pool_difficulty / 1000)
             - adjacency_matrix: Max interaction weights for influence (PageRank)
             - relationship_matrix: Cumulative weighted interactions for cabal protection
             - total_pool_followers: Pool difficulty metric (sum of all members' followers)
@@ -383,15 +384,17 @@ class TwitterNetworkAnalyzer:
         total_score = sum(pagerank_scores.values())
         normalized_scores = {user: score / total_score for user, score in pagerank_scores.items()}
         
-        # Multiply by pool difficulty to get absolute influence scores
+        # Multiply by pool difficulty (divided by 1000) to get absolute influence scores
         # Score represents "effective follower reach through network position"
+        # Using sum(followers)/1000 to keep scores at a reasonable scale for UIs
         absolute_scores = {
-            user: round(score * total_pool_followers, 2)
+            user: round(score * (total_pool_followers / 1000), 2)
             for user, score in normalized_scores.items()
         }
         
+        scaled_pool_difficulty = total_pool_followers / 1000
         bt.logging.info(
-            f"Pool difficulty: {total_pool_followers:,} total followers, "
+            f"Pool difficulty: {total_pool_followers:,} total followers (scaled: {scaled_pool_difficulty:.2f}), "
             f"scores range: {min(absolute_scores.values()):.2f} - {max(absolute_scores.values()):.2f}"
         )
         
@@ -527,12 +530,16 @@ async def discover_social_network(
         # Sort accounts by score in descending order
         sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         
+        # Calculate scaled pool difficulty for metadata (matches score scaling)
+        scaled_pool_difficulty = total_pool_followers / 1000
+        
         social_map_data = {
             'metadata': {
                 'created_at': datetime.now().isoformat(),
                 'pool_name': pool_name,
                 'total_accounts': len(scores),
-                'pool_difficulty': total_pool_followers  # Sum of all members' followers
+                'pool_difficulty': round(scaled_pool_difficulty, 2),  # Scaled (sum/1000) for score calculations
+                'total_followers': total_pool_followers  # Raw sum of all members' followers
             },
             'accounts': {
                 username: {
