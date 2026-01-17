@@ -43,6 +43,7 @@ from bitcast.validator.utils.config import (
     SOCIAL_DISCOVERY_MAX_WORKERS
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher, initialize_global_publisher
+from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
 
 
 class TwitterNetworkAnalyzer:
@@ -134,9 +135,13 @@ class TwitterNetworkAnalyzer:
         lang: Optional[str] = None,
         min_tweets: int = 1,
         min_interaction_weight: float = 0
-    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict]]:
+    ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
-        Analyze Twitter network and return PageRank scores and relationship matrices.
+        Analyze Twitter network and return absolute influence scores and relationship matrices.
+        
+        Scores are calculated as: PageRank × total_pool_followers
+        This gives "absolute influence" that can be compared across pools with different
+        difficulty levels (pools with more followers = higher difficulty).
         
         Args:
             seed_accounts: Initial accounts to analyze
@@ -149,9 +154,11 @@ class TwitterNetworkAnalyzer:
                                    Seed accounts are always preserved.
             
         Returns:
-            Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map)
+            Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
+            - scores_dict: Absolute influence scores (PageRank × pool_difficulty)
             - adjacency_matrix: Max interaction weights for influence (PageRank)
             - relationship_matrix: Cumulative weighted interactions for cabal protection
+            - total_pool_followers: Pool difficulty metric (sum of all members' followers)
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
@@ -287,6 +294,19 @@ class TwitterNetworkAnalyzer:
             relevance_time = time.time() - relevance_start
             bt.logging.info(f"Relevance check completed in {relevance_time:.1f}s: {len(relevant_users)}/{len(all_accounts_to_check)} relevant")
             
+            # Populate user_info_map from cache for relevant users
+            # (relevance checking fetched their tweets, which cached their user info)
+            users_without_info = relevant_users - set(user_info_map.keys())
+            cached_count = 0
+            for username in users_without_info:
+                cached_tweets = get_cached_user_tweets(username)
+                if cached_tweets and 'user_info' in cached_tweets:
+                    user_info_map[username] = cached_tweets['user_info']
+                    cached_count += 1
+            
+            if cached_count > 0:
+                bt.logging.info(f"Populated user info from cache for {cached_count}/{len(users_without_info)} discovered accounts")
+            
             # Filter interactions to only relevant users
             interaction_weights = {
                 (from_user, to_user): weight 
@@ -351,19 +371,29 @@ class TwitterNetworkAnalyzer:
         
         pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
         
-        # Step 5: Normalize scores to sum to 1.0
+        # Step 5: Calculate pool difficulty and absolute influence scores
+        # Pool difficulty = total followers across all pool members
+        # This allows comparing influence across pools with different difficulty levels
+        total_pool_followers = sum(
+            user_info_map.get(user, {}).get('followers_count', 0)
+            for user in all_users
+        )
+        
+        # Normalize PageRank to sum to 1.0, then scale by pool difficulty
         total_score = sum(pagerank_scores.values())
         normalized_scores = {user: score / total_score for user, score in pagerank_scores.items()}
         
-        # Round and ensure exact sum of 1.0
-        rounded_scores = {user: round(score, 6) for user, score in normalized_scores.items()}
-        total_rounded = sum(rounded_scores.values())
+        # Multiply by pool difficulty to get absolute influence scores
+        # Score represents "effective follower reach through network position"
+        absolute_scores = {
+            user: round(score * total_pool_followers, 2)
+            for user, score in normalized_scores.items()
+        }
         
-        if abs(total_rounded - 1.0) > 1e-10:
-            # Adjust highest scorer to make exact sum
-            max_user = max(rounded_scores.keys(), key=lambda u: rounded_scores[u])
-            rounded_scores[max_user] += 1.0 - total_rounded
-            rounded_scores[max_user] = round(rounded_scores[max_user], 6)
+        bt.logging.info(
+            f"Pool difficulty: {total_pool_followers:,} total followers, "
+            f"scores range: {min(absolute_scores.values()):.2f} - {max(absolute_scores.values()):.2f}"
+        )
         
         # Step 6: Create adjacency matrices
         usernames_sorted = sorted(list(all_users))
@@ -390,7 +420,7 @@ class TwitterNetworkAnalyzer:
                 to_idx = username_to_idx[to_user]
                 relationship_matrix[from_idx, to_idx] = score
         
-        bt.logging.info(f"PageRank complete: {len(rounded_scores)} accounts mapped")
+        bt.logging.info(f"PageRank complete: {len(absolute_scores)} accounts mapped")
         
         # Final performance summary
         total_elapsed = time.time() - start_time
@@ -400,7 +430,7 @@ class TwitterNetworkAnalyzer:
             f"({mode} mode with {self.max_workers} worker{'s' if self.max_workers > 1 else ''})"
         )
         
-        return rounded_scores, adjacency_matrix, relationship_matrix, usernames_sorted, user_info_map
+        return absolute_scores, adjacency_matrix, relationship_matrix, usernames_sorted, user_info_map, total_pool_followers
 
 
 async def discover_social_network(
@@ -484,7 +514,7 @@ async def discover_social_network(
         
         # Analyze network
         analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
-        scores, adjacency_matrix, relationship_matrix, usernames, user_info_map = analyzer.analyze_network(
+        scores, adjacency_matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
             min_followers=0,
@@ -501,7 +531,8 @@ async def discover_social_network(
             'metadata': {
                 'created_at': datetime.now().isoformat(),
                 'pool_name': pool_name,
-                'total_accounts': len(scores)
+                'total_accounts': len(scores),
+                'pool_difficulty': total_pool_followers  # Sum of all members' followers
             },
             'accounts': {
                 username: {

@@ -84,14 +84,18 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, relationship_matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should have scored all users
         assert len(scores) == 3
         assert set(scores.keys()) == {'user1', 'user2', 'user3'}
         
-        # Scores should sum to 1.0
-        assert abs(sum(scores.values()) - 1.0) < 1e-10
+        # Pool difficulty equals sum of followers for fetched accounts only
+        # user1 and user2 have 1000 each, user3 was discovered (no follower info)
+        assert total_pool_followers == 2000
+        
+        # Scores should be absolute (PageRank × pool_difficulty), summing to pool_difficulty
+        assert abs(sum(scores.values()) - total_pool_followers) < 1.0
         
         # All scores should be positive
         assert all(score > 0 for score in scores.values())
@@ -128,14 +132,17 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, relationship_matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should only have user1 and user2 (user3 was only in a reply, which got filtered)
         assert len(scores) == 2
         assert set(scores.keys()) == {'user1', 'user2'}
         
-        # Scores should sum to 1.0
-        assert abs(sum(scores.values()) - 1.0) < 1e-10
+        # Pool difficulty should equal sum of followers (1000 per user × 2 users)
+        assert total_pool_followers == 2000
+        
+        # Scores should be absolute (PageRank × pool_difficulty), summing to pool_difficulty
+        assert abs(sum(scores.values()) - total_pool_followers) < 1.0
         
         # All scores should be positive
         assert all(score > 0 for score in scores.values())
@@ -181,13 +188,13 @@ class TestTwitterNetworkAnalyzer:
         analyzer = TwitterNetworkAnalyzer(mock_client, max_workers=1)
         
         # Without filter: should have all 4 users
-        scores_no_filter, _, _, _, _ = analyzer.analyze_network(
+        scores_no_filter, _, _, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=0
         )
         assert len(scores_no_filter) == 4
         
         # With moderate filter: some non-seeds may be filtered, but seeds preserved
-        scores_filtered, _, _, _, _ = analyzer.analyze_network(
+        scores_filtered, _, _, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=3.0
         )
         
@@ -201,7 +208,7 @@ class TestTwitterNetworkAnalyzer:
         assert len(scores_filtered) == 4
         
         # With high filter: only seeds remain (non-seeds filtered out)
-        scores_high_filter, _, _, _, _ = analyzer.analyze_network(
+        scores_high_filter, _, _, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=4.5
         )
         assert 'user1' in scores_high_filter  # seed
@@ -241,11 +248,12 @@ class TestSocialDiscoveryIntegration:
         # Mock analyzer
         mock_analyzer = mock.Mock()
         mock_analyzer.analyze_network.return_value = (
-            {'user1': 0.6, 'user2': 0.4},  # scores
+            {'user1': 900.0, 'user2': 600.0},  # absolute scores (PageRank × pool_difficulty)
             np.array([[0, 1], [1, 0]]),    # adjacency matrix (max weights)
             np.array([[0, 1.5], [2.0, 0]]),  # relationship scores matrix
             ['user1', 'user2'],            # usernames
-            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}}  # user_info_map
+            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}},  # user_info_map
+            1500  # total_pool_followers (pool difficulty)
         )
         mock_analyzer_class.return_value = mock_analyzer
         
