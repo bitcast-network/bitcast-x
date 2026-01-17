@@ -340,3 +340,27 @@ class TestGetEngagementsForTweet:
         
         assert engagements == {}
 
+
+class TestExcludedEngagers:
+    """Test excluded engagers functionality for participant exclusion."""
+    
+    def test_excludes_specified_engagers(self, analyzer, sample_tweets, considered_accounts):
+        """Should exclude engagements from accounts in excluded_engagers set."""
+        original = sample_tweets[0]  # Alice's original tweet
+        
+        # Exclude bob and charlie from contributing
+        excluded = {'bob', 'charlie'}
+        
+        engagements = analyzer.get_engagements_for_tweet(
+            original,
+            sample_tweets,
+            considered_accounts,
+            excluded_engagers=excluded
+        )
+        
+        # Bob and charlie should be excluded
+        assert 'bob' not in engagements
+        assert 'charlie' not in engagements
+        # Eve should still be included (quoted alice in tweet 006)
+        assert 'eve' in engagements
+

@@ -26,6 +26,7 @@ MECHID = int(os.getenv('MECHID', '1'))
 # Bitcast server
 BITCAST_SERVER_URL = os.getenv('BITCAST_SERVER_URL', 'http://44.227.253.127')
 BITCAST_BRIEFS_ENDPOINT = f"{BITCAST_SERVER_URL}:8013/x-briefs"
+POOLS_API_URL = os.getenv('POOLS_API_URL', f"{BITCAST_SERVER_URL}:8013/pools")
 
 # Data publishing configuration
 ENABLE_DATA_PUBLISH = os.getenv('ENABLE_DATA_PUBLISH', 'False').lower() == 'true'
@@ -92,6 +93,7 @@ REFERENCE_VALIDATOR_ENDPOINT = f"{REFERENCE_VALIDATOR_URL}:8094"
 # Log out all non-sensitive config variables
 bt.logging.info(f"MECHID: {MECHID}")
 bt.logging.info(f"BITCAST_BRIEFS_ENDPOINT: {BITCAST_BRIEFS_ENDPOINT}")
+bt.logging.info(f"POOLS_API_URL: {POOLS_API_URL}")
 bt.logging.info(f"ENABLE_DATA_PUBLISH: {ENABLE_DATA_PUBLISH}")
 bt.logging.info(f"X_SOCIAL_MAP_ENDPOINT: {X_SOCIAL_MAP_ENDPOINT}")
 bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOINT}")
