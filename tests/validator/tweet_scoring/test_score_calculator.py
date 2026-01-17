@@ -318,6 +318,57 @@ class TestInitialization:
         assert calc.min_influence_score == 0.0
 
 
+class TestExcludedEngagers:
+    """Test participant exclusion via excluded_engagers."""
+    
+    def test_excludes_participant_engagements(self, considered_accounts):
+        """Should exclude engagements from accounts in excluded_engagers."""
+        calc = ScoreCalculator(
+            considered_accounts,
+            retweet_weight=2.0,
+            quote_weight=3.0
+        )
+        
+        tweets = [
+            {
+                'tweet_id': '001',
+                'author': 'alice',
+                'text': 'Original tweet',
+                'created_at': '',
+                'lang': 'en'
+            }
+        ]
+        
+        all_tweets = tweets + [
+            # Bob (participant) retweets - should be excluded
+            {
+                'tweet_id': '002',
+                'author': 'bob',
+                'retweeted_tweet_id': '001',
+                'quoted_tweet_id': None
+            },
+            # Charlie (non-participant) retweets - should count
+            {
+                'tweet_id': '003',
+                'author': 'charlie',
+                'retweeted_tweet_id': '001',
+                'quoted_tweet_id': None
+            }
+        ]
+        
+        analyzer = EngagementAnalyzer()
+        # Exclude alice and bob (participants)
+        excluded = {'alice', 'bob'}
+        scored = calc.score_tweets_batch(tweets, all_tweets, analyzer, excluded_engagers=excluded)
+        
+        # Only charlie's retweet should count
+        assert len(scored) == 1
+        assert 'charlie' in scored[0]['retweets']
+        assert 'bob' not in scored[0]['retweets']
+        # Score = baseline (0.10 * 2.0) + charlie's engagement (0.06 * 2.0) = 0.20 + 0.12 = 0.32
+        assert scored[0]['score'] == 0.32
+
+
 class TestMinimumInfluenceScore:
     """Test minimum influence score fallback for accounts not in social map."""
     

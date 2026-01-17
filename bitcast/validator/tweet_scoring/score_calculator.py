@@ -5,7 +5,7 @@ Calculates tweet scores by multiplying influence scores with engagement weights.
 Includes cabal protection to reduce scores for accounts with high relationship scores.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 import bittensor as bt
 
@@ -157,7 +157,8 @@ class ScoreCalculator:
         self,
         tweets: List[Dict],
         all_tweets: List[Dict],
-        engagement_analyzer: EngagementAnalyzer
+        engagement_analyzer: EngagementAnalyzer,
+        excluded_engagers: Optional[Set[str]] = None
     ) -> List[Dict]:
         """
         Score a batch of tweets.
@@ -166,6 +167,8 @@ class ScoreCalculator:
             tweets: List of tweets to score (must have 'author' and 'tweet_id')
             all_tweets: All tweets to search for engagements
             engagement_analyzer: Analyzer to detect engagements
+            excluded_engagers: Optional set of usernames (lowercase) whose engagements
+                              should be excluded (e.g., brief participants)
             
         Returns:
             List of scored tweet dicts with complete metadata
@@ -173,11 +176,12 @@ class ScoreCalculator:
         scored_tweets = []
         
         for tweet in tweets:
-            # Get engagements for this tweet
+            # Get engagements for this tweet (excluding specified accounts)
             engagements = engagement_analyzer.get_engagements_for_tweet(
                 tweet,
                 all_tweets,
-                self.considered_accounts
+                self.considered_accounts,
+                excluded_engagers
             )
             
             # Get author's influence score
