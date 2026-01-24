@@ -65,13 +65,13 @@ def test_log_and_raise_config_error():
     with pytest.raises(ValueError) as exc_info:
         log_and_raise_config_error(
             "Missing required configuration",
-            config_key="RAPID_API_KEY",
+            config_key="DESEARCH_API_KEY",
             config_value="missing"
         )
     
     error = exc_info.value
     assert "Missing required configuration" in str(error)
-    assert "RAPID_API_KEY" in str(error)
+    assert "DESEARCH_API_KEY" in str(error)
 
 
 def test_log_and_raise_config_error_sanitizes_sensitive():
