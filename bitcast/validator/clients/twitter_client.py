@@ -29,8 +29,6 @@ from bitcast.validator.utils.twitter_cache import (
     cache_user_info
 )
 
-# Desearch.ai is required for scoring
-USE_DESEARCH_API = True
 
 class TwitterClient:
     """
@@ -44,8 +42,6 @@ class TwitterClient:
                  max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
                  posts_only: bool = True):
         """Initialize client with Desearch.ai API key (required for scoring)."""
-        # Desearch.ai is required for scoring
-        self.use_desearch = True
         self.api_key = api_key or DESEARCH_API_KEY
         if not self.api_key:
             raise ValueError("DESEARCH_API_KEY environment variable must be set for scoring")
@@ -71,12 +67,6 @@ class TwitterClient:
             "Content-Type": "application/json"
         }
         
-        # Debug: Log auth header format for troubleshooting (first run only)
-        if not hasattr(TwitterClient, '_auth_logged'):
-            masked_auth = auth_value[:15] + '...' + auth_value[-5:] if len(auth_value) > 20 else '***'
-            bt.logging.info(f"Desearch.ai Authorization header format: {masked_auth} (key length: {len(self.api_key)})")
-            TwitterClient._auth_logged = True
-        
         # Configuration
         self.max_retries = max_retries
         self.retry_delay = retry_delay
@@ -90,12 +80,6 @@ class TwitterClient:
         """Make API request with retry logic for rate limits."""
         for attempt in range(self.max_retries):
             try:
-                # Debug: Log the authorization header (masked for security)
-                auth_header = self.headers.get('Authorization', '')
-                if auth_header:
-                    masked_auth = auth_header[:10] + '...' + auth_header[-5:] if len(auth_header) > 15 else '***'
-                    bt.logging.debug(f"Making request to {url} with Authorization: {masked_auth}")
-                
                 response = requests.get(url, headers=self.headers, params=params, timeout=30)
                 
                 if response.status_code in [429, 500, 502, 503, 504]:
@@ -120,13 +104,11 @@ class TwitterClient:
                 if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list):
                     return data['data'], None
                 
-                # Normalize response structure - Legacy RapidAPI formats (for backward compatibility):
-                # - Standard: {"data": {"user": {...}}}
-                # - Paginated: {"user": {...}}
+                # Handle alternative response formats from Desearch.ai API
                 if 'data' in data and 'user' in data['data']:
                     return data, None
                 elif 'user' in data:
-                    # Wrap paginated response to match standard structure
+                    # Normalize response structure for consistency
                     return {'data': data}, None
                 elif 'errors' in data:
                     return None, f"API error: {data.get('errors')}"
@@ -154,8 +136,6 @@ class TwitterClient:
         """
         Filter tweets to only those authored by the specified username.
         
-        Handles backward compatibility by setting author field for old cache entries.
-        
         Args:
             tweets: List of tweet dictionaries
             username: Expected author username (already lowercased)
@@ -172,7 +152,7 @@ class TwitterClient:
                 # Tweet is from the expected author
                 validated_tweets.append(tweet)
             elif not author:
-                # Backward compatibility: assume timeline owner for old cache entries
+                # Set author field for tweets missing it (e.g., from cache)
                 tweet['author'] = username
                 validated_tweets.append(tweet)
             # else: skip - tweet from someone else (e.g., reply TO user FROM someone else)
