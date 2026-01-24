@@ -21,6 +21,13 @@ from bitcast.validator.account_connection.connection_scanner import (
 from bitcast.validator.account_connection.connection_db import ConnectionDatabase
 
 
+@pytest.fixture(autouse=True)
+def mock_desearch_api_key():
+    """Mock DESEARCH_API_KEY for all tests in this module."""
+    with patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_test_key_12345'):
+        yield
+
+
 class TestGetActivePoolMembers:
     """Test social map integration."""
     
