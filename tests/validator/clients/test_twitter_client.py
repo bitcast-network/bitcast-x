@@ -20,24 +20,24 @@ class TestTwitterClient:
     
     def test_init_with_api_key(self):
         """Test client initializes with API key."""
-        client = TwitterClient(api_key="test_key_123")
-        assert client.api_key == "test_key_123"
+        client = TwitterClient(api_key="dt_$test_key_123")
+        assert client.api_key == "dt_$test_key_123"
         assert client.base_url == "https://api.desearch.ai"
         assert "Authorization" in client.headers
     
-    def test_api_key_prefix_handling(self):
-        """Test API key prefix is added correctly."""
-        # Test without prefix
-        client = TwitterClient(api_key="test123")
+    def test_api_key_prefix_validation(self):
+        """Test API key must include dt_$ prefix."""
+        # Key without prefix should raise ValueError
+        with pytest.raises(ValueError, match="must include the 'dt_\\$' prefix"):
+            TwitterClient(api_key="test123")
+        
+        # Key with partial prefix should raise ValueError
+        with pytest.raises(ValueError, match="must include the 'dt_\\$' prefix"):
+            TwitterClient(api_key="$test123")
+        
+        # Key with correct prefix should work
+        client = TwitterClient(api_key="dt_$test123")
         assert client.headers["Authorization"] == "dt_$test123"
-        
-        # Test with $ prefix
-        client2 = TwitterClient(api_key="$test123")
-        assert client2.headers["Authorization"] == "dt_$test123"
-        
-        # Test with full prefix
-        client3 = TwitterClient(api_key="dt_$test123")
-        assert client3.headers["Authorization"] == "dt_$test123"
     
     @mock.patch('requests.get')
     def test_api_request_retry_logic(self, mock_get):
@@ -52,7 +52,7 @@ class TestTwitterClient:
         
         mock_get.side_effect = [mock_429, mock_200]
         
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         with mock.patch('time.sleep'):
             data, error = client._make_api_request("http://test", {})
@@ -62,7 +62,7 @@ class TestTwitterClient:
     
     def test_parse_desearch_tweet_basic(self):
         """Test basic Desearch.ai tweet parsing."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         # Mock Desearch.ai tweet response
         desearch_tweet = {
@@ -97,7 +97,7 @@ class TestTwitterClient:
     
     def test_parse_desearch_tweet_engagement_defaults(self):
         """Test engagement metrics default to 0 when missing."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         # Minimal tweet without engagement metrics
         desearch_tweet = {
@@ -117,7 +117,7 @@ class TestTwitterClient:
     
     def test_parse_desearch_tweet_retweet(self):
         """Test parsing retweet from Desearch.ai."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         desearch_tweet = {
             'id': '111222333',
@@ -140,7 +140,7 @@ class TestTwitterClient:
     
     def test_parse_desearch_tweet_quote(self):
         """Test parsing quote tweet from Desearch.ai."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         desearch_tweet = {
             'id': '555666777',
@@ -163,7 +163,7 @@ class TestTwitterClient:
     
     def test_parse_desearch_tweet_invalid(self):
         """Test parsing returns None for invalid tweet."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         # Missing required fields
         invalid_tweet = {'id': '123'}  # No text
@@ -174,7 +174,7 @@ class TestTwitterClient:
     
     def test_convert_iso_to_twitter_date(self):
         """Test ISO date conversion to Twitter format."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         # Test with Z suffix
         iso_date = "2024-01-15T12:30:45Z"
@@ -189,7 +189,7 @@ class TestTwitterClient:
     
     def test_validate_tweet_authors(self):
         """Test author validation filters correctly."""
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         tweets = [
             {'tweet_id': '1', 'author': 'testuser', 'text': 'My tweet'},
@@ -245,7 +245,7 @@ class TestTwitterClient:
         }
         mock_get.return_value = mock_response
         
-        client = TwitterClient(api_key="test", posts_only=True)
+        client = TwitterClient(api_key="dt_$test", posts_only=True)
         
         with mock.patch('time.sleep'):
             result = client.fetch_user_tweets("testuser")
@@ -296,7 +296,7 @@ class TestTwitterClient:
         
         mock_get.side_effect = [mock_response_page1, mock_response_page2]
         
-        client = TwitterClient(api_key="test", posts_only=True)
+        client = TwitterClient(api_key="dt_$test", posts_only=True)
         
         with mock.patch('time.sleep'):
             result = client.fetch_user_tweets("testuser")
@@ -328,7 +328,7 @@ class TestTwitterClient:
             'last_updated': now - timedelta(hours=1)  # Fresh cache
         }
         
-        client = TwitterClient(api_key="test")
+        client = TwitterClient(api_key="dt_$test")
         
         result = client.fetch_user_tweets("testuser")
         
@@ -372,7 +372,7 @@ class TestTwitterClient:
         mock_get.side_effect = [mock_response_replies, mock_response_posts]
         
         # Enable dual-endpoint mode
-        client = TwitterClient(api_key="test", posts_only=False)
+        client = TwitterClient(api_key="dt_$test", posts_only=False)
         
         with mock.patch('time.sleep'):
             result = client.fetch_user_tweets("testuser")
@@ -403,7 +403,7 @@ class TestTwitterClientIntegration:
                     ]
                 }
                 
-                client = TwitterClient(api_key="test")
+                client = TwitterClient(api_key="dt_$test")
                 
                 # Should find Python keyword
                 assert client.check_user_relevance("testuser", ["Python"], min_followers=500)

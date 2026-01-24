@@ -49,21 +49,17 @@ class TwitterClient:
         # Strip any whitespace that might have been introduced
         self.api_key = self.api_key.strip()
         self.base_url = "https://api.desearch.ai"
-        # Desearch.ai requires format: dt_$API_KEY
-        # The $ is a literal character, not a variable, so we concatenate strings
-        # Check if API key already includes the full prefix
-        if self.api_key.startswith('dt_$'):
-            # Already has full prefix, use as-is
-            auth_value = self.api_key
-        elif self.api_key.startswith('$'):
-            # Has $ but missing dt_ prefix
-            auth_value = "dt_" + self.api_key
-        else:
-            # No prefix, add dt_$
-            auth_value = "dt_$" + self.api_key
+        
+        # Desearch.ai requires the API key in format: dt_$YOUR_KEY
+        # The key should be stored with this prefix in .env
+        if not self.api_key.startswith('dt_$'):
+            raise ValueError(
+                "DESEARCH_API_KEY must include the 'dt_$' prefix. "
+                "Expected format: dt_$YOUR_KEY"
+            )
         
         self.headers = {
-            "Authorization": auth_value,
+            "Authorization": self.api_key,
             "Content-Type": "application/json"
         }
         
