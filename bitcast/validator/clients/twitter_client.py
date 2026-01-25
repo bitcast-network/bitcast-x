@@ -484,7 +484,7 @@ class TwitterClient:
     
     def _parse_desearch_tweet(self, desearch_data: Dict, username: str) -> Optional[Dict]:
         """
-        Parse Desearch.ai API response to match RapidAPI format.
+        Parse Desearch.ai API response into normalized tweet format.
         
         Args:
             desearch_data: Raw tweet object from Desearch.ai API

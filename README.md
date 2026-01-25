@@ -133,7 +133,7 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 - Much simpler setup
 
 **Full Validation Mode (Optional)**
-1. **RapidAPI Key** - [The Old Bird V2](https://rapidapi.com/datahungrybeast/api/twitter-v24) - Mega subscription ($200/month)
+1. **Desearch.ai API Key** - [Desearch.ai](https://desearch.ai) - Twitter data API
 2. **Chutes API Key** - Get from [Chutes.ai](https://chutes.ai/) - Plus subscription ($10/month)
 3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/)
 
@@ -168,7 +168,7 @@ Edit `bitcast/validator/.env` and set your wallet information:
 - `WC_MODE`: Set to `true` for weight copy mode (recommended, default)
 
 For **full validation mode only** (`WC_MODE=false`), also set:
-- `RAPID_API_KEY`: Your RapidAPI key
+- `DESEARCH_API_KEY`: Your Desearch.ai API key (format: dt_$YOUR_KEY)
 - `CHUTES_API_KEY`: Your Chutes API key
 - `WANDB_API_KEY`: Your Weights & Biases API key
 

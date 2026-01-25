@@ -105,7 +105,7 @@ If you want to run full validation logic:
 
 1. Set `WC_MODE=false` in `.env`
 2. Add required API keys:
-   - `RAPID_API_KEY` - Twitter API
+   - `DESEARCH_API_KEY` - Desearch.ai Twitter API
    - `CHUTES_API_KEY` - LLM evaluation
    - `WANDB_API_KEY` - Logging
 3. Restart: `pm2 restart bitcast_x_validator`

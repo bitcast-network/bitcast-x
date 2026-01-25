@@ -40,8 +40,8 @@ fi
 if [ -z "$CHUTES_API_KEY" ]; then
   echo "Warning: CHUTES_API_KEY is not set (required for full validation mode)"
 fi
-if [ -z "$RAPID_API_KEY" ]; then
-  echo "Warning: RAPID_API_KEY is not set (required for full validation mode)"
+if [ -z "$DESEARCH_API_KEY" ]; then
+  echo "Warning: DESEARCH_API_KEY is not set (required for full validation mode)"
 fi
 if [ -z "$WANDB_API_KEY" ]; then
   echo "Warning: WANDB_API_KEY is not set (required for full validation mode)"

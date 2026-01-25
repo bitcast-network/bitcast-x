@@ -135,7 +135,7 @@ Tags are case-insensitive and must appear in original tweets (not retweets).
 Environment variables:
 ```python
 TWITTER_DEFAULT_LOOKBACK_DAYS = 7  # Days to scan back
-RAPID_API_KEY = "..."               # Twitter API access
+DESEARCH_API_KEY = "dt_$..."        # Desearch.ai Twitter API access
 ```
 
 ## Key Methods
@@ -219,8 +219,8 @@ Pool Config → Social Map → Active Members
 - Check file permissions on `connections.db`
 
 ### API errors
-- Verify `RAPID_API_KEY` in `.env`
-- Check API quota on RapidAPI dashboard
+- Verify `DESEARCH_API_KEY` in `.env`
+- Check API quota on Desearch.ai dashboard
 
 ## Testing
 
