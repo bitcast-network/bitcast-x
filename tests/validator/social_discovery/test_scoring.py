@@ -19,12 +19,12 @@ from bitcast.validator.social_discovery.pool_manager import PoolManager
 class TestPoolManager:
     """Essential pool manager tests."""
     
-    def setup_method(self):
-        """Set up test config."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.config_file = Path(self.temp_dir) / "pools_config.json"
-        
-        config = {
+    @mock.patch('bitcast.validator.social_discovery.pool_manager.requests.get')
+    def test_load_pools(self, mock_get):
+        """Test pool loading from API."""
+        # Mock API response
+        mock_response = mock.Mock()
+        mock_response.json.return_value = {
             "pools": [
                 {
                     "name": "tao",
@@ -34,18 +34,11 @@ class TestPoolManager:
                 }
             ]
         }
+        mock_response.raise_for_status.return_value = None
+        mock_get.return_value = mock_response
         
-        with open(self.config_file, 'w') as f:
-            json.dump(config, f)
-    
-    def teardown_method(self):
-        """Cleanup."""
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_load_pools(self):
-        """Test pool loading."""
-        manager = PoolManager(str(self.config_file))
+        # Create manager (will fetch from mocked API)
+        manager = PoolManager(api_url="http://test.api/pools")
         
         pools = manager.get_pools()
         assert "tao" in pools
@@ -53,6 +46,9 @@ class TestPoolManager:
         tao_config = manager.get_pool("tao")
         assert tao_config['keywords'] == ["tao", "bittensor"]
         assert tao_config['initial_accounts'] == ["opentensor"]
+        
+        # Verify API was called
+        mock_get.assert_called_once_with("http://test.api/pools", timeout=10)
 
 
 class TestTwitterNetworkAnalyzer:
@@ -88,14 +84,18 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should have scored all users
         assert len(scores) == 3
         assert set(scores.keys()) == {'user1', 'user2', 'user3'}
         
-        # Scores should sum to 1.0
-        assert abs(sum(scores.values()) - 1.0) < 1e-10
+        # Pool difficulty equals sum of followers for fetched accounts only
+        # user1 and user2 have 1000 each, user3 was discovered (no follower info)
+        assert total_pool_followers == 2000
+        
+        # Scores should be absolute (PageRank × pool_difficulty), summing to pool_difficulty
+        assert abs(sum(scores.values()) - total_pool_followers) < 1.0
         
         # All scores should be positive
         assert all(score > 0 for score in scores.values())
@@ -132,14 +132,17 @@ class TestTwitterNetworkAnalyzer:
         
         analyzer = TwitterNetworkAnalyzer(mock_client)
         
-        scores, matrix, usernames, user_info_map = analyzer.analyze_network(['user1', 'user2'], ['test'])
+        scores, matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(['user1', 'user2'], ['test'])
         
         # Should only have user1 and user2 (user3 was only in a reply, which got filtered)
         assert len(scores) == 2
         assert set(scores.keys()) == {'user1', 'user2'}
         
-        # Scores should sum to 1.0
-        assert abs(sum(scores.values()) - 1.0) < 1e-10
+        # Pool difficulty should equal sum of followers (1000 per user × 2 users)
+        assert total_pool_followers == 2000
+        
+        # Scores should be absolute (PageRank × pool_difficulty), summing to pool_difficulty
+        assert abs(sum(scores.values()) - total_pool_followers) < 1.0
         
         # All scores should be positive
         assert all(score > 0 for score in scores.values())
@@ -185,13 +188,13 @@ class TestTwitterNetworkAnalyzer:
         analyzer = TwitterNetworkAnalyzer(mock_client, max_workers=1)
         
         # Without filter: should have all 4 users
-        scores_no_filter, _, _, _ = analyzer.analyze_network(
+        scores_no_filter, _, _, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=0
         )
         assert len(scores_no_filter) == 4
         
         # With moderate filter: some non-seeds may be filtered, but seeds preserved
-        scores_filtered, _, _, _ = analyzer.analyze_network(
+        scores_filtered, _, _, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=3.0
         )
         
@@ -205,7 +208,7 @@ class TestTwitterNetworkAnalyzer:
         assert len(scores_filtered) == 4
         
         # With high filter: only seeds remain (non-seeds filtered out)
-        scores_high_filter, _, _, _ = analyzer.analyze_network(
+        scores_high_filter, _, _, _, _, _ = analyzer.analyze_network(
             ['user1', 'user2'], ['test'], min_interaction_weight=4.5
         )
         assert 'user1' in scores_high_filter  # seed
@@ -221,16 +224,6 @@ class TestSocialDiscoveryIntegration:
     def setup_method(self):
         """Set up test environment."""
         self.temp_dir = tempfile.mkdtemp()
-        
-        # Create test pool config
-        self.pools_config = Path(self.temp_dir) / "pools_config.json"
-        config = {
-            "pools": [
-                {"name": "test_pool", "keywords": ["test"], "initial_accounts": ["user1"], "active": True}
-            ]
-        }
-        with open(self.pools_config, 'w') as f:
-            json.dump(config, f)
     
     def teardown_method(self):
         """Cleanup."""
@@ -255,10 +248,12 @@ class TestSocialDiscoveryIntegration:
         # Mock analyzer
         mock_analyzer = mock.Mock()
         mock_analyzer.analyze_network.return_value = (
-            {'user1': 0.6, 'user2': 0.4},  # scores
-            np.array([[0, 1], [1, 0]]),    # adjacency matrix  
+            {'user1': 900.0, 'user2': 600.0},  # absolute scores (PageRank × pool_difficulty)
+            np.array([[0, 1], [1, 0]]),    # adjacency matrix (max weights)
+            np.array([[0, 1.5], [2.0, 0]]),  # relationship scores matrix
             ['user1', 'user2'],            # usernames
-            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}}  # user_info_map
+            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}},  # user_info_map
+            1500  # total_pool_followers (pool difficulty)
         )
         mock_analyzer_class.return_value = mock_analyzer
         

@@ -31,7 +31,8 @@ class TestFallbackRewards:
     def test_allocates_to_treasury_uid(self, orchestrator):
         """Should allocate rewards to treasury UID when using fallback."""
         # Mock treasury UID to be different from burn UID (0)
-        with patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_UID', 106):
+        with patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_UID', 106), \
+             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_PERCENTAGE', 1.0):
             uids = [0, 1, 2, 3, 106]
             
             rewards, stats = orchestrator._fallback_rewards(uids)
@@ -64,7 +65,8 @@ class TestCalculateRewards:
     async def test_handles_no_briefs(self, orchestrator, mock_validator):
         """Should allocate to treasury UID when no briefs."""
         with patch('bitcast.validator.reward_engine.orchestrator.get_briefs') as mock_get_briefs, \
-             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_UID', 106):
+             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_UID', 106), \
+             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_PERCENTAGE', 1.0):
             mock_get_briefs.return_value = []
             
             uids = [0, 1, 106]
@@ -81,7 +83,8 @@ class TestCalculateRewards:
     async def test_handles_brief_fetch_error(self, orchestrator, mock_validator):
         """Should handle errors when fetching briefs."""
         with patch('bitcast.validator.reward_engine.orchestrator.get_briefs') as mock_get_briefs, \
-             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_UID', 106):
+             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_UID', 106), \
+             patch('bitcast.validator.reward_engine.services.treasury_allocation.SUBNET_TREASURY_PERCENTAGE', 1.0):
             mock_get_briefs.side_effect = RuntimeError("API error")
             
             uids = [0, 1, 106]

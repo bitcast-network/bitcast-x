@@ -5,6 +5,7 @@ Provides functions to load social maps and extract member information.
 """
 
 import json
+import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -120,8 +121,8 @@ def get_active_members(
         for username, data in accounts.items()
     ]
     
-    # Sort by score descending
-    account_scores.sort(key=lambda x: x[1], reverse=True)
+    # Sort by score descending, then username ascending for consistent ordering
+    account_scores.sort(key=lambda x: (-x[1], x[0]))
     
     # Apply limit if specified
     if limit is not None:
@@ -170,8 +171,8 @@ def get_considered_accounts(social_map: Dict, limit: int) -> List[Tuple[str, flo
 
 def get_active_members_for_brief(
     pool_name: str,
-    start_date: datetime,
-    end_date: datetime,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
     max_members: Optional[int] = None
 ) -> List[str]:
     """
@@ -181,10 +182,12 @@ def get_active_members_for_brief(
     the top N accounts from each relevant map to ensure accounts that were eligible
     when the brief started remain eligible even if they drop in rank later.
     
+    If no date range is provided, returns active members from the latest map only.
+    
     Args:
         pool_name: Pool name
-        start_date: Brief start date (UTC)
-        end_date: Brief end date (UTC)
+        start_date: Brief start date (UTC). If None, uses latest map only.
+        end_date: Brief end date (UTC). If None, uses latest map only.
         max_members: Number of top accounts to include from each map (if None, includes all)
         
     Returns:
@@ -196,6 +199,11 @@ def get_active_members_for_brief(
         - Map from Nov 23 (mid-brief): Takes top 150
         - Merges to ~160-200 unique accounts (some overlap)
     """
+    # If no date range provided, just return active members from latest map
+    if start_date is None or end_date is None:
+        social_map, _ = load_latest_social_map(pool_name)
+        return get_active_members(social_map, limit=max_members)
+    
     social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
     
     if not social_maps_dir.exists():
@@ -279,6 +287,7 @@ def get_active_members_for_brief(
         latest_map = json.load(f)
     
     # Sort merged accounts by their score in latest map
+    # Use username as secondary sort key for consistent ordering when scores are equal
     scores_dict = {
         username: data.get('score', 0.0)
         for username, data in latest_map['accounts'].items()
@@ -286,8 +295,7 @@ def get_active_members_for_brief(
     
     eligible_list = sorted(
         list(all_eligible),
-        key=lambda x: scores_dict.get(x, 0.0),
-        reverse=True
+        key=lambda x: (-scores_dict.get(x, 0.0), x)  # Sort by score desc, then username asc
     )
     
     bt.logging.info(
@@ -295,3 +303,51 @@ def get_active_members_for_brief(
     )
     
     return eligible_list
+
+
+def load_relationship_scores(pool_name: str) -> Tuple[Optional[np.ndarray], List[str], Dict[str, int]]:
+    """
+    Load the latest relationship scores matrix for cabal protection.
+    
+    Relationship scores represent cumulative weighted interactions between accounts,
+    used to detect and penalize coordinated "cabal" behavior where accounts
+    frequently engage with each other to artificially inflate scores.
+    
+    Args:
+        pool_name: Name of the pool
+        
+    Returns:
+        Tuple of (relationship_scores_matrix, usernames_list, username_to_idx_map)
+        Returns (None, [], {}) if relationship scores not available (backward compatibility)
+    """
+    social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
+    
+    # Find latest adjacency file
+    adjacency_files = list(social_maps_dir.glob("*_adjacency.json"))
+    if not adjacency_files:
+        bt.logging.warning(f"No adjacency files found for pool '{pool_name}', cabal protection disabled")
+        return None, [], {}
+    
+    latest_file = max(
+        adjacency_files,
+        key=lambda f: parse_social_map_filename(f.name.replace('_adjacency', '')) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    
+    with open(latest_file, 'r') as f:
+        data = json.load(f)
+    
+    # Check if relationship_scores field exists (backward compatibility)
+    if 'relationship_scores' not in data:
+        bt.logging.warning(
+            f"Adjacency file {latest_file.name} doesn't contain relationship_scores field. "
+            f"Cabal protection disabled. Re-run social discovery to enable."
+        )
+        return None, [], {}
+    
+    scores_matrix = np.array(data['relationship_scores'], dtype=float)
+    usernames = data['usernames']
+    username_to_idx = {user: i for i, user in enumerate(usernames)}
+    
+    bt.logging.info(f"Loaded relationship scores from {latest_file.name} for cabal protection")
+    
+    return scores_matrix, usernames, username_to_idx

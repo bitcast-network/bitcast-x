@@ -303,4 +303,201 @@ class TestInitialization:
         
         assert calc.considered_accounts == considered_accounts
         assert len(calc.considered_accounts) == 5
+    
+    def test_calculates_min_influence_score(self, considered_accounts):
+        """Should calculate minimum influence score from considered accounts."""
+        calc = ScoreCalculator(considered_accounts)
+        
+        # Eve has the lowest score (0.02)
+        assert calc.min_influence_score == 0.02
+    
+    def test_min_influence_score_with_empty_accounts(self):
+        """Should set min influence score to 0 when no accounts provided."""
+        calc = ScoreCalculator({})
+        
+        assert calc.min_influence_score == 0.0
+
+
+class TestExcludedEngagers:
+    """Test participant exclusion via excluded_engagers."""
+    
+    def test_excludes_participant_engagements(self, considered_accounts):
+        """Should exclude engagements from accounts in excluded_engagers."""
+        calc = ScoreCalculator(
+            considered_accounts,
+            retweet_weight=2.0,
+            quote_weight=3.0
+        )
+        
+        tweets = [
+            {
+                'tweet_id': '001',
+                'author': 'alice',
+                'text': 'Original tweet',
+                'created_at': '',
+                'lang': 'en'
+            }
+        ]
+        
+        all_tweets = tweets + [
+            # Bob (participant) retweets - should be excluded
+            {
+                'tweet_id': '002',
+                'author': 'bob',
+                'retweeted_tweet_id': '001',
+                'quoted_tweet_id': None
+            },
+            # Charlie (non-participant) retweets - should count
+            {
+                'tweet_id': '003',
+                'author': 'charlie',
+                'retweeted_tweet_id': '001',
+                'quoted_tweet_id': None
+            }
+        ]
+        
+        analyzer = EngagementAnalyzer()
+        # Exclude alice and bob (participants)
+        excluded = {'alice', 'bob'}
+        scored = calc.score_tweets_batch(tweets, all_tweets, analyzer, excluded_engagers=excluded)
+        
+        # Only charlie's retweet should count
+        assert len(scored) == 1
+        assert 'charlie' in scored[0]['retweets']
+        assert 'bob' not in scored[0]['retweets']
+        # Score = baseline (0.10 * 2.0) + charlie's engagement (0.06 * 2.0) = 0.20 + 0.12 = 0.32
+        assert scored[0]['score'] == 0.32
+
+
+class TestMinimumInfluenceScore:
+    """Test minimum influence score fallback for accounts not in social map."""
+    
+    def test_uses_min_score_for_unknown_author(self):
+        """Should use minimum influence score for authors not in considered accounts."""
+        considered_accounts = {
+            'alice': 0.10,
+            'bob': 0.05,
+            'charlie': 0.02  # Minimum
+        }
+        calc = ScoreCalculator(considered_accounts)
+        
+        tweets = [
+            {
+                'tweet_id': '001',
+                'author': 'stranger',  # Not in considered accounts
+                'text': 'Tweet from unknown account',
+                'created_at': '2025-10-30T12:00:00',
+                'lang': 'en'
+            }
+        ]
+        
+        analyzer = EngagementAnalyzer()
+        scored = calc.score_tweets_batch(tweets, tweets, analyzer)
+        
+        # Should get baseline score using min_influence_score (0.02)
+        # Score = 0.02 * BASELINE_TWEET_SCORE_FACTOR (2.0) = 0.04
+        assert len(scored) == 1
+        assert scored[0]['score'] == 0.04
+        assert scored[0]['author'] == 'stranger'
+    
+    def test_known_author_uses_actual_score(self):
+        """Should use actual influence score for known authors."""
+        considered_accounts = {
+            'alice': 0.10,
+            'bob': 0.05,
+            'charlie': 0.02  # Minimum
+        }
+        calc = ScoreCalculator(considered_accounts)
+        
+        tweets = [
+            {
+                'tweet_id': '001',
+                'author': 'alice',  # Known account
+                'text': 'Tweet from Alice',
+                'created_at': '2025-10-30T12:00:00',
+                'lang': 'en'
+            }
+        ]
+        
+        analyzer = EngagementAnalyzer()
+        scored = calc.score_tweets_batch(tweets, tweets, analyzer)
+        
+        # Should get baseline score using alice's actual score (0.10)
+        # Score = 0.10 * BASELINE_TWEET_SCORE_FACTOR (2.0) = 0.20
+        assert len(scored) == 1
+        assert scored[0]['score'] == 0.20
+        assert scored[0]['author'] == 'alice'
+    
+    def test_unknown_author_with_engagement_gets_higher_score(self):
+        """Should give unknown authors score from engagement."""
+        considered_accounts = {
+            'alice': 0.10,
+            'bob': 0.05,
+            'charlie': 0.02  # Minimum
+        }
+        calc = ScoreCalculator(
+            considered_accounts,
+            retweet_weight=2.0,
+            quote_weight=3.0
+        )
+        
+        tweets = [
+            {
+                'tweet_id': '001',
+                'author': 'stranger',  # Unknown author
+                'text': 'Great tweet!',
+                'created_at': '2025-10-30T12:00:00',
+                'lang': 'en'
+            }
+        ]
+        
+        all_tweets = tweets + [
+            {
+                'tweet_id': '002',
+                'author': 'alice',
+                'retweeted_user': 'stranger',
+                'quoted_user': None,
+                'retweeted_tweet_id': '001',
+                'quoted_tweet_id': None,
+                'text': 'RT'
+            }
+        ]
+        
+        analyzer = EngagementAnalyzer()
+        scored = calc.score_tweets_batch(tweets, all_tweets, analyzer)
+        
+        # Score = baseline (0.02 * 2.0) + engagement (0.10 * 2.0) = 0.04 + 0.20 = 0.24
+        assert len(scored) == 1
+        assert scored[0]['score'] == 0.24
+        assert 'alice' in scored[0]['retweets']
+    
+    def test_multiple_tweets_mixed_authors(self):
+        """Should handle mix of known and unknown authors."""
+        considered_accounts = {
+            'alice': 0.10,
+            'bob': 0.05,
+            'charlie': 0.02  # Minimum
+        }
+        calc = ScoreCalculator(considered_accounts)
+        
+        tweets = [
+            {'tweet_id': '001', 'author': 'alice', 'text': 'Known', 'created_at': '', 'lang': ''},
+            {'tweet_id': '002', 'author': 'stranger', 'text': 'Unknown', 'created_at': '', 'lang': ''},
+            {'tweet_id': '003', 'author': 'bob', 'text': 'Known', 'created_at': '', 'lang': ''}
+        ]
+        
+        analyzer = EngagementAnalyzer()
+        scored = calc.score_tweets_batch(tweets, tweets, analyzer)
+        
+        # Find each tweet in results
+        alice_tweet = next(t for t in scored if t['author'] == 'alice')
+        stranger_tweet = next(t for t in scored if t['author'] == 'stranger')
+        bob_tweet = next(t for t in scored if t['author'] == 'bob')
+        
+        # Alice: 0.10 * 2.0 = 0.20
+        assert alice_tweet['score'] == 0.20
+        # Stranger: 0.02 * 2.0 = 0.04 (uses min)
+        assert stranger_tweet['score'] == 0.04
+        # Bob: 0.05 * 2.0 = 0.10
+        assert bob_tweet['score'] == 0.10
 
