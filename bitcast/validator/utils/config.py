@@ -35,7 +35,14 @@ X_SOCIAL_MAP_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-social-map"
 X_ACCOUNT_CONNECTIONS_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-account-connections"
 TWEETS_SUBMIT_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/brief-tweets"
 
-DESEARCH_API_KEY = os.getenv('DESEARCH_API_KEY')
+# Twitter API Provider Configuration
+TWITTER_API_PROVIDER = os.getenv('TWITTER_API_PROVIDER', 'rapidapi')  # Options: 'desearch' or 'rapidapi'
+
+# Twitter API Keys
+DESEARCH_API_KEY = os.getenv('DESEARCH_API_KEY')  # Required for Desearch.ai provider
+RAPID_API_KEY = os.getenv('RAPID_API_KEY')  # Optional: Required only if using RapidAPI provider
+
+# Other API Keys
 CHUTES_API_KEY = os.getenv('CHUTES_API_KEY')
 WANDB_API_KEY = os.getenv('WANDB_API_KEY')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
@@ -98,6 +105,7 @@ bt.logging.info(f"ENABLE_DATA_PUBLISH: {ENABLE_DATA_PUBLISH}")
 bt.logging.info(f"X_SOCIAL_MAP_ENDPOINT: {X_SOCIAL_MAP_ENDPOINT}")
 bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOINT}")
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
+bt.logging.info(f"TWITTER_API_PROVIDER: {TWITTER_API_PROVIDER}")
 bt.logging.info(f"INITIAL_FETCH_DAYS: {INITIAL_FETCH_DAYS}")
 bt.logging.info(f"INCREMENTAL_FETCH_DAYS: {INCREMENTAL_FETCH_DAYS}")
 bt.logging.info(f"MAX_TWEETS_PER_FETCH: {MAX_TWEETS_PER_FETCH}")

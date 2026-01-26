@@ -133,9 +133,51 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 - Much simpler setup
 
 **Full Validation Mode (Optional)**
-1. **Desearch.ai API Key** - [Desearch.ai](https://desearch.ai) - Twitter data API
+1. **Twitter API Provider** - Choose one:
+   - **Desearch.ai** (Recommended) - [Desearch.ai](https://desearch.ai) - Modern Twitter data API
+   - **RapidAPI** (Alternative) - [twitter-v24](https://rapidapi.com/Glavier/api/twitter-v24) - Backup provider
 2. **Chutes API Key** - Get from [Chutes.ai](https://chutes.ai/) - Plus subscription ($10/month)
 3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/)
+
+#### Twitter API Provider Configuration
+
+Bitcast X supports two Twitter API providers with manual switching:
+
+**Desearch.ai (Default - Recommended)**
+- Supports dual-endpoint mode for complete reply coverage
+- Modern pagination with 400 tweet fetch support
+- API Key format: `dt_$YOUR_KEY`
+- Get your key at [Desearch.ai](https://desearch.ai)
+
+**RapidAPI (Alternative)**
+- Alternative provider for reliability testing
+- Cursor-based pagination
+- Supports both posts and replies
+- Get your key at [RapidAPI](https://rapidapi.com/Glavier/api/twitter-v24)
+
+**Switching Providers**
+
+To switch between providers, update your `.env` file:
+
+```bash
+# In bitcast/validator/.env
+
+# Choose provider: 'desearch' (default) or 'rapidapi'
+TWITTER_API_PROVIDER=desearch
+
+# Desearch.ai API key (required when using 'desearch' provider)
+DESEARCH_API_KEY=dt_$YOUR_KEY
+
+# RapidAPI key (optional: only required when using 'rapidapi' provider)
+RAPID_API_KEY=YOUR_RAPIDAPI_KEY
+```
+
+Then restart your validator for changes to take effect.
+
+**Provider Selection Guide**
+- Start with Desearch.ai (default) for production use
+- Switch to RapidAPI only if experiencing Desearch.ai reliability issues
+- Both providers produce identical output format and cache compatibility
 
 ---
 
@@ -168,7 +210,9 @@ Edit `bitcast/validator/.env` and set your wallet information:
 - `WC_MODE`: Set to `true` for weight copy mode (recommended, default)
 
 For **full validation mode only** (`WC_MODE=false`), also set:
-- `DESEARCH_API_KEY`: Your Desearch.ai API key (format: dt_$YOUR_KEY)
+- `TWITTER_API_PROVIDER`: Choose provider: `desearch` (default) or `rapidapi`
+- `DESEARCH_API_KEY`: Your Desearch.ai API key (format: dt_$YOUR_KEY) - required if using Desearch
+- `RAPID_API_KEY`: Your RapidAPI key - only required if using RapidAPI provider
 - `CHUTES_API_KEY`: Your Chutes API key
 - `WANDB_API_KEY`: Your Weights & Biases API key
 
