@@ -364,8 +364,24 @@ class TwitterClient:
         )
         
         # Cache all tweets including deleted ones
+        # Smart merge of user_info:
+        # - username: Always use freshly fetched (guaranteed correct)
+        # - followers_count: Use fresh IF non-zero (extraction succeeded), else preserve cached
+        final_user_info = {'username': username, 'followers_count': 0}
+        
+        if user_info and user_info.get('followers_count', 0) > 0:
+            # Fresh data with valid follower count - use it
+            final_user_info = user_info
+        elif cached_data and cached_data.get('user_info'):
+            # Preserve cached follower count but ensure username is correct
+            cached_user_info = cached_data['user_info']
+            final_user_info = {
+                'username': username,  # Always use correct username
+                'followers_count': cached_user_info.get('followers_count', 0)
+            }
+        
         cache_data = {
-            'user_info': (cached_data.get('user_info') if cached_data else None) or user_info or {'username': username, 'followers_count': 0},
+            'user_info': final_user_info,
             'tweets': tweets_to_cache,
             'last_updated': datetime.now()
         }
