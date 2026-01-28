@@ -92,8 +92,17 @@ SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
+# Validator mode: 'weight_copy' (default), 'standard', or 'discovery'
+# - weight_copy: Fetches weights from reference validator
+# - standard: Performs validation with downloaded social maps
+# - discovery: Performs complete validation with social discovery
+VALIDATOR_MODE = os.getenv('VALIDATOR_MODE', 'weight_copy').lower()
+if VALIDATOR_MODE not in ['weight_copy', 'standard', 'discovery']:
+    raise ValueError(f"Invalid VALIDATOR_MODE: {VALIDATOR_MODE}. Must be 'weight_copy', 'standard', or 'discovery'")
+
 # Reference Validator API Configuration
-WC_MODE = os.getenv('WC_MODE', 'true').lower() == 'true'
+# Reference validator = validator that provides authoritative data (weights, social maps, connections)
+# Reference validator is typically running in 'discovery' mode but can run in any mode
 REFERENCE_VALIDATOR_URL = os.getenv('REFERENCE_VALIDATOR_URL', 'http://44.241.197.212')
 REFERENCE_VALIDATOR_ENDPOINT = f"{REFERENCE_VALIDATOR_URL}:8094"
 
@@ -120,5 +129,5 @@ bt.logging.info(f"SUBNET_TREASURY_PERCENTAGE: {SUBNET_TREASURY_PERCENTAGE}")
 bt.logging.info(f"SUBNET_TREASURY_UID: {SUBNET_TREASURY_UID}")
 bt.logging.info(f"NOCODE_UID: {NOCODE_UID}")
 bt.logging.info(f"SIMULATE_CONNECTIONS: {SIMULATE_CONNECTIONS}")
-bt.logging.info(f"WC_MODE: {WC_MODE}")
+bt.logging.info(f"VALIDATOR_MODE: {VALIDATOR_MODE}")
 bt.logging.info(f"REFERENCE_VALIDATOR_ENDPOINT: {REFERENCE_VALIDATOR_ENDPOINT}")

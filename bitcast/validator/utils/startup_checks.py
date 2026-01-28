@@ -1,13 +1,14 @@
 """
 Startup checks for validator initialization.
 
-Includes social map auto-download for all validators.
+Includes social map auto-download for weight_copy and standard modes.
+Validators in discovery mode generate their own social maps.
 """
 from pathlib import Path
 from typing import List
 import bittensor as bt
 
-from bitcast.validator.utils.config import REFERENCE_VALIDATOR_ENDPOINT
+from bitcast.validator.utils.config import REFERENCE_VALIDATOR_ENDPOINT, VALIDATOR_MODE
 from bitcast.validator.social_discovery.social_map_client import SocialMapClient
 from bitcast.validator.social_discovery.pool_manager import PoolManager
 
@@ -39,14 +40,23 @@ def needs_social_map(pool_dir: Path) -> bool:
 async def check_and_download_social_maps() -> None:
     """
     Check each pool's social maps and download any that are missing.
-    Runs for all validators on startup.
     
-    For each active pool, checks if social map exists. If not, downloads from reference validator.
+    Mode behavior:
+    - weight_copy: Skip check (doesn't perform validation, no need for social maps)
+    - standard: Download social maps from reference validator if missing
+    - discovery: Download if missing (for quick start), then generates fresh ones via social discovery
+    
+    This ensures anyone can start in any mode from zero and get to a working state.
     
     Raises:
         RuntimeError: If download fails and social maps are required
     """
-    bt.logging.info("🔍 Checking social maps for all active pools...")
+    # Weight copy mode doesn't perform validation - skip download
+    if VALIDATOR_MODE == 'weight_copy':
+        bt.logging.info("🔄 Weight copy mode - fetches weights only, skipping social map check")
+        return
+    
+    bt.logging.info(f"🔍 Checking social maps for all active pools (mode: {VALIDATOR_MODE})...")
     
     # Get active pools
     pool_manager = PoolManager()
@@ -125,7 +135,10 @@ async def check_and_download_social_maps() -> None:
 async def check_and_download_account_connections() -> None:
     """
     Check if account connections database is empty and download if needed.
-    Runs for all validators on startup.
+    
+    Mode behavior:
+    - weight_copy: Download connections (doesn't run scanner)
+    - standard & discovery: Download if empty, scanner will run periodically
     
     Only downloads if database is completely empty (fresh deployment).
     If database has any connections, assumes validator is operational.
@@ -133,7 +146,7 @@ async def check_and_download_account_connections() -> None:
     Does NOT raise exceptions - validator can function without connections.
     Connection scanner will run periodically and populate database.
     """
-    bt.logging.info("🔍 Checking account connections database...")
+    bt.logging.info(f"🔍 Checking account connections database (mode: {VALIDATOR_MODE})...")
     
     try:
         # Import here to avoid circular dependencies

@@ -127,17 +127,24 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 
 ### API Setup Requirements
 
+Choose your mode based on desired level of independence:
+
 **Weight Copy Mode (Recommended - Default)**
 - No API keys required!
-- Fetches weights from primary validator
-- Much simpler setup
+- Fetches weights from reference validator
+- Minimal setup and resources
 
-**Full Validation Mode (Optional)**
+**Standard Mode (Independent Validation)**
 1. **Twitter API Provider** - Choose one:
    - **Desearch.ai** (Recommended) - [Desearch.ai](https://desearch.ai) - Modern Twitter data API
    - **RapidAPI** (Alternative) - [twitter-v24](https://rapidapi.com/Glavier/api/twitter-v24) - Backup provider
 2. **Chutes API Key** - Get from [Chutes.ai](https://chutes.ai/) - Plus subscription ($10/month)
-3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/)
+3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/) - For monitoring
+
+**Discovery Mode (Full Independence)**
+- Same as Standard Mode (Twitter API, Chutes, WandB)
+- Requires higher resources for social discovery
+- Contributes social maps for the network
 
 #### Twitter API Provider Configuration
 
@@ -157,27 +164,7 @@ Bitcast X supports two Twitter API providers with manual switching:
 
 **Switching Providers**
 
-To switch between providers, update your `.env` file:
-
-```bash
-# In bitcast/validator/.env
-
-# Choose provider: 'desearch' (default) or 'rapidapi'
-TWITTER_API_PROVIDER=desearch
-
-# Desearch.ai API key (required when using 'desearch' provider)
-DESEARCH_API_KEY=dt_$YOUR_KEY
-
-# RapidAPI key (optional: only required when using 'rapidapi' provider)
-RAPID_API_KEY=YOUR_RAPIDAPI_KEY
-```
-
-Then restart your validator for changes to take effect.
-
-**Provider Selection Guide**
-- Start with Desearch.ai (default) for production use
-- Switch to RapidAPI only if experiencing Desearch.ai reliability issues
-- Both providers produce identical output format and cache compatibility
+To switch between providers, update TWITTER_API_PROVIDER in your `.env` file:
 
 ---
 
@@ -207,14 +194,24 @@ cp bitcast/validator/.env.example bitcast/validator/.env
 Edit `bitcast/validator/.env` and set your wallet information:
 - `WALLET_NAME`: Your Bittensor wallet name (coldkey)
 - `HOTKEY_NAME`: Your validator hotkey name
-- `WC_MODE`: Set to `true` for weight copy mode (recommended, default)
+- `VALIDATOR_MODE`: Choose validator mode (see below)
 
-For **full validation mode only** (`WC_MODE=false`), also set:
+**Validator Modes (choose based on desired level of independence):**
+
+- `weight_copy` (default, recommended for most): Minimal independence - fetches pre-calculated weights from reference validator via API. No validation work, no social maps needed. Requires no API keys. **Use this if you want to participate with minimal setup and resources.**
+
+- `standard` (independent validation): Medium independence - performs full validation (account scanning, tweet scoring, filtering, rewards) using social maps downloaded from reference validator. Downloads maps at startup if missing, then periodically refreshes. Requires Twitter, Chutes, and WandB API keys. **Use this if you want to compute your own weights independently while relying on others for social mapping.**
+
+- `discovery` (full independence): Complete independence - performs full validation including social discovery/mapping. Downloads social maps at startup for quick start, then generates fresh maps bi-weekly via social discovery. Requires all API keys. **Use this if you want complete independence.**
+
+All modes can be run from zero state and will automatically download necessary data at startup.
+
+For **standard and discovery modes**, also set:
 - `TWITTER_API_PROVIDER`: Choose provider: `desearch` (default) or `rapidapi`
 - `DESEARCH_API_KEY`: Your Desearch.ai API key (format: dt_$YOUR_KEY) - required if using Desearch
 - `RAPID_API_KEY`: Your RapidAPI key - only required if using RapidAPI provider
 - `CHUTES_API_KEY`: Your Chutes API key
-- `WANDB_API_KEY`: Your Weights & Biases API key
+- `WANDB_API_KEY`: Your Weights & Biases API key (for monitoring and debugging)
 
 ### 4. Register on Bittensor Network
 
@@ -240,7 +237,7 @@ btcli subnet register \
 ./scripts/run_validator.sh
 ```
 
-The validator automatically detects your configuration and runs in the appropriate mode (WC or full validation).
+The validator automatically detects your configuration and runs in the appropriate mode (weight_copy, standard, or discovery).
 
 ### Process Management with PM2
 
@@ -259,7 +256,7 @@ bitcast-x/
 │   ├── tweet_filtering/      # LLM-based brief evaluation
 │   ├── reward_engine/        # Reward calculation and distribution
 │   ├── weight_copy/          # Weight copy mode implementation
-│   ├── api/                  # Weights API for WC validators
+│   ├── api/                  # Weights API for weight_copy validators
 │   ├── clients/              # External API clients (Twitter, LLM)
 │   └── utils/                # Shared utilities and configuration
 ├── scripts/                  # Setup and run scripts

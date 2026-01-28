@@ -23,7 +23,7 @@ async def forward_weight_copy(self):
         time.sleep(VALIDATOR_WAIT)
         return
     
-    bt.logging.info(f"🔄 WC Mode: Fetching weights from reference validator (step {self.step})")
+    bt.logging.info(f"🔄 Weight copy: Fetching weights from reference validator (step {self.step})")
     
     try:
         # Initialize client if not already done

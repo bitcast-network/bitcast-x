@@ -39,13 +39,21 @@ def get_reward_orchestrator() -> RewardOrchestrator:
 
 
 async def forward(self):
-    """Forward function with integrated scheduling for all validator operations."""
+    """
+    Forward function for standard and discovery modes.
+    
+    Performs full validation (account connection, tweet scoring, filtering, rewards).
+    - Standard mode: Downloads social maps from reference validator
+    - Discovery mode: Generates social maps via social discovery
+    """
     # Run forward every hour on the hour (:00) and half hour (:30)
     if self.step % 30 != 0:
         time.sleep(VALIDATOR_WAIT)
         return
 
-    bt.logging.info(f"🚀 Starting validation cycle (step {self.step})")
+    from bitcast.validator.utils.config import VALIDATOR_MODE
+    mode_label = "STANDARD" if VALIDATOR_MODE == "standard" else "DISCOVERY"
+    bt.logging.info(f"🚀 Starting validation cycle - {mode_label} mode (step {self.step})")
     
     # Initialize global publisher if not already done
     try:
@@ -55,7 +63,22 @@ async def forward(self):
         bt.logging.debug("Global data publisher initialized")
 
     try:
-        # Account connection scan (every 1 hour at :00)
+        # Social map handling - mode-specific behavior
+        if VALIDATOR_MODE == 'discovery':
+            # Discovery mode: Generate social maps via discovery
+            results = await run_discovery_for_stale_pools()
+            if results:
+                bt.logging.info(f"Social discovery complete for {len(results)} pool(s): {list(results.keys())}")
+        else:
+            # Standard mode: Download social maps from reference validator (every 12 hours at :00)
+            if self.step % (12 * 60) == 0:
+                from bitcast.validator.social_discovery.social_map_downloader import download_stale_social_maps
+                bt.logging.info("🗺️ Checking for stale social maps...")
+                downloaded = await download_stale_social_maps()
+                if downloaded:
+                    bt.logging.info(f"Downloaded {len(downloaded)} social map(s): {', '.join(downloaded)}")
+        
+        # Account connection scan (every 1 hour at :30)
         if self.step % (ACCOUNT_CONNECTION_INTERVAL_HOURS * 60) == 30:
             bt.logging.info("🔗 Starting account connection scan for all pools...")
             scanner = ConnectionScanner(lookback_days=7)
@@ -65,12 +88,7 @@ async def forward(self):
                 f"{summary['tags_found']} tags, {summary['new_connections']} new"
             )
         
-        # Social discovery (bi-weekly on Sundays, for stale pools)
-        results = await run_discovery_for_stale_pools()
-        if results:
-            bt.logging.info(f"Social discovery complete for {len(results)} pool(s): {list(results.keys())}")
-        
-        # Reward engine (every 1 hour at :30, staggered from account scan)
+        # Reward engine (every 1 hour at :00, staggered from account scan)
         if self.step % (REWARDS_INTERVAL_HOURS * 60) == 0:
             bt.logging.info("💰 Starting reward engine...")
             miner_uids = get_all_uids(self)
