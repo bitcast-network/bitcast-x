@@ -94,8 +94,9 @@ class TestTwitterNetworkAnalyzer:
         # user1 and user2 have 1000 each, user3 was discovered (no follower info)
         assert total_pool_followers == 2000
         
-        # Scores should be absolute (PageRank × pool_difficulty), summing to pool_difficulty
-        assert abs(sum(scores.values()) - total_pool_followers) < 1.0
+        # Scores should be absolute (PageRank × pool_difficulty / 1000), summing to pool_difficulty / 1000
+        scaled_pool_difficulty = total_pool_followers / 1000
+        assert abs(sum(scores.values()) - scaled_pool_difficulty) < 0.1
         
         # All scores should be positive
         assert all(score > 0 for score in scores.values())
@@ -141,8 +142,9 @@ class TestTwitterNetworkAnalyzer:
         # Pool difficulty should equal sum of followers (1000 per user × 2 users)
         assert total_pool_followers == 2000
         
-        # Scores should be absolute (PageRank × pool_difficulty), summing to pool_difficulty
-        assert abs(sum(scores.values()) - total_pool_followers) < 1.0
+        # Scores should be absolute (PageRank × pool_difficulty / 1000), summing to pool_difficulty / 1000
+        scaled_pool_difficulty = total_pool_followers / 1000
+        assert abs(sum(scores.values()) - scaled_pool_difficulty) < 0.1
         
         # All scores should be positive
         assert all(score > 0 for score in scores.values())

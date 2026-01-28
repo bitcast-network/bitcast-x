@@ -203,12 +203,13 @@ class RapidAPIProvider(TwitterProvider):
         
         return None, "Max retries exceeded"
     
-    def _parse_tweet(self, tweet_result: Dict) -> Optional[Dict]:
+    def _parse_tweet(self, tweet_result: Dict, username: str = None) -> Optional[Dict]:
         """
         Parse tweet data from RapidAPI response format.
         
         Args:
             tweet_result: Raw tweet object from RapidAPI
+            username: Expected username (used as fallback if author extraction fails)
             
         Returns:
             Normalized tweet dict or None if parsing fails
@@ -288,6 +289,14 @@ class RapidAPIProvider(TwitterProvider):
                     .lower()
                 )
             except (KeyError, AttributeError, TypeError):
+                # Author extraction failed - leave as None
+                # TwitterClient will reject this tweet with strict validation
+                # DO NOT assume author=username because tweetsandreplies endpoint
+                # can return tweets from other users (replies TO user FROM others)
+                bt.logging.warning(
+                    f"Failed to extract author from tweet {tweet_result.get('rest_id')} "
+                    f"for @{username} - RapidAPI response may be malformed"
+                )
                 pass
             
             # Extract reply info
@@ -423,13 +432,9 @@ class RapidAPIProvider(TwitterProvider):
                         tweet_result = (
                             entry['content']['itemContent']['tweet_results']['result']
                         )
-                        tweet_data = self._parse_tweet(tweet_result)
+                        tweet_data = self._parse_tweet(tweet_result, username)
                         
                         if tweet_data:
-                            # Default author for /tweets endpoint (only returns user's tweets)
-                            if not tweet_data.get('author') and endpoint_path == '/user/tweets':
-                                tweet_data['author'] = username
-                            
                             # Filter by author during pagination
                             if (tweet_data.get('author') or '').lower() == username:
                                 tweets.append(tweet_data)
@@ -475,12 +480,9 @@ class RapidAPIProvider(TwitterProvider):
                                 )
                                 
                                 if tweet_result:
-                                    tweet_data = self._parse_tweet(tweet_result)
+                                    tweet_data = self._parse_tweet(tweet_result, username)
+                                    
                                     if tweet_data:
-                                        # Default author for /tweets endpoint
-                                        if not tweet_data.get('author') and endpoint_path == '/user/tweets':
-                                            tweet_data['author'] = username
-                                        
                                         # Filter by author during pagination
                                         if (tweet_data.get('author') or '').lower() == username:
                                             tweets.append(tweet_data)

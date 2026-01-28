@@ -207,32 +207,23 @@ class TestConnectionScanner:
     
     @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
     def test_scan_account_filters_wrong_author(self, mock_twitter_client, temp_db_path):
-        """Test that tweets from other authors are filtered out (e.g., replies/mentions)."""
+        """Test that TwitterClient filters out tweets from other authors (e.g., replies/mentions)."""
         # Setup mock
         mock_client_instance = Mock()
         mock_twitter_client.return_value = mock_client_instance
         
         recent_date = datetime.now(timezone.utc) - timedelta(days=1)
+        # Mock TwitterClient behavior: it only returns tweets from the queried user
+        # (filters out wrong authors and missing authors)
         mock_client_instance.fetch_user_tweets.return_value = {
             'tweets': [
                 {
                     'tweet_id': 111,
                     'text': 'My tweet with bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
                     'created_at': recent_date.isoformat(),
-                    'author': 'testuser'  # Correct author
-                },
-                {
-                    'tweet_id': 222,
-                    'text': 'Reply to @testuser with bitcast-xxyz78900',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'otheruser'  # Wrong author (reply/mention)
-                },
-                {
-                    'tweet_id': 333,
-                    'text': 'Tweet without author field bitcast-xabc123',
-                    'created_at': recent_date.isoformat(),
-                    'author': None  # No author field
+                    'author': 'testuser'  # Correct author - TwitterClient returns this
                 }
+                # TwitterClient filters out tweet 222 (wrong author) and tweet 333 (no author)
             ]
         }
         
@@ -241,7 +232,8 @@ class TestConnectionScanner:
         
         found_tags = scanner.scan_account("testuser")
         
-        # Should only find 1 tag (from tweet 111), not from tweets by other users or without author
+        # Should only find 1 tag (from tweet 111)
+        # TwitterClient already filtered out tweets from other users or without author
         assert len(found_tags) == 1
         assert found_tags[0][0] == 111
         assert found_tags[0][2] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"

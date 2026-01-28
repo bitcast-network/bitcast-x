@@ -128,6 +128,9 @@ class TwitterClient:
         """
         Filter tweets to only those authored by the specified username.
         
+        Strict validation: Rejects tweets with missing or mismatched author.
+        Providers should always set the author field during parsing.
+        
         Args:
             tweets: List of tweet dictionaries
             username: Expected author username (already lowercased)
@@ -144,10 +147,18 @@ class TwitterClient:
                 # Tweet is from the expected author
                 validated_tweets.append(tweet)
             elif not author:
-                # Set author field for tweets missing it (e.g., from cache)
-                tweet['author'] = username
-                validated_tweets.append(tweet)
-            # else: skip - tweet from someone else (e.g., reply TO user FROM someone else)
+                # Strict validation: reject tweets with missing author
+                # This indicates incomplete data from provider
+                bt.logging.warning(
+                    f"Rejecting tweet {tweet.get('tweet_id')} with missing author field "
+                    f"(expected @{username})"
+                )
+            else:
+                # Tweet from someone else (e.g., reply TO user FROM someone else)
+                bt.logging.debug(
+                    f"Filtering tweet {tweet.get('tweet_id')} from @{author} "
+                    f"(expected @{username})"
+                )
         
         return validated_tweets
     

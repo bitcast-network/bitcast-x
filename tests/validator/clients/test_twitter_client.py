@@ -69,8 +69,8 @@ class TestTwitterClientProviderSelection:
 class TestTwitterClientHelperMethods:
     """Tests for TwitterClient helper methods (caching, validation, etc.)."""
     
-    def test_validate_tweet_authors(self):
-        """Test tweet author validation."""
+    def test_validate_tweet_authors_strict(self):
+        """Test strict tweet author validation (rejects None and wrong authors)."""
         with mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test'):
             client = TwitterClient()
         
@@ -82,16 +82,16 @@ class TestTwitterClientHelperMethods:
         
         validated = client._validate_tweet_authors(tweets, 'testuser')
         
-        # Should keep testuser's tweet and tweet with no author (gets set)
-        assert len(validated) == 2
+        # Strict validation: only keep tweets from testuser, reject None and other users
+        assert len(validated) == 1
         assert validated[0]['tweet_id'] == '1'
-        assert validated[1]['tweet_id'] == '3'
-        assert validated[1]['author'] == 'testuser'  # Author set for no-author tweet
+        assert validated[0]['author'] == 'testuser'
 
 
 class TestTwitterClientCaching:
     """Tests for TwitterClient caching behavior."""
     
+    @mock.patch('bitcast.validator.clients.twitter_client.TWITTER_API_PROVIDER', 'desearch')
     @mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test')
     @mock.patch('bitcast.validator.utils.twitter_cache.get_cached_user_tweets')
     @mock.patch('bitcast.validator.utils.twitter_cache.cache_user_tweets')

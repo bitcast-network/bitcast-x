@@ -234,6 +234,7 @@ class ConnectionScanner:
             )
             
             # Extract tags from recent tweets (excluding retweets)
+            # Note: TwitterClient already filters by author strictly, so all tweets here are from the scanned user
             found_tags = []
             for tweet in recent_tweets:
                 tweet_id = tweet.get('tweet_id')
@@ -246,7 +247,6 @@ class ConnectionScanner:
                 if tweet.get('retweeted_user'):
                     continue
                 
-                # Note: TwitterClient already validates authors, so we trust the author field
                 # Parse tags from tweet text
                 tags = self.tag_parser.extract_tags(text)
                 
