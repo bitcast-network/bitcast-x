@@ -11,7 +11,7 @@ import os
 import numpy as np
 import networkx as nx
 import time
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,6 +44,9 @@ from bitcast.validator.utils.config import (
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher, initialize_global_publisher
 from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
+
+# Reference date for social discovery scheduling
+DISCOVERY_REFERENCE_DATE = date(2025, 11, 9)
 
 
 class TwitterNetworkAnalyzer:
@@ -627,47 +630,64 @@ async def discover_social_network(
         raise
 
 
+def should_run_discovery_today(date_offset: int = 0, reference_date: date = DISCOVERY_REFERENCE_DATE) -> bool:
+    """
+    Check if discovery should run today based on the date offset.
+    
+    Args:
+        date_offset: Number of days offset from reference date (0-13 for bi-weekly cycle)
+        reference_date: Reference date for calculating cycles
+        
+    Returns:
+        True if discovery should run today, False otherwise
+    """
+    from datetime import timezone
+    
+    today = datetime.now(timezone.utc).date()
+    days_since_reference = (today - reference_date).days
+    
+    # Apply offset and check if it's a discovery day (every 14 days)
+    adjusted_days = days_since_reference - date_offset
+    return adjusted_days >= 0 and adjusted_days % 14 == 0
+
+
 async def run_discovery_for_stale_pools() -> Dict[str, str]:
     """
-    Run social discovery only for pools that need updating today.
+    Run social discovery for pools that are scheduled to update today.
     
-    Checks each active pool's latest social map timestamp.
-    Only runs discovery for pools without a map from today (UTC).
-    Only runs every 2 weeks on Sundays.
+    Each pool can have a 'date_offset' (0-13) that determines which day in the 
+    14-day cycle it runs. This allows distributing discovery across different days.
+    
+    Checks each active pool's:
+    - date_offset configuration to see if today is its scheduled day
+    - latest social map timestamp to avoid redundant runs
     
     Always forces cache refresh to ensure fresh Twitter data for bi-weekly discovery.
     
     Returns:
         Dict mapping pool_name to social_map_path for pools that ran
     """
-    from datetime import timezone, date, timedelta
+    from datetime import timezone
     
     now = datetime.now(timezone.utc)
-    
-    # Only run on Sundays
-    if now.weekday() != 6:
-        bt.logging.debug("Not Sunday - skipping social discovery")
-        return {}
-    
-    # Only run every 2 weeks (reference: November 09, 2025)
-    reference_date = date(2025, 11, 9)
     today = now.date()
-    days_since_reference = (today - reference_date).days
-    if days_since_reference % 14 != 0:
-        next_run_date = today + timedelta(days=14 - (days_since_reference % 14))
-        bt.logging.debug(f"Skipping social discovery. Next run: {next_run_date}")
-        return {}
-    
-    bt.logging.info("🔄 Bi-weekly discovery: forcing cache refresh for fresh Twitter data")
     
     pool_manager = PoolManager()
     results = {}
+    pools_scheduled_today = []
     
     for pool_name, config in pool_manager.pools.items():
         if not config.get('active', True):
             continue
         
-        # Check if this specific pool needs update
+        # Check if this pool is scheduled to run today
+        date_offset = config.get('date_offset', 0)
+        if not should_run_discovery_today(date_offset, DISCOVERY_REFERENCE_DATE):
+            continue
+        
+        pools_scheduled_today.append(pool_name)
+        
+        # Check if this specific pool needs update (hasn't run today)
         social_maps_dir = Path(__file__).parent / "social_maps" / pool_name
         needs_update = False
         
@@ -695,7 +715,10 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
         # Only run if needed
         if needs_update:
             try:
-                bt.logging.info(f"Running discovery for {pool_name} (no map from today)")
+                bt.logging.info(
+                    f"Running discovery for {pool_name} "
+                    f"(offset={date_offset}, no map from today)"
+                )
                 social_map_path = await discover_social_network(
                     pool_name=pool_name, 
                     force_cache_refresh=True,
@@ -704,6 +727,16 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
                 results[pool_name] = social_map_path
             except Exception as e:
                 bt.logging.error(f"Discovery failed for {pool_name}: {e}")
+        else:
+            bt.logging.debug(f"Pool {pool_name} already has map from today, skipping")
+    
+    if pools_scheduled_today:
+        bt.logging.info(
+            f"🔄 Bi-weekly discovery check: {len(pools_scheduled_today)} pool(s) scheduled today: "
+            f"{', '.join(pools_scheduled_today)}"
+        )
+    else:
+        bt.logging.debug("No pools scheduled for discovery today")
     
     return results
 

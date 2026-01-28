@@ -43,6 +43,7 @@ class PoolManager:
                     'min_interaction_weight': pool_data.get('min_interaction_weight', 0),
                     'min_tweets': pool_data.get('min_tweets', 1),
                     'lang': pool_data.get('lang'),
+                    'date_offset': pool_data.get('date_offset', 0),
                     'active': True
                 }
             
