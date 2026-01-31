@@ -114,11 +114,20 @@ def create_tweet_payload(
         # Process tweets (targets already calculated)
         processed_tweets = []
         unique_creators = set()
+        views_zero_count = 0
+        views_nonzero_count = 0
         
         for idx, tweet in enumerate(tweets_with_targets):
             author = tweet.get("author", "")
             tweet_id = tweet.get("tweet_id", "")
             unique_creators.add(author)
+            
+            # Track views_count statistics for debugging
+            views_count = tweet.get("views_count", 0)
+            if views_count == 0:
+                views_zero_count += 1
+            else:
+                views_nonzero_count += 1
             
             processed_tweets.append({
                 # Tweet metadata
@@ -134,7 +143,7 @@ def create_tweet_payload(
                 "reply_count": tweet.get("reply_count", 0),
                 "quote_count": tweet.get("quote_count", 0),
                 "bookmark_count": tweet.get("bookmark_count", 0),
-                "views_count": tweet.get("views_count", 0),
+                "views_count": views_count,
                 
                 # Scoring data
                 "score": tweet.get("score", 0.0),
@@ -162,6 +171,21 @@ def create_tweet_payload(
             },
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+        
+        # Log views_count statistics for debugging views zeroing issue
+        if views_zero_count > 0 or views_nonzero_count > 0:
+            total_views = views_zero_count + views_nonzero_count
+            zero_pct = (views_zero_count / total_views * 100) if total_views > 0 else 0
+            bt.logging.info(
+                f"Brief {brief_id} views_count stats: "
+                f"{views_zero_count}/{total_views} tweets with 0 views ({zero_pct:.1f}%), "
+                f"{views_nonzero_count} with >0 views"
+            )
+            if views_zero_count == total_views and total_views > 0:
+                bt.logging.warning(
+                    f"⚠️  Brief {brief_id}: ALL {total_views} tweets have views_count=0! "
+                    f"This may indicate a data issue."
+                )
         
         return payload
         

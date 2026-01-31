@@ -630,11 +630,23 @@ class TwitterClient:
             # Retweets typically don't have view counts, only original tweets
             views_obj = tweet_result.get('views', {})
             views_count = 0
+            views_state = views_obj.get('state', 'Unknown')
             if views_obj.get('count'):
                 try:
                     views_count = int(views_obj['count'])
                 except (ValueError, TypeError):
                     views_count = 0
+            
+            # Log when views are missing or 0 for debugging
+            if views_count == 0 and tweet_result.get('rest_id'):
+                tweet_id = tweet_result.get('rest_id')
+                # Only log occasionally to avoid spam (1% of tweets)
+                import random
+                if random.random() < 0.01:
+                    bt.logging.debug(
+                        f"Tweet {tweet_id} has views_count=0 (state={views_state}, "
+                        f"has_views_obj={bool(views_obj)})"
+                    )
             
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
