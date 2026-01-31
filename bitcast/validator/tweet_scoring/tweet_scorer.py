@@ -310,27 +310,11 @@ def score_tweets_for_pool(
                 member_tweets.extend(tweets)
     
     fetch_time = time.time() - fetch_start
-    
-    # Track views_count statistics for debugging
-    tweets_with_zero_views = sum(1 for t in member_tweets if t.get('views_count', 0) == 0)
-    tweets_with_nonzero_views = len(member_tweets) - tweets_with_zero_views
-    
     bt.logging.info(
         f"  → Fetched {len(member_tweets)} tweets from "
         f"{len(active_members) - len(failed_members)}/{len(active_members)} members "
         f"({fetch_time:.1f}s)"
     )
-    
-    if len(member_tweets) > 0:
-        zero_pct = (tweets_with_zero_views / len(member_tweets) * 100)
-        bt.logging.debug(
-            f"  → Views stats: {tweets_with_zero_views}/{len(member_tweets)} "
-            f"tweets with 0 views ({zero_pct:.1f}%)"
-        )
-        if zero_pct > 80:
-            bt.logging.warning(
-                f"⚠️  {zero_pct:.1f}% of fetched tweets have views_count=0 for brief {brief_id}"
-            )
     
     if failed_members:
         bt.logging.debug(
