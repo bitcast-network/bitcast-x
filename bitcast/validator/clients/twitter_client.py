@@ -451,9 +451,11 @@ class TwitterClient:
         for tweet in result['tweets']:
             text_lower = tweet['text'].lower()
             
-            # Check if tweet contains any keyword
+            # Check if tweet contains any keyword with exact matching
+            # Hashtags/cashtags: use trailing word boundary only (# and $ are non-word chars)
+            # Regular keywords: use word boundaries on both ends
             has_keyword = any(
-                kw in text_lower if kw.startswith(('#', '$'))
+                bool(re.search(re.escape(kw) + r'\b', text_lower)) if kw.startswith(('#', '$'))
                 else bool(re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
                 for kw in keywords_lower
             )
