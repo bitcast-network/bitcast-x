@@ -4,7 +4,7 @@ import bittensor as bt
 from diskcache import Cache
 from bitcast.validator.utils.config import CACHE_DIRS, CACHE_ROOT
 from bitcast.validator.reward_engine.utils import BriefsCache
-from bitcast.validator.utils.twitter_cache import TwitterCache
+from bitcast.validator.utils.twitter_cache import TimelineCache
 
 def clear_all_caches():
     """Clear all cache directories and instances."""
@@ -64,12 +64,12 @@ def clear_expired_briefs_cache():
 
 
 def clear_twitter_cache():
-    """Clear Twitter cache."""
-    bt.logging.info("Clearing Twitter cache")
+    """Clear timeline cache (legacy Twitter user timeline cache)."""
+    bt.logging.info("Clearing timeline cache")
     try:
-        if TwitterCache._cache:
-            TwitterCache._cache.clear()
-            bt.logging.info("Successfully cleared Twitter cache")
+        if TimelineCache._cache:
+            TimelineCache._cache.clear()
+            bt.logging.info("Successfully cleared timeline cache")
         else:
             bt.logging.warning("Twitter cache not initialized")
     except Exception as e:
@@ -77,12 +77,12 @@ def clear_twitter_cache():
         raise
 
 def clear_expired_twitter_cache():
-    """Clear expired Twitter cache entries."""
-    bt.logging.info("Clearing expired Twitter cache entries")
+    """Clear expired timeline cache entries."""
+    bt.logging.info("Clearing expired timeline cache entries")
     try:
-        if TwitterCache._cache:
-            TwitterCache._cache.expire()
-            bt.logging.info("Successfully cleared expired Twitter cache entries")
+        if TimelineCache._cache:
+            TimelineCache._cache.expire()
+            bt.logging.info("Successfully cleared expired timeline cache entries")
         else:
             bt.logging.warning("Twitter cache not initialized")
     except Exception as e:

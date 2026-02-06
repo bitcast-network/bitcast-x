@@ -282,12 +282,18 @@ class RapidAPIProvider(TwitterProvider):
                             quoted_user = match.group(1).lower()
             
             # Extract actual author from core.user_results
+            # Different structure for search results vs user timeline
             author = None
             try:
-                author = (
-                    tweet_result['core']['user_results']['result']['legacy']['screen_name']
-                    .lower()
-                )
+                user_result = tweet_result['core']['user_results']['result']
+                
+                # Try search results structure first (has nested 'core')
+                if 'core' in user_result:
+                    author = user_result['core']['screen_name'].lower()
+                # Fall back to user timeline structure (has 'legacy')
+                elif 'legacy' in user_result:
+                    author = user_result['legacy']['screen_name'].lower()
+                    
             except (KeyError, AttributeError, TypeError):
                 # Author extraction failed - leave as None
                 # Caller decides whether fallback is safe based on endpoint context
@@ -301,6 +307,16 @@ class RapidAPIProvider(TwitterProvider):
             in_reply_to_user = legacy.get('in_reply_to_screen_name')
             if in_reply_to_user:
                 in_reply_to_user = in_reply_to_user.lower()
+            
+            # Extract views count (at tweet_result level, not in legacy)
+            # Views object format: {"count": "123456", "state": "EnabledWithCount"} or {"state": "Enabled"}
+            views_obj = tweet_result.get('views', {})
+            views_count = 0
+            if views_obj.get('count'):
+                try:
+                    views_count = int(views_obj['count'])
+                except (ValueError, TypeError):
+                    views_count = 0
             
             return {
                 'tweet_id': tweet_result.get('rest_id', ''),
@@ -318,6 +334,7 @@ class RapidAPIProvider(TwitterProvider):
                 'reply_count': legacy.get('reply_count', 0),
                 'quote_count': legacy.get('quote_count', 0),
                 'bookmark_count': legacy.get('bookmark_count', 0),
+                'views_count': views_count,
                 'in_reply_to_status_id': in_reply_to_status_id,
                 'in_reply_to_user': in_reply_to_user
             }
@@ -509,3 +526,229 @@ class RapidAPIProvider(TwitterProvider):
             time.sleep(self.rate_limit_delay)  # Rate limiting
         
         return tweets, user_info, api_fetch_succeeded
+    
+    def search_tweets(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort: str = "latest"
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Search for tweets using X-style query syntax via RapidAPI.
+        
+        Args:
+            query: Search query string with X-style operators
+            max_results: Maximum number of tweets to return (default: 100)
+            sort: Sort order - "latest" or "top" (default: "latest")
+        
+        Returns:
+            Tuple of (tweets_list, api_succeeded)
+        """
+        url = f"{self.base_url}/search/"
+        params = {
+            "query": query,
+            "section": sort
+        }
+        
+        tweets = []
+        cursor = None
+        api_succeeded = False
+        # Calculate max pages based on typical page size (~20 tweets per page)
+        # Add buffer for safety
+        max_pages = max(10, (max_results + 19) // 20)
+        page_count = 0
+        
+        while len(tweets) < max_results and page_count < max_pages:
+            page_count += 1
+            if cursor:
+                params["cursor"] = cursor
+            
+            try:
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    bt.logging.warning(f"Search API error {response.status_code}")
+                    break
+                
+                response.raise_for_status()
+                data = response.json()
+                api_succeeded = True
+                
+                # Extract timeline data - search uses different structure
+                timeline = data.get('data', {}).get('search_by_raw_query', {}).get('search_timeline', {}).get('timeline', {})
+                if not timeline:
+                    # Try alternate structure
+                    timeline = data.get('search_timeline', {}).get('timeline', {})
+                
+                instructions = timeline.get('instructions', [])
+                
+                entries = []
+                for instruction in instructions:
+                    # RapidAPI uses '__typename' not 'type' in search results
+                    inst_type = instruction.get('__typename') or instruction.get('type')
+                    if inst_type == 'TimelineAddEntries':
+                        entries.extend(instruction.get('entries', []))
+                
+                cursor = None
+                
+                for entry in entries:
+                    # RapidAPI uses snake_case 'entry_id' not camelCase 'entryId'
+                    entry_id = entry.get('entry_id', entry.get('entryId', ''))
+                    content = entry.get('content', {})
+                    
+                    # Handle cursor entries
+                    if entry_id.startswith('cursor-') or content.get('cursorType') == 'Bottom':
+                        cursor_value = content.get('value')
+                        if cursor_value:
+                            cursor = cursor_value
+                        continue
+                    
+                    # Handle tweet entries - RapidAPI search structure
+                    # Path: entry['content']['content']['tweet_results']['result']
+                    try:
+                        content_typename = content.get('__typename')
+                        
+                        if content_typename == 'TimelineTimelineItem':
+                            # Search results use: content.content.tweet_results
+                            inner_content = content.get('content', {})
+                            if inner_content.get('__typename') == 'TimelineTweet':
+                                tweet_results = inner_content.get('tweet_results', {})
+                                tweet_result = tweet_results.get('result')
+                                
+                                if tweet_result:
+                                    tweet_data = self._parse_tweet(tweet_result)
+                                    
+                                    if tweet_data and tweet_data.get('tweet_id'):
+                                        tweets.append(tweet_data)
+                                        
+                                        if len(tweets) >= max_results:
+                                            cursor = None
+                                            break
+                        elif content_typename == 'TimelineItem':
+                            # User timeline uses: content.itemContent.tweet_results  
+                            item_content = content.get('itemContent', {})
+                            if item_content.get('itemType') == 'TimelineTweet':
+                                tweet_results = item_content.get('tweet_results', {})
+                                tweet_result = tweet_results.get('result')
+                                
+                                if tweet_result:
+                                    tweet_data = self._parse_tweet(tweet_result)
+                                    
+                                    if tweet_data and tweet_data.get('tweet_id'):
+                                        tweets.append(tweet_data)
+                                        
+                                        if len(tweets) >= max_results:
+                                            cursor = None
+                                            break
+                    except (KeyError, AttributeError) as e:
+                        continue
+                
+                if not cursor:
+                    break
+                    
+                time.sleep(self.rate_limit_delay)
+                
+            except Exception as e:
+                bt.logging.error(f"Search API error: {e}")
+                break
+        
+        bt.logging.info(f"Search returned {len(tweets)} tweets for query: {query[:50]}...")
+        return tweets, api_succeeded
+    
+    def get_retweeters(
+        self,
+        tweet_id: str,
+        max_results: int = 100
+    ) -> Tuple[List[str], bool]:
+        """
+        Get list of usernames who retweeted a specific tweet via RapidAPI.
+        
+        Args:
+            tweet_id: The tweet ID to get retweeters for
+            max_results: Maximum number of retweeters to return (default: 100)
+        
+        Returns:
+            Tuple of (usernames_list, api_succeeded)
+        """
+        url = f"{self.base_url}/tweet/retweeters"
+        params = {"tweet_id": tweet_id}
+        
+        usernames = []
+        cursor = None
+        api_succeeded = False
+        max_pages = 3  # Limit pagination for retweeters
+        page_count = 0
+        
+        while len(usernames) < max_results and page_count < max_pages:
+            page_count += 1
+            if cursor:
+                params["cursor"] = cursor
+            
+            try:
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    bt.logging.warning(f"Retweeters API error {response.status_code}")
+                    break
+                
+                response.raise_for_status()
+                data = response.json()
+                api_succeeded = True
+                
+                # Extract retweeters from response
+                # RapidAPI structure: data.retweeters_timeline.timeline.instructions
+                timeline = data.get('data', {}).get('retweeters_timeline', {}).get('timeline', {})
+                if not timeline:
+                    # Try alternate structure
+                    timeline = data.get('retweeters_timeline', {}).get('timeline', {})
+                
+                instructions = timeline.get('instructions', [])
+                
+                entries = []
+                for instruction in instructions:
+                    # RapidAPI uses '__typename' not 'type'
+                    inst_type = instruction.get('__typename') or instruction.get('type')
+                    if inst_type == 'TimelineAddEntries':
+                        entries.extend(instruction.get('entries', []))
+                
+                cursor = None
+                
+                for entry in entries:
+                    # RapidAPI uses snake_case 'entry_id' or camelCase 'entryId'
+                    entry_id = entry.get('entry_id', entry.get('entryId', ''))
+                    content = entry.get('content', {})
+                    
+                    # Handle cursor entries
+                    if entry_id.startswith('cursor-') or content.get('cursorType') == 'Bottom':
+                        cursor_value = content.get('value')
+                        if cursor_value:
+                            cursor = cursor_value
+                        continue
+                    
+                    # Handle user entries
+                    if entry_id.startswith('user-'):
+                        try:
+                            user_result = (
+                                content.get('itemContent', {}).get('user_results', {}).get('result')
+                            )
+                            username = user_result.get('legacy', {}).get('screen_name', '')
+                            if username:
+                                usernames.append(username.lower())
+                                
+                                if len(usernames) >= max_results:
+                                    cursor = None
+                                    break
+                        except (KeyError, AttributeError):
+                            continue
+                
+                if not cursor:
+                    break
+                    
+                time.sleep(self.rate_limit_delay)
+                
+            except Exception as e:
+                bt.logging.error(f"Retweeters API error for tweet {tweet_id}: {e}")
+                break
+        
+        bt.logging.debug(f"Found {len(usernames)} retweeters for tweet {tweet_id}")
+        return usernames, api_succeeded

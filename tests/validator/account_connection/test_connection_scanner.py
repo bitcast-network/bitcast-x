@@ -1,12 +1,7 @@
 """
-Integration tests for ConnectionScanner.
+Tests for ConnectionScanner (search-based).
 
-IMPORTANT: These tests use isolated temporary databases to ensure they
-NEVER touch the production database at:
-    bitcast/validator/account_connection/connections.db
-
-All ConnectionScanner instances in tests are created with db_path parameter
-pointing to temporary files that are cleaned up after each test.
+Uses isolated temporary databases to ensure production database is never touched.
 """
 
 import pytest
@@ -16,303 +11,237 @@ from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta, timezone
 from bitcast.validator.account_connection.connection_scanner import (
     ConnectionScanner,
-    get_active_pool_members
+    get_social_map_accounts
 )
-from bitcast.validator.account_connection.connection_db import ConnectionDatabase
 
 
-class TestGetActivePoolMembers:
-    """Test social map integration."""
+class TestGetSocialMapAccounts:
+    """Test social map loading."""
     
-    def test_get_active_members_from_real_pool(self):
-        """Test loading active members from existing tao pool."""
+    def test_get_accounts_from_real_pool(self):
+        """Test loading accounts from existing tao pool."""
         try:
-            # This will only work if social_discovery has been run
-            active_members = get_active_pool_members("tao")
-            assert isinstance(active_members, list)
-            # Should have at least some members
-            if active_members:
-                assert all(isinstance(m, str) for m in active_members)
-                assert all(m.islower() for m in active_members)  # All lowercase
+            accounts = get_social_map_accounts("tao")
+            assert isinstance(accounts, set)
+            if accounts:
+                assert all(isinstance(a, str) for a in accounts)
+                assert all(a.islower() for a in accounts)
         except ValueError as e:
-            # Expected if no social map exists yet
             assert "No social map" in str(e) or "not found" in str(e)
     
     def test_invalid_pool_name(self):
-        """Test error handling for invalid pool."""
-        with pytest.raises(ValueError) as exc_info:
-            get_active_pool_members("nonexistent_pool")
-        assert "not found" in str(exc_info.value).lower()
+        with pytest.raises(ValueError):
+            get_social_map_accounts("nonexistent_pool")
     
     def test_pool_name_case_insensitive(self):
-        """Test that pool names are case-insensitive."""
         try:
-            members1 = get_active_pool_members("tao")
-            members2 = get_active_pool_members("TAO")
-            members3 = get_active_pool_members("Tao")
-            # If social map exists, all should return same results
-            assert members1 == members2 == members3
+            a1 = get_social_map_accounts("tao")
+            a2 = get_social_map_accounts("TAO")
+            assert a1 == a2
         except ValueError:
-            # Expected if no social map exists
             pass
 
 
 class TestConnectionScanner:
-    """Test connection scanner functionality."""
+    """Test search-based connection scanner."""
     
     @pytest.fixture
     def temp_db_path(self):
-        """Provide a temporary database path for tests."""
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = Path(f.name)
         yield db_path
-        # Cleanup
         if db_path.exists():
             db_path.unlink()
     
     def test_scanner_initialization(self, temp_db_path):
-        """Test scanner can be initialized."""
         scanner = ConnectionScanner(lookback_days=7, db_path=temp_db_path)
         
         assert scanner.lookback_days == 7
         assert scanner.twitter_client is not None
         assert scanner.database is not None
         assert scanner.tag_parser is not None
+        assert scanner.search_tag == '@bitcast'
     
-    def test_filter_recent_tweets_empty(self, temp_db_path):
-        """Test filtering with no tweets."""
+    def test_build_query(self, temp_db_path):
+        scanner = ConnectionScanner(lookback_days=7, db_path=temp_db_path)
+        query = scanner._build_query()
+        
+        assert '@bitcast' in query
+        assert 'since:' in query
+    
+    def test_extract_connections_from_tweets(self, temp_db_path):
+        """Test extracting tags from search results filtered by social map."""
         scanner = ConnectionScanner(db_path=temp_db_path)
-        result = scanner.filter_recent_tweets([])
-        assert result == []
-    
-    def test_filter_recent_tweets_within_range(self, temp_db_path):
-        """Test filtering keeps recent tweets."""
-        scanner = ConnectionScanner(lookback_days=7, db_path=temp_db_path)
         
-        # Create tweet from 3 days ago
-        recent_date = datetime.now(timezone.utc) - timedelta(days=3)
-        tweets = [
-            {
-                'tweet_id': 123,
-                'text': 'Test tweet',
-                'created_at': recent_date.isoformat()
-            }
-        ]
-        
-        result = scanner.filter_recent_tweets(tweets)
-        assert len(result) == 1
-        assert result[0]['tweet_id'] == 123
-    
-    def test_filter_recent_tweets_outside_range(self, temp_db_path):
-        """Test filtering removes old tweets."""
-        scanner = ConnectionScanner(lookback_days=7, db_path=temp_db_path)
-        
-        # Create tweet from 10 days ago (outside range)
-        old_date = datetime.now(timezone.utc) - timedelta(days=10)
-        tweets = [
-            {
-                'tweet_id': 123,
-                'text': 'Old tweet',
-                'created_at': old_date.isoformat()
-            }
-        ]
-        
-        result = scanner.filter_recent_tweets(tweets)
-        assert len(result) == 0
-    
-    def test_filter_recent_tweets_mixed(self, temp_db_path):
-        """Test filtering with mix of recent and old tweets."""
-        scanner = ConnectionScanner(lookback_days=7, db_path=temp_db_path)
-        
-        recent_date = datetime.now(timezone.utc) - timedelta(days=3)
-        old_date = datetime.now(timezone.utc) - timedelta(days=10)
+        pool_accounts = {'alice', 'bob', 'charlie'}
         
         tweets = [
             {
-                'tweet_id': 1,
-                'text': 'Recent tweet',
-                'created_at': recent_date.isoformat()
+                'tweet_id': '111',
+                'author': 'alice',
+                'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
             },
             {
-                'tweet_id': 2,
-                'text': 'Old tweet',
-                'created_at': old_date.isoformat()
+                'tweet_id': '222',
+                'author': 'bob',
+                'text': '@bitcast bitcast-xabc123',
             },
             {
-                'tweet_id': 3,
-                'text': 'Another recent tweet',
-                'created_at': (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-            }
+                'tweet_id': '333',
+                'author': 'unknown_user',  # Not in social map
+                'text': '@bitcast bitcast-hk:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
+            },
+            {
+                'tweet_id': '444',
+                'author': 'charlie',
+                'text': '@bitcast no tags here just chatting',
+            },
         ]
         
-        result = scanner.filter_recent_tweets(tweets)
-        assert len(result) == 2
-        assert result[0]['tweet_id'] == 1
-        assert result[1]['tweet_id'] == 3
+        connections = scanner._extract_connections_from_tweets(tweets, pool_accounts)
+        
+        # Should find 2 connections (alice and bob), not unknown_user or charlie (no tag)
+        assert len(connections) == 2
+        
+        usernames = {c['username'] for c in connections}
+        assert usernames == {'alice', 'bob'}
+        
+        alice_conn = next(c for c in connections if c['username'] == 'alice')
+        assert alice_conn['tag'] == 'bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq'
+        assert alice_conn['tweet_id'] == '111'
+        
+        bob_conn = next(c for c in connections if c['username'] == 'bob')
+        assert bob_conn['tag'] == 'bitcast-xabc123'
+    
+    def test_extract_connections_skips_retweets(self, temp_db_path):
+        scanner = ConnectionScanner(db_path=temp_db_path)
+        
+        tweets = [
+            {
+                'tweet_id': '111',
+                'author': 'alice',
+                'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                'retweeted_user': 'someone',  # This is a retweet
+            },
+        ]
+        
+        connections = scanner._extract_connections_from_tweets(tweets, {'alice'})
+        assert len(connections) == 0
+    
+    def test_extract_connections_multiple_tags_in_tweet(self, temp_db_path):
+        scanner = ConnectionScanner(db_path=temp_db_path)
+        
+        tweets = [
+            {
+                'tweet_id': '111',
+                'author': 'alice',
+                'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq bitcast-xabc123',
+            },
+        ]
+        
+        connections = scanner._extract_connections_from_tweets(tweets, {'alice'})
+        assert len(connections) == 2
     
     @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
-    def test_scan_account_with_tags(self, mock_twitter_client, temp_db_path):
-        """Test scanning account that has tags in tweets."""
-        # Setup mock
-        mock_client_instance = Mock()
-        mock_twitter_client.return_value = mock_client_instance
+    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
+    @pytest.mark.asyncio
+    async def test_scan_pool(self, mock_get_accounts, mock_twitter_cls, temp_db_path):
+        """Test full pool scan flow."""
+        mock_get_accounts.return_value = {'alice', 'bob'}
         
-        recent_date = datetime.now(timezone.utc) - timedelta(days=1)
-        mock_client_instance.fetch_user_tweets.return_value = {
-            'tweets': [
-                {
-                    'tweet_id': 123456789,
-                    'text': 'Check out bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq for more info',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'testuser'  # Author must match scanned username
-                }
-            ]
+        mock_client = Mock()
+        mock_twitter_cls.return_value = mock_client
+        
+        # Dual-sort search results
+        mock_client.search_tweets.side_effect = [
+            {
+                'tweets': [
+                    {
+                        'tweet_id': '111',
+                        'author': 'alice',
+                        'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                    },
+                ],
+                'api_succeeded': True,
+            },
+            {
+                'tweets': [
+                    {
+                        'tweet_id': '111',  # Duplicate from "top" sort
+                        'author': 'alice',
+                        'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                    },
+                    {
+                        'tweet_id': '222',
+                        'author': 'bob',
+                        'text': '@bitcast bitcast-xtest123',
+                    },
+                ],
+                'api_succeeded': True,
+            },
+        ]
+        
+        scanner = ConnectionScanner(db_path=temp_db_path)
+        scanner.twitter_client = mock_client
+        
+        stats = await scanner.scan_pool('tao', publish=False)
+        
+        assert stats['tags_found'] == 2
+        assert stats['new_connections'] == 2
+        assert stats['tweets_scanned'] == 2  # Deduplicated
+        
+        # Search called twice (latest + top)
+        assert mock_client.search_tweets.call_count == 2
+    
+    @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
+    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
+    @pytest.mark.asyncio
+    async def test_scan_pool_no_results(self, mock_get_accounts, mock_twitter_cls, temp_db_path):
+        mock_get_accounts.return_value = {'alice'}
+        
+        mock_client = Mock()
+        mock_twitter_cls.return_value = mock_client
+        mock_client.search_tweets.return_value = {
+            'tweets': [],
+            'api_succeeded': True,
         }
         
         scanner = ConnectionScanner(db_path=temp_db_path)
-        scanner.twitter_client = mock_client_instance
+        scanner.twitter_client = mock_client
         
-        found_tags = scanner.scan_account("testuser")
+        stats = await scanner.scan_pool('tao', publish=False)
         
-        assert len(found_tags) == 1
-        assert found_tags[0][0] == 123456789  # tweet_id
-        assert found_tags[0][1] == "HK"  # tag_type
-        assert found_tags[0][2] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"  # full_tag
+        assert stats['tags_found'] == 0
+        assert stats['new_connections'] == 0
     
     @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
-    def test_scan_account_no_tags(self, mock_twitter_client, temp_db_path):
-        """Test scanning account with no tags."""
-        # Setup mock
-        mock_client_instance = Mock()
-        mock_twitter_client.return_value = mock_client_instance
+    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
+    @pytest.mark.asyncio
+    async def test_scan_pool_api_failure(self, mock_get_accounts, mock_twitter_cls, temp_db_path):
+        mock_get_accounts.return_value = {'alice'}
         
-        recent_date = datetime.now(timezone.utc) - timedelta(days=1)
-        mock_client_instance.fetch_user_tweets.return_value = {
-            'tweets': [
-                {
-                    'tweet_id': 123456789,
-                    'text': 'Just a regular tweet with no tags',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'testuser'
-                }
-            ]
+        mock_client = Mock()
+        mock_twitter_cls.return_value = mock_client
+        mock_client.search_tweets.return_value = {
+            'tweets': [],
+            'api_succeeded': False,
         }
         
         scanner = ConnectionScanner(db_path=temp_db_path)
-        scanner.twitter_client = mock_client_instance
+        scanner.twitter_client = mock_client
         
-        found_tags = scanner.scan_account("testuser")
+        stats = await scanner.scan_pool('tao', publish=False)
         
-        assert len(found_tags) == 0
-    
-    @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
-    def test_scan_account_filters_wrong_author(self, mock_twitter_client, temp_db_path):
-        """Test that TwitterClient filters out tweets from other authors (e.g., replies/mentions)."""
-        # Setup mock
-        mock_client_instance = Mock()
-        mock_twitter_client.return_value = mock_client_instance
-        
-        recent_date = datetime.now(timezone.utc) - timedelta(days=1)
-        # Mock TwitterClient behavior: it only returns tweets from the queried user
-        # (filters out wrong authors and missing authors)
-        mock_client_instance.fetch_user_tweets.return_value = {
-            'tweets': [
-                {
-                    'tweet_id': 111,
-                    'text': 'My tweet with bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'testuser'  # Correct author - TwitterClient returns this
-                }
-                # TwitterClient filters out tweet 222 (wrong author) and tweet 333 (no author)
-            ]
-        }
-        
-        scanner = ConnectionScanner(db_path=temp_db_path)
-        scanner.twitter_client = mock_client_instance
-        
-        found_tags = scanner.scan_account("testuser")
-        
-        # Should only find 1 tag (from tweet 111)
-        # TwitterClient already filtered out tweets from other users or without author
-        assert len(found_tags) == 1
-        assert found_tags[0][0] == 111
-        assert found_tags[0][2] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
-    
-    @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
-    def test_scan_account_api_error(self, mock_twitter_client, temp_db_path):
-        """Test handling of API errors during account scan."""
-        # Setup mock to raise exception
-        mock_client_instance = Mock()
-        mock_twitter_client.return_value = mock_client_instance
-        mock_client_instance.fetch_user_tweets.side_effect = Exception("API Error")
-        
-        scanner = ConnectionScanner(db_path=temp_db_path)
-        scanner.twitter_client = mock_client_instance
-        
-        # Should not raise, should return empty list
-        found_tags = scanner.scan_account("testuser")
-        assert found_tags == []
-    
-    @patch('bitcast.validator.account_connection.connection_scanner.TwitterClient')
-    def test_scan_account_excludes_retweets(self, mock_twitter_client, temp_db_path):
-        """Test that retweets are excluded from scanning."""
-        # Setup mock
-        mock_client_instance = Mock()
-        mock_twitter_client.return_value = mock_client_instance
-        
-        recent_date = datetime.now(timezone.utc) - timedelta(days=1)
-        mock_client_instance.fetch_user_tweets.return_value = {
-            'tweets': [
-                {
-                    'tweet_id': 111,
-                    'text': 'Original tweet with bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'testuser',  # Author must match scanned username
-                    'retweeted_user': None  # Not a retweet
-                },
-                {
-                    'tweet_id': 222,
-                    'text': 'RT @someone: Check out bitcast-xxyz78900',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'someone',  # Different author (retweet)
-                    'retweeted_user': 'someone'  # This is a retweet
-                },
-                {
-                    'tweet_id': 333,
-                    'text': 'Another original with bitcast-hk:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
-                    'created_at': recent_date.isoformat(),
-                    'author': 'testuser',  # Author must match scanned username
-                    'retweeted_user': None  # Not a retweet
-                }
-            ]
-        }
-        
-        scanner = ConnectionScanner(db_path=temp_db_path)
-        scanner.twitter_client = mock_client_instance
-        
-        found_tags = scanner.scan_account("testuser")
-        
-        # Should find 2 tags (from tweets 111 and 333), but not from the retweet (222)
-        assert len(found_tags) == 2
-        assert found_tags[0][0] == 111  # First original tweet
-        assert found_tags[0][2] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
-        assert found_tags[1][0] == 333  # Second original tweet
-        assert found_tags[1][2] == "bitcast-hk:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
-        
-        # Verify retweet was NOT included
-        retweet_ids = [tag[0] for tag in found_tags]
-        assert 222 not in retweet_ids
-    
+        assert stats['tags_found'] == 0
+
     def test_store_connection_new(self):
-        """Test storing a new connection."""
-        # Use temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = Path(f.name)
         
         try:
             scanner = ConnectionScanner(db_path=db_path)
             
-            is_new = scanner.store_connection(
+            is_new = scanner.database.upsert_connection(
                 pool_name="test",
                 tweet_id=123456789,
                 tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",
@@ -321,7 +250,6 @@ class TestConnectionScanner:
             
             assert is_new is True
             
-            # Verify it's in database
             connections = scanner.database.get_connections_by_account("testuser", pool_name="test")
             assert len(connections) == 1
             assert connections[0]['tag'] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
@@ -330,36 +258,29 @@ class TestConnectionScanner:
                 db_path.unlink()
     
     def test_store_connection_duplicate(self):
-        """Test updating an existing connection."""
-        # Use temporary database
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = Path(f.name)
         
         try:
             scanner = ConnectionScanner(db_path=db_path)
             
-            # Store first time
-            is_new1 = scanner.store_connection(
+            is_new1 = scanner.database.upsert_connection(
                 pool_name="test",
                 tweet_id=123456789,
                 tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",
                 account_username="testuser"
             )
             
-            # Store again (should update)
-            is_new2 = scanner.store_connection(
+            is_new2 = scanner.database.upsert_connection(
                 pool_name="test",
-                tweet_id=987654321,  # Different tweet
-                tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",  # Same tag
-                account_username="testuser"  # Same user
+                tweet_id=987654321,
+                tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",
+                account_username="testuser"
             )
             
             assert is_new1 is True
             assert is_new2 is False
-            
-            # Should still be only one connection
             assert scanner.database.get_connection_count() == 1
         finally:
             if db_path.exists():
                 db_path.unlink()
-

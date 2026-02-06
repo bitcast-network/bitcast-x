@@ -466,3 +466,74 @@ class TwitterClient:
                     return True
         
         return False
+    
+    def search_tweets(self, query: str, max_results: int = 100, sort: str = "latest") -> Dict[str, Any]:
+        """
+        Search for tweets using X-style query syntax.
+        
+        Supports standard Twitter search operators:
+        - Keywords: "bitcoin"
+        - Hashtags: "#bitcast"
+        - Mentions: "@username"
+        - Quoted tweet: "quoted_tweet_id:123456"
+        - Date filters: "since:2026-01-01 until:2026-01-15"
+        
+        Args:
+            query: Search query string with X-style operators
+            max_results: Maximum number of tweets to return (default: 100)
+            sort: Sort order - "latest" or "top" (default: "latest")
+        
+        Returns:
+            Dict with 'tweets' list and 'api_succeeded' boolean
+        """
+        try:
+            tweets, api_succeeded = self.provider.search_tweets(
+                query=query,
+                max_results=max_results,
+                sort=sort
+            )
+            
+            return {
+                'tweets': tweets,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Search failed for query '{query[:50]}...': {e}")
+            return {
+                'tweets': [],
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }
+    
+    def get_retweeters(self, tweet_id: str, max_results: int = 100) -> Dict[str, Any]:
+        """
+        Get list of usernames who retweeted a specific tweet.
+        
+        Args:
+            tweet_id: The tweet ID to get retweeters for
+            max_results: Maximum number of retweeters to return (default: 100)
+        
+        Returns:
+            Dict with 'retweeters' list (usernames) and 'api_succeeded' boolean
+        """
+        try:
+            usernames, api_succeeded = self.provider.get_retweeters(
+                tweet_id=tweet_id,
+                max_results=max_results
+            )
+            
+            return {
+                'retweeters': usernames,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Get retweeters failed for tweet {tweet_id}: {e}")
+            return {
+                'retweeters': [],
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }

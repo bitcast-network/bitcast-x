@@ -34,7 +34,8 @@ class RewardOrchestrator:
     async def calculate_rewards(
         self, 
         validator_self, 
-        uids: List[int]
+        uids: List[int],
+        thorough: bool = False,
     ) -> Tuple[np.ndarray, List[dict]]:
         """Main entry point for reward calculation workflow."""
         try:
@@ -88,7 +89,8 @@ class RewardOrchestrator:
                 await twitter_evaluator.score_briefs_for_monitoring(
                     briefs=scoring_briefs,
                     connected_accounts=connected_usernames,
-                    run_id=run_id
+                    run_id=run_id,
+                    thorough=thorough,
                 )
             
             # 6b. Process emission-phase briefs (rewards)
@@ -107,7 +109,8 @@ class RewardOrchestrator:
                 uid_account_mappings=valid_mappings,
                 connected_accounts=connected_usernames,
                 metagraph=validator_self.metagraph,
-                run_id=run_id
+                run_id=run_id,
+                thorough=thorough,
             )
                 
             # 7. Aggregate scores across platforms

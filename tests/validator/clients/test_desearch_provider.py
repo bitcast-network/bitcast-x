@@ -165,6 +165,33 @@ class TestDesearchProvider:
         assert tweet['reply_count'] == 8
         assert tweet['quote_count'] == 3
         assert tweet['bookmark_count'] == 5
+        assert tweet['views_count'] == 0  # Not in mock data, defaults to 0
+    
+    def test_parse_tweet_views_count(self):
+        """Test views_count extraction from Desearch.ai response."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        # Test with view_count field
+        desearch_tweet = {
+            'id': '111',
+            'text': 'Tweet with views',
+            'created_at': '2024-01-15T12:00:00Z',
+            'view_count': 54321,
+        }
+        tweet = provider._parse_tweet(desearch_tweet, "testuser")
+        assert tweet is not None
+        assert tweet['views_count'] == 54321
+        
+        # Test with views_count field (alternate name)
+        desearch_tweet = {
+            'id': '222',
+            'text': 'Tweet with views',
+            'created_at': '2024-01-15T12:00:00Z',
+            'views_count': 12345,
+        }
+        tweet = provider._parse_tweet(desearch_tweet, "testuser")
+        assert tweet is not None
+        assert tweet['views_count'] == 12345
     
     def test_parse_tweet_engagement_defaults(self):
         """Test engagement metrics default to 0 when missing."""
@@ -184,6 +211,7 @@ class TestDesearchProvider:
         assert tweet['reply_count'] == 0
         assert tweet['quote_count'] == 0
         assert tweet['bookmark_count'] == 0
+        assert tweet['views_count'] == 0
     
     def test_parse_tweet_retweet(self):
         """Test parsing retweet information."""
@@ -569,3 +597,148 @@ class TestDesearchProviderIntegration:
         assert tweets[0]['text'] == 'Test tweet'
         assert user_info['username'] == 'testuser'
         assert user_info['followers_count'] == 1000
+
+
+class TestDesearchProviderSearchTweets:
+    """Tests for search_tweets method."""
+    
+    @mock.patch('requests.get')
+    def test_search_tweets_success(self, mock_get):
+        """Test successful tweet search."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'tweets': [
+                {
+                    'id': 123456,
+                    'text': 'Found tweet about #bitcoin',
+                    'created_at': '2024-01-15T12:00:00Z',
+                    'user': {'username': 'testuser'},
+                    'like_count': 10,
+                    'retweet_count': 5
+                },
+                {
+                    'id': 789012,
+                    'text': 'Another #bitcoin tweet',
+                    'created_at': '2024-01-14T10:00:00Z',
+                    'user': {'username': 'otheruser'},
+                    'like_count': 20,
+                    'retweet_count': 8
+                }
+            ]
+        }
+        mock_get.return_value = mock_response
+        
+        tweets, success = provider.search_tweets("#bitcoin", max_results=100)
+        
+        assert success is True
+        assert len(tweets) == 2
+        assert tweets[0]['tweet_id'] == '123456'
+        assert tweets[0]['author'] == 'testuser'
+        assert tweets[1]['tweet_id'] == '789012'
+        assert tweets[1]['author'] == 'otheruser'
+    
+    @mock.patch('requests.get')
+    def test_search_tweets_empty_results(self, mock_get):
+        """Test search with no results."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'tweets': []}
+        mock_get.return_value = mock_response
+        
+        tweets, success = provider.search_tweets("#nonexistent", max_results=100)
+        
+        assert success is True
+        assert len(tweets) == 0
+    
+    @mock.patch('requests.get')
+    def test_search_tweets_api_error(self, mock_get):
+        """Test search with API error."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 500
+        mock_get.return_value = mock_response
+        
+        tweets, success = provider.search_tweets("#bitcoin", max_results=100)
+        
+        assert success is False
+        assert len(tweets) == 0
+
+
+class TestDesearchProviderGetRetweeters:
+    """Tests for get_retweeters method."""
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_success(self, mock_get):
+        """Test successful retweeters retrieval."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'retweeters': [
+                {'username': 'User1'},
+                {'username': 'User2'},
+                {'username': 'User3'}
+            ]
+        }
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        assert len(usernames) == 3
+        assert 'user1' in usernames  # Should be lowercased
+        assert 'user2' in usernames
+        assert 'user3' in usernames
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_empty(self, mock_get):
+        """Test retweeters with no results."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'retweeters': []}
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        assert len(usernames) == 0
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_api_error(self, mock_get):
+        """Test retweeters with API error."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 429  # Rate limit
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is False
+        assert len(usernames) == 0
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_list_format(self, mock_get):
+        """Test retweeters when API returns list of strings."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = ['User1', 'User2']
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        assert len(usernames) == 2
+        assert 'user1' in usernames
+        assert 'user2' in usernames

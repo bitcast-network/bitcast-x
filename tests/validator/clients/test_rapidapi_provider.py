@@ -150,6 +150,43 @@ class TestRapidAPIProvider:
         assert tweet['reply_count'] == 8
         assert tweet['quote_count'] == 3
         assert tweet['bookmark_count'] == 5
+        assert tweet['views_count'] == 0  # No views object provided
+    
+    def test_parse_tweet_views_count(self):
+        """Test views_count extraction from tweet_result.views.count."""
+        provider = RapidAPIProvider(api_key="test")
+        
+        tweet_result = {
+            'rest_id': '111',
+            'legacy': {
+                'full_text': 'Tweet with views',
+                'created_at': 'Mon Jan 15 12:00:00 +0000 2024',
+                'favorite_count': 10,
+                'retweet_count': 5,
+                'reply_count': 2,
+                'quote_count': 1,
+                'bookmark_count': 0,
+                'lang': 'en',
+                'entities': {'user_mentions': []}
+            },
+            'core': {
+                'user_results': {
+                    'result': {
+                        'legacy': {'screen_name': 'testuser'}
+                    }
+                }
+            },
+            'views': {'count': '98765', 'state': 'EnabledWithCount'}
+        }
+        
+        tweet = provider._parse_tweet(tweet_result)
+        assert tweet is not None
+        assert tweet['views_count'] == 98765
+        
+        # Test views without count (state only)
+        tweet_result['views'] = {'state': 'Enabled'}
+        tweet = provider._parse_tweet(tweet_result)
+        assert tweet['views_count'] == 0
     
     def test_parse_tweet_retweet(self):
         """Test parsing retweet information."""
@@ -513,3 +550,203 @@ class TestRapidAPIProviderIntegration:
         assert tweets[0]['text'] == 'Test tweet'
         assert user_info['username'] == 'testuser'
         assert user_info['followers_count'] == 1000
+
+
+class TestRapidAPIProviderSearchTweets:
+    """Tests for search_tweets method."""
+    
+    @mock.patch('requests.get')
+    def test_search_tweets_success(self, mock_get):
+        """Test successful tweet search."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'search_by_raw_query': {
+                    'search_timeline': {
+                        'timeline': {
+                            'instructions': [
+                                {
+                                    'type': 'TimelineAddEntries',
+                                    'entries': [
+                                        {
+                                            'entryId': 'tweet-123456',
+                                            'content': {
+                                                '__typename': 'TimelineItem',
+                                                'itemContent': {
+                                                    'itemType': 'TimelineTweet',
+                                                    'tweet_results': {
+                                                        'result': {
+                                                            'rest_id': '123456',
+                                                            'legacy': {
+                                                                'full_text': 'Found #bitcoin tweet',
+                                                                'created_at': 'Mon Jan 15 12:00:00 +0000 2024',
+                                                                'favorite_count': 10,
+                                                                'retweet_count': 5,
+                                                                'entities': {'user_mentions': []}
+                                                            },
+                                                            'core': {
+                                                                'user_results': {
+                                                                    'result': {
+                                                                        'legacy': {'screen_name': 'testuser'}
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        tweets, success = provider.search_tweets("#bitcoin", max_results=100)
+        
+        assert success is True
+        assert len(tweets) == 1
+        assert tweets[0]['tweet_id'] == '123456'
+        assert tweets[0]['author'] == 'testuser'
+    
+    @mock.patch('requests.get')
+    def test_search_tweets_empty(self, mock_get):
+        """Test search with no results."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'search_by_raw_query': {
+                    'search_timeline': {
+                        'timeline': {
+                            'instructions': []
+                        }
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        tweets, success = provider.search_tweets("#nonexistent", max_results=100)
+        
+        assert success is True
+        assert len(tweets) == 0
+    
+    @mock.patch('requests.get')
+    def test_search_tweets_api_error(self, mock_get):
+        """Test search with API error."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 500
+        mock_get.return_value = mock_response
+        
+        tweets, success = provider.search_tweets("#bitcoin", max_results=100)
+        
+        assert success is False
+        assert len(tweets) == 0
+
+
+class TestRapidAPIProviderGetRetweeters:
+    """Tests for get_retweeters method."""
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_success(self, mock_get):
+        """Test successful retweeters retrieval."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'retweeters_timeline': {
+                    'timeline': {
+                        'instructions': [
+                            {
+                                'type': 'TimelineAddEntries',
+                                'entries': [
+                                    {
+                                        'entryId': 'user-1',
+                                        'content': {
+                                            'itemContent': {
+                                                'user_results': {
+                                                    'result': {
+                                                        'legacy': {'screen_name': 'User1'}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    {
+                                        'entryId': 'user-2',
+                                        'content': {
+                                            'itemContent': {
+                                                'user_results': {
+                                                    'result': {
+                                                        'legacy': {'screen_name': 'User2'}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        assert len(usernames) == 2
+        assert 'user1' in usernames  # Should be lowercased
+        assert 'user2' in usernames
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_empty(self, mock_get):
+        """Test retweeters with no results."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'retweeters_timeline': {
+                    'timeline': {
+                        'instructions': []
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        assert len(usernames) == 0
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_api_error(self, mock_get):
+        """Test retweeters with API error."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 429  # Rate limit
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is False
+        assert len(usernames) == 0

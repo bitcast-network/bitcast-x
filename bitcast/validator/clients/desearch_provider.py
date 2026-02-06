@@ -252,6 +252,7 @@ class DesearchProvider(TwitterProvider):
             reply_count = desearch_data.get('reply_count', 0)
             quote_count = desearch_data.get('quote_count', 0)
             bookmark_count = desearch_data.get('bookmark_count', 0)
+            views_count = desearch_data.get('view_count', desearch_data.get('views_count', 0))
             
             # Extract retweet info
             is_retweet = desearch_data.get('is_retweet', False)
@@ -312,6 +313,7 @@ class DesearchProvider(TwitterProvider):
                 'reply_count': reply_count,
                 'quote_count': quote_count,
                 'bookmark_count': bookmark_count,
+                'views_count': views_count,
                 'in_reply_to_status_id': in_reply_to_status_id,
                 'in_reply_to_user': in_reply_to_user
             }
@@ -513,3 +515,262 @@ class DesearchProvider(TwitterProvider):
         except Exception as e:
             bt.logging.error(f"Desearch.ai API error for @{username}: {e}")
             return tweets, user_info, False
+    
+    def _parse_search_tweet(self, desearch_data: Dict) -> Optional[Dict]:
+        """
+        Parse Desearch.ai search API response into normalized tweet format.
+        
+        Unlike _parse_tweet, this extracts author from the tweet data itself
+        since search results include tweets from multiple users.
+        
+        Args:
+            desearch_data: Raw tweet object from Desearch.ai search API
+            
+        Returns:
+            Normalized tweet dict or None if parsing fails
+        """
+        try:
+            # Extract tweet data
+            tweet_id = str(desearch_data.get('id', ''))
+            if not tweet_id:
+                return None
+            
+            text = desearch_data.get('text', '')
+            if not text:
+                return None
+            
+            # Extract author from user object in search results
+            user_data = desearch_data.get('user', {})
+            author_username = user_data.get('username', '').lower() if user_data else ''
+            if not author_username:
+                # Try alternate field names
+                author_username = (
+                    user_data.get('screen_name', '') or
+                    desearch_data.get('username', '') or
+                    desearch_data.get('screen_name', '')
+                ).lower()
+            
+            if not author_username:
+                return None  # Can't use tweet without author
+            
+            created_at_iso = desearch_data.get('created_at', '')
+            
+            # Convert ISO 8601 to Twitter date format
+            created_at = self._convert_iso_to_twitter_date(created_at_iso)
+            
+            # Extract engagement metrics
+            like_count = desearch_data.get('like_count', 0)
+            retweet_count = desearch_data.get('retweet_count', 0)
+            reply_count = desearch_data.get('reply_count', 0)
+            quote_count = desearch_data.get('quote_count', 0)
+            bookmark_count = desearch_data.get('bookmark_count', 0)
+            views_count = desearch_data.get('view_count', desearch_data.get('views_count', 0))
+            
+            # Extract retweet info
+            is_retweet = desearch_data.get('is_retweet', False)
+            retweeted_user = None
+            retweeted_tweet_id = None
+            if is_retweet and desearch_data.get('retweet'):
+                retweet_data = desearch_data['retweet']
+                retweeted_tweet_id = str(retweet_data.get('id', ''))
+                retweet_user = retweet_data.get('user', {})
+                if retweet_user:
+                    retweeted_user = retweet_user.get('username', '').lower()
+            
+            # Extract quote info
+            quoted_user = None
+            quoted_tweet_id = desearch_data.get('quoted_status_id')
+            if quoted_tweet_id:
+                quoted_tweet_id = str(quoted_tweet_id)
+                if desearch_data.get('quote') and desearch_data['quote'].get('user'):
+                    quoted_user = desearch_data['quote']['user'].get('username', '').lower()
+            
+            # Extract tagged accounts from entities
+            tagged_accounts = []
+            entities = desearch_data.get('entities', {})
+            if entities:
+                user_mentions = entities.get('user_mentions', [])
+                if isinstance(user_mentions, list):
+                    tagged_accounts = [
+                        m.get('screen_name', '').lower()
+                        for m in user_mentions
+                        if m.get('screen_name')
+                    ]
+            
+            # Extract reply info
+            in_reply_to_status_id = desearch_data.get('in_reply_to_status_id')
+            if in_reply_to_status_id:
+                in_reply_to_status_id = str(in_reply_to_status_id)
+            in_reply_to_user = (
+                desearch_data.get('in_reply_to_screen_name', '').lower()
+                if desearch_data.get('in_reply_to_screen_name')
+                else None
+            )
+            
+            return {
+                'tweet_id': tweet_id,
+                'created_at': created_at,
+                'text': text,
+                'author': author_username,
+                'tagged_accounts': tagged_accounts,
+                'retweeted_user': retweeted_user,
+                'retweeted_tweet_id': retweeted_tweet_id,
+                'quoted_user': quoted_user,
+                'quoted_tweet_id': quoted_tweet_id,
+                'lang': desearch_data.get('lang', 'und'),
+                'favorite_count': like_count,
+                'retweet_count': retweet_count,
+                'reply_count': reply_count,
+                'quote_count': quote_count,
+                'bookmark_count': bookmark_count,
+                'views_count': views_count,
+                'in_reply_to_status_id': in_reply_to_status_id,
+                'in_reply_to_user': in_reply_to_user
+            }
+        except (KeyError, AttributeError, ValueError) as e:
+            bt.logging.debug(f"Failed to parse Desearch.ai search tweet: {e}")
+            return None
+    
+    def search_tweets(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort: str = "latest"
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Search for tweets using X-style query syntax via Desearch.ai.
+        
+        Args:
+            query: Search query string with X-style operators
+            max_results: Maximum number of tweets to return (default: 100)
+            sort: Sort order - "latest" or "top" (default: "latest")
+        
+        Returns:
+            Tuple of (tweets_list, api_succeeded)
+        """
+        url = f"{self.base_url}/twitter"
+        
+        tweets = []
+        api_succeeded = False
+        
+        # Desearch uses different sort parameter names
+        sort_param = "Latest" if sort == "latest" else "Top"
+        
+        # Pagination parameters
+        count_per_page = min(100, max_results)
+        start = 0
+        max_pages = (max_results + count_per_page - 1) // count_per_page
+        
+        for page in range(max_pages):
+            if len(tweets) >= max_results:
+                break
+            
+            params = {
+                "query": query,
+                "sort": sort_param,
+                "count": count_per_page,
+                "start": start
+            }
+            
+            try:
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    bt.logging.warning(f"Desearch search API error {response.status_code}")
+                    break
+                
+                response.raise_for_status()
+                data = response.json()
+                api_succeeded = True
+                
+                # Extract tweets from response
+                # Desearch returns {"tweets": [...]} or just a list
+                if isinstance(data, dict) and 'tweets' in data:
+                    tweet_list = data['tweets']
+                elif isinstance(data, list):
+                    tweet_list = data
+                else:
+                    tweet_list = data.get('data', []) if isinstance(data, dict) else []
+                
+                if not tweet_list:
+                    break
+                
+                for tweet_data in tweet_list:
+                    parsed_tweet = self._parse_search_tweet(tweet_data)
+                    if parsed_tweet and parsed_tweet.get('tweet_id'):
+                        tweets.append(parsed_tweet)
+                        
+                        if len(tweets) >= max_results:
+                            break
+                
+                # If we got fewer tweets than requested, we've reached the end
+                if len(tweet_list) < count_per_page:
+                    break
+                
+                start += count_per_page
+                time.sleep(self.rate_limit_delay)
+                
+            except Exception as e:
+                bt.logging.error(f"Desearch search API error: {e}")
+                break
+        
+        bt.logging.info(f"Search returned {len(tweets)} tweets for query: {query[:50]}...")
+        return tweets, api_succeeded
+    
+    def get_retweeters(
+        self,
+        tweet_id: str,
+        max_results: int = 100
+    ) -> Tuple[List[str], bool]:
+        """
+        Get list of usernames who retweeted a specific tweet via Desearch.ai.
+        
+        Args:
+            tweet_id: The tweet ID to get retweeters for
+            max_results: Maximum number of retweeters to return (default: 100)
+        
+        Returns:
+            Tuple of (usernames_list, api_succeeded)
+        """
+        url = f"{self.base_url}/twitter/post/retweeters"
+        params = {"id": tweet_id}
+        
+        usernames = []
+        api_succeeded = False
+        
+        try:
+            response = requests.get(url, headers=self.headers, params=params, timeout=30)
+            
+            if response.status_code in [429, 500, 502, 503, 504]:
+                bt.logging.warning(f"Desearch retweeters API error {response.status_code} for tweet {tweet_id}")
+                return usernames, False
+            
+            response.raise_for_status()
+            data = response.json()
+            api_succeeded = True
+            
+            # Extract retweeters from response
+            # Desearch returns {"retweeters": [...]} or similar
+            if isinstance(data, dict):
+                retweeter_list = data.get('retweeters', data.get('users', data.get('data', [])))
+            elif isinstance(data, list):
+                retweeter_list = data
+            else:
+                retweeter_list = []
+            
+            for user in retweeter_list[:max_results]:
+                if isinstance(user, dict):
+                    username = (
+                        user.get('username', '') or
+                        user.get('screen_name', '')
+                    ).lower()
+                    if username:
+                        usernames.append(username)
+                elif isinstance(user, str):
+                    usernames.append(user.lower())
+            
+        except Exception as e:
+            bt.logging.error(f"Desearch retweeters API error for tweet {tweet_id}: {e}")
+        
+        bt.logging.debug(f"Found {len(usernames)} retweeters for tweet {tweet_id}")
+        return usernames, api_succeeded

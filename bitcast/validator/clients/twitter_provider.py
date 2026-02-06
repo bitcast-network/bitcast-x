@@ -79,6 +79,7 @@ class TwitterProvider(ABC):
                 'reply_count': int,           # Reply count
                 'quote_count': int,           # Quote count
                 'bookmark_count': int,        # Bookmark count
+                'views_count': int,           # View count (0 if unavailable)
                 'in_reply_to_status_id': str|None, # Parent tweet ID if reply
                 'in_reply_to_user': str|None  # Parent tweet author if reply
             }
@@ -102,5 +103,54 @@ class TwitterProvider(ABC):
         
         Returns:
             True if API key is valid format, False otherwise
+        """
+        pass
+    
+    @abstractmethod
+    def search_tweets(
+        self,
+        query: str,
+        max_results: int = 100,
+        sort: str = "latest"
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Search for tweets using X-style query syntax.
+        
+        Supports standard Twitter search operators:
+        - Keywords: "bitcoin"
+        - Hashtags: "#bitcast"
+        - Mentions: "@username"
+        - Quoted tweet: "quoted_tweet_id:123456"
+        - Date filters: "since:2026-01-01 until:2026-01-15"
+        
+        Args:
+            query: Search query string with X-style operators
+            max_results: Maximum number of tweets to return (default: 100)
+            sort: Sort order - "latest" or "top" (default: "latest")
+        
+        Returns:
+            Tuple of (tweets_list, api_succeeded):
+            - tweets_list: List of tweet dictionaries in normalized format
+            - api_succeeded: True if API call succeeded, False otherwise
+        """
+        pass
+    
+    @abstractmethod
+    def get_retweeters(
+        self,
+        tweet_id: str,
+        max_results: int = 100
+    ) -> Tuple[List[str], bool]:
+        """
+        Get list of usernames who retweeted a specific tweet.
+        
+        Args:
+            tweet_id: The tweet ID to get retweeters for
+            max_results: Maximum number of retweeters to return (default: 100)
+        
+        Returns:
+            Tuple of (usernames_list, api_succeeded):
+            - usernames_list: List of usernames (lowercased) who retweeted
+            - api_succeeded: True if API call succeeded, False otherwise
         """
         pass

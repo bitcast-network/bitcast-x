@@ -1,8 +1,11 @@
 """
 Twitter API data caching utilities.
 
-Provides centralized caching for Twitter API responses following the standard
-cache pattern used throughout the system.
+TimelineCache: Legacy cache for user timeline fetches (90-day expiry)
+- Used by direct user timeline API calls
+- Keys: user_tweets_{username}, user_info_{username}
+
+For tweet scoring, use TweetStore (accumulative, no expiry) instead.
 """
 
 import os
@@ -16,12 +19,14 @@ import bittensor as bt
 from bitcast.validator.utils.config import CACHE_DIRS, TWITTER_CACHE_EXPIRY
 
 
-class TwitterCache:
+class TimelineCache:
     """
-    Thread-safe singleton cache for Twitter API data.
+    Thread-safe singleton cache for user timeline fetches (legacy).
     
-    Follows the standard cache pattern used throughout the system with
-    automatic cleanup and centralized management.
+    This is the original Twitter cache used for caching user timeline API calls
+    with a 90-day expiry. Tweet scoring now uses TweetStore (accumulative, no expiry).
+    
+    Kept for backward compatibility with other modules.
     """
     
     _instance = None
@@ -42,7 +47,7 @@ class TwitterCache:
             )
             # Register cleanup on program exit
             atexit.register(cls.cleanup)
-            bt.logging.info(f"TwitterCache initialized at: {cls._cache_dir}")
+            bt.logging.info(f"TimelineCache initialized at: {cls._cache_dir}")
 
     @classmethod
     def cleanup(cls) -> None:
@@ -83,7 +88,7 @@ def cache_user_tweets(username: str, data: Dict[str, Any]) -> None:
         username: Twitter username
         data: Tweet data to cache
     """
-    cache = TwitterCache.get_cache()
+    cache = TimelineCache.get_cache()
     cache_key = get_user_tweets_cache_key(username)
     
     # Add timestamp for cache validation
@@ -107,7 +112,7 @@ def get_cached_user_tweets(username: str) -> Optional[Dict[str, Any]]:
     Returns:
         Cached data if available, None otherwise
     """
-    cache = TwitterCache.get_cache()
+    cache = TimelineCache.get_cache()
     cache_key = get_user_tweets_cache_key(username)
     
     cached_data = cache.get(cache_key)
@@ -127,7 +132,7 @@ def cache_user_info(username: str, user_info: Dict[str, Any]) -> None:
         username: Twitter username
         user_info: User information to cache
     """
-    cache = TwitterCache.get_cache()
+    cache = TimelineCache.get_cache()
     cache_key = get_user_info_cache_key(username)
     
     # Add timestamp
@@ -150,7 +155,7 @@ def get_cached_user_info(username: str) -> Optional[Dict[str, Any]]:
     Returns:
         Cached user info if available, None otherwise
     """
-    cache = TwitterCache.get_cache()
+    cache = TimelineCache.get_cache()
     cache_key = get_user_info_cache_key(username)
     
     cached_info = cache.get(cache_key)
@@ -175,7 +180,7 @@ def clear_empty_tweet_caches() -> Dict[str, int]:
         - 'removed': Number of empty entries removed
         - 'preserved': Number of entries with tweets preserved
     """
-    cache = TwitterCache.get_cache()
+    cache = TimelineCache.get_cache()
     
     stats = {
         'checked': 0,
@@ -215,4 +220,4 @@ def clear_empty_tweet_caches() -> Dict[str, int]:
 
 
 # Initialize cache
-TwitterCache.initialize_cache()
+TimelineCache.initialize_cache()
