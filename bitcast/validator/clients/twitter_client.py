@@ -381,8 +381,8 @@ class TwitterClient:
         final_user_info = {'username': username, 'followers_count': 0}
         
         if user_info and user_info.get('followers_count', 0) > 0:
-            # Fresh data with valid follower count - use it
-            final_user_info = user_info
+            # Fresh data with valid follower count - use it, ensure username is correct
+            final_user_info = {**user_info, 'username': username}
         elif cached_data and cached_data.get('user_info'):
             # Preserve cached follower count but ensure username is correct
             cached_user_info = cached_data['user_info']
