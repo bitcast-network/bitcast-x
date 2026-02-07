@@ -137,7 +137,7 @@ EMISSIONS_PERIOD = 7              # Days to distribute budget
 REWARDS_DELAY_DAYS = 2            # Days to wait after brief ends
 SUBNET_TREASURY_PERCENTAGE = 1.0  # Treasury allocation %
 SUBNET_TREASURY_UID = 106         # Treasury UID
-SCORING_INTERVAL_MINUTES = 15     # How often to run (scoring + connections)
+SCORING_INTERVAL_MINUTES = 45     # How often to run (scoring + connections)
 ```
 
 ## Output

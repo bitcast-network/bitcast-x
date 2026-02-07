@@ -5,7 +5,7 @@ Scores tweets from pool members based on engagement from influential accounts, w
 ## Overview
 
 Two discovery modes feed the same accumulative `TweetStore`:
-- **Lightweight (every 15 min)**: Search API queries by tag/QRT -- fast but may miss tweets
+- **Lightweight (every 45 min)**: Search API queries by tag/QRT -- fast but may miss tweets
 - **Thorough (every 8 hours)**: Fetches connected accounts' timelines -- slower but comprehensive
 
 Both modes share scoring logic:

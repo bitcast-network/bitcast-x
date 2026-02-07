@@ -87,7 +87,7 @@ accounts = db.get_accounts_with_uids("tao", metagraph)
 
 ```python
 CONNECTION_SEARCH_TAG = '@bitcast'  # Keyword to search for (env: CONNECTION_SEARCH_TAG)
-SCORING_INTERVAL_MINUTES = 15  # Scoring + connection scan frequency
+SCORING_INTERVAL_MINUTES = 45  # Scoring + connection scan frequency
 ```
 
 ## Data Flow

@@ -2,7 +2,7 @@
 Tweet discovery module for tweet retrieval with accumulative caching.
 
 Two discovery modes:
-- Lightweight (search-based): Fast API search by tag/QRT, runs every 15 min
+- Lightweight (search-based): Fast API search by tag/QRT, runs every 45 min
 - Thorough (timeline-based): Fetches connected accounts' profiles, runs every 8 hours
 
 Both modes:
@@ -109,35 +109,28 @@ class TweetDiscovery:
     
     def _search_and_store(self, query: str, max_results: int = 200) -> List[Dict]:
         """
-        Search APIs with both sort orders and store all results.
+        Search API and store results.
         
         Always makes fresh API calls. Merges results into the accumulative store.
         
         Args:
             query: X-style search query
-            max_results: Max results per sort order
+            max_results: Max results
             
         Returns:
             List of tweets found in this API call (for logging only)
         """
-        all_tweets = []
-        seen_ids = set()
+        result = self.client.search_tweets(
+            query=query,
+            max_results=max_results,
+            sort="latest"
+        )
         
-        for sort_order in ["latest", "top"]:
-            result = self.client.search_tweets(
-                query=query,
-                max_results=max_results,
-                sort=sort_order
-            )
-            
-            if result['api_succeeded']:
-                for tweet in result['tweets']:
-                    tweet_id = tweet.get('tweet_id')
-                    if tweet_id and tweet_id not in seen_ids:
-                        all_tweets.append(tweet)
-                        seen_ids.add(tweet_id)
-            else:
-                bt.logging.warning(f"Search API failed for query '{query[:50]}...' with sort={sort_order}")
+        all_tweets = []
+        if result['api_succeeded']:
+            all_tweets = [t for t in result['tweets'] if t.get('tweet_id')]
+        else:
+            bt.logging.warning(f"Search API failed for query '{query[:50]}...'")
         
         # Store all discovered tweets (accumulative merge)
         if all_tweets:

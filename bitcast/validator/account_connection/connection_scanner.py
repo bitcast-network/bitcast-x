@@ -149,24 +149,17 @@ class ConnectionScanner:
         query = self._build_query()
         bt.logging.info(f"Searching for connection tweets: '{query}'")
         
-        all_tweets = []
-        seen_ids = set()
+        result = self.twitter_client.search_tweets(
+            query=query,
+            max_results=500,
+            sort="latest"
+        )
         
-        for sort_order in ["latest", "top"]:
-            result = self.twitter_client.search_tweets(
-                query=query,
-                max_results=500,
-                sort=sort_order
-            )
-            
-            if result['api_succeeded']:
-                for tweet in result['tweets']:
-                    tid = tweet.get('tweet_id')
-                    if tid and tid not in seen_ids:
-                        all_tweets.append(tweet)
-                        seen_ids.add(tid)
-            else:
-                bt.logging.warning(f"Search API failed for sort={sort_order}")
+        all_tweets = []
+        if result['api_succeeded']:
+            all_tweets = [t for t in result['tweets'] if t.get('tweet_id')]
+        else:
+            bt.logging.warning("Search API failed for connection scan")
         
         bt.logging.info(f"Search returned {len(all_tweets)} tweets")
         
