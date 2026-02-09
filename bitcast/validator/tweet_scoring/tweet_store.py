@@ -57,7 +57,7 @@ class TweetStore:
             os.makedirs(TWEET_STORE_DIR, exist_ok=True)
             TweetStore._cache = Cache(
                 directory=TWEET_STORE_DIR,
-                size_limit=2e9,  # 2GB
+                size_limit=3e9,  # 3GB
                 disk_min_file_size=0,
                 disk_pickle_protocol=4,
             )
@@ -327,6 +327,43 @@ class TweetStore:
         if result:
             return result
         return {'tweet_id': tweet_id, 'retweeters': {}, 'quoters': {}}
+    
+    # -------------------------------------------------------------------------
+    # Engagement fetch tracking (for tiered fetching)
+    # -------------------------------------------------------------------------
+    
+    def _engagement_fetch_key(self, tweet_id: str) -> str:
+        return f"engagement_fetch:{tweet_id}"
+    
+    def get_last_engagement_fetch(self, tweet_id: str) -> Optional[datetime]:
+        """
+        Get the timestamp of the last engagement fetch for a tweet.
+        
+        Args:
+            tweet_id: Tweet ID
+            
+        Returns:
+            datetime of last fetch, or None if never fetched
+        """
+        key = self._engagement_fetch_key(tweet_id)
+        timestamp_str = self._cache.get(key)
+        if timestamp_str:
+            try:
+                return datetime.fromisoformat(timestamp_str)
+            except ValueError:
+                return None
+        return None
+    
+    def set_last_engagement_fetch(self, tweet_id: str, fetch_time: datetime) -> None:
+        """
+        Set the timestamp of the last engagement fetch for a tweet.
+        
+        Args:
+            tweet_id: Tweet ID
+            fetch_time: datetime of the fetch
+        """
+        key = self._engagement_fetch_key(tweet_id)
+        self._cache.set(key, fetch_time.isoformat())
     
     # -------------------------------------------------------------------------
     # Stats

@@ -23,6 +23,11 @@ from typing import Dict, List, Optional, Set
 import bittensor as bt
 
 from bitcast.validator.clients import TwitterClient
+from bitcast.validator.utils.config import (
+    ENGAGEMENT_FETCH_INTERVAL_NEW,
+    ENGAGEMENT_FETCH_INTERVAL_RECENT,
+    ENGAGEMENT_FETCH_INTERVAL_OLD,
+)
 from .tweet_store import TweetStore
 
 # Max concurrent API calls for engagement retrieval
@@ -389,16 +394,70 @@ class TweetDiscovery:
         
         return engagements
     
+    def _should_fetch_engagements(self, tweet: Dict) -> bool:
+        """
+        Determine if we should fetch engagements for a tweet based on tiered intervals.
+        
+        Uses tweet age to determine fetch frequency:
+        - New tweets (< 1 hour): Fetch every hour
+        - Recent tweets (1-24 hours): Fetch every 4 hours
+        - Old tweets (> 24 hours): Fetch every 8 hours
+        
+        Args:
+            tweet: Tweet dict with 'tweet_id' and 'created_at'
+            
+        Returns:
+            True if engagements should be fetched, False otherwise
+        """
+        tweet_id = tweet.get('tweet_id')
+        if not tweet_id:
+            return False
+        
+        # Get last fetch time
+        last_fetch = self.store.get_last_engagement_fetch(tweet_id)
+        
+        # Calculate tweet age
+        created_at = tweet.get('created_at', '')
+        if not created_at:
+            # If no created_at, fetch to be safe
+            return True
+        
+        try:
+            tweet_date = datetime.strptime(created_at, '%a %b %d %H:%M:%S %z %Y')
+            tweet_date_utc = tweet_date.astimezone(timezone.utc)
+            now = datetime.now(timezone.utc)
+            age_hours = (now - tweet_date_utc).total_seconds() / 3600
+        except (ValueError, AttributeError):
+            # If we can't parse the date, fetch to be safe
+            return True
+        
+        # Determine required interval based on age
+        if age_hours < 1:
+            required_interval = ENGAGEMENT_FETCH_INTERVAL_NEW  # 1 hour
+        elif age_hours < 24:
+            required_interval = ENGAGEMENT_FETCH_INTERVAL_RECENT  # 4 hours
+        else:
+            required_interval = ENGAGEMENT_FETCH_INTERVAL_OLD  # 8 hours
+        
+        # Check if enough time has passed since last fetch
+        if last_fetch is None:
+            return True  # Never fetched, fetch now
+        
+        hours_since_fetch = (now - last_fetch).total_seconds() / 3600
+        return hours_since_fetch >= required_interval
+    
     def get_engagements_batch(
         self,
         tweets: List[Dict],
         excluded_engagers: Optional[Set[str]] = None
     ) -> Dict[str, Dict[str, str]]:
         """
-        Get engagements for multiple tweets concurrently.
+        Get engagements for multiple tweets concurrently with tiered fetching.
         
-        Fetches RT/QRT data for multiple tweets in parallel, then builds
-        engagement maps from the store.
+        Uses smart tiered fetching based on tweet age to reduce API calls:
+        - New tweets (< 1 hour): Fetch every hour
+        - Recent tweets (1-24 hours): Fetch every 4 hours
+        - Old tweets (> 24 hours): Fetch every 8 hours
         
         Args:
             tweets: List of tweet dicts
@@ -410,27 +469,55 @@ class TweetDiscovery:
         excluded = {e.lower() for e in (excluded_engagers or set())}
         valid_tweets = [t for t in tweets if t.get('tweet_id')]
         
-        # Fetch all engagements concurrently
-        bt.logging.info(
-            f"Fetching engagements for {len(valid_tweets)} tweets "
-            f"({ENGAGEMENT_MAX_WORKERS} workers)"
-        )
+        # Filter tweets that actually need engagement fetching
+        tweets_needing_fetch = [t for t in valid_tweets if self._should_fetch_engagements(t)]
+        skipped_count = len(valid_tweets) - len(tweets_needing_fetch)
         
-        with ThreadPoolExecutor(max_workers=ENGAGEMENT_MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(self._fetch_engagements, t['tweet_id']): t
-                for t in valid_tweets
-            }
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
+        # Fetch engagements only for tweets that need updating
+        if tweets_needing_fetch:
+            bt.logging.info(
+                f"Fetching engagements for {len(tweets_needing_fetch)}/{len(valid_tweets)} tweets "
+                f"({skipped_count} skipped - cached) ({ENGAGEMENT_MAX_WORKERS} workers)"
+            )
+            
+            with ThreadPoolExecutor(max_workers=ENGAGEMENT_MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(self._fetch_engagements, t['tweet_id']): t
+                    for t in tweets_needing_fetch
+                }
+                
+                # Track successful fetches for timestamp updates
+                successful_fetches = []
+                failed_fetches = []
+                
+                for future in as_completed(futures):
                     tweet = futures[future]
-                    bt.logging.warning(
-                        f"Error fetching engagements for {tweet.get('tweet_id')}: {e}"
-                    )
+                    try:
+                        future.result()
+                        successful_fetches.append(tweet)
+                    except Exception as e:
+                        failed_fetches.append(tweet)
+                        bt.logging.warning(
+                            f"Error fetching engagements for {tweet.get('tweet_id')}: {e}"
+                        )
+            
+            # Update last fetch timestamp only for successfully fetched tweets
+            now = datetime.now(timezone.utc)
+            for tweet in successful_fetches:
+                self.store.set_last_engagement_fetch(tweet['tweet_id'], now)
+            
+            if failed_fetches:
+                bt.logging.warning(
+                    f"Failed to fetch engagements for {len(failed_fetches)} tweets - "
+                    f"will retry on next cycle"
+                )
+        else:
+            bt.logging.info(
+                f"Using cached engagements for all {len(valid_tweets)} tweets "
+                f"(no API calls needed)"
+            )
         
-        # Build engagement maps from store (fast, no API calls)
+        # Build engagement maps from store (includes cached data)
         all_engagements = {}
         for tweet in valid_tweets:
             tweet_id = tweet['tweet_id']
