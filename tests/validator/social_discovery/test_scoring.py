@@ -73,7 +73,7 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username, force_refresh=False):
+        def mock_fetch(username, fetch_days=30):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
         def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
@@ -122,7 +122,7 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username, force_refresh=False):
+        def mock_fetch(username, fetch_days=30):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
         def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
@@ -178,7 +178,7 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username, force_refresh=False):
+        def mock_fetch(username, fetch_days=30):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
         def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):

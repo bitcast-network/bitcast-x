@@ -48,9 +48,9 @@ WANDB_API_KEY = os.getenv('WANDB_API_KEY')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 
 # Twitter API Configuration - Fetching Strategy
-INITIAL_FETCH_DAYS = 30
-INCREMENTAL_FETCH_DAYS = 4
-MAX_TWEETS_PER_FETCH = 400  # Supports pagination to fetch up to 400 tweets via Desearch.ai
+SOCIAL_DISCOVERY_FETCH_DAYS = 30  # Days of tweet history for social network discovery
+TWEET_SCORING_FETCH_DAYS = 1     # Days of tweet history for thorough scoring timeline pulls
+MAX_TWEETS_PER_FETCH = 400       # Supports pagination to fetch up to 400 tweets via Desearch.ai
 
 # Twitter API Configuration - PageRank Weights
 PAGERANK_RETWEET_WEIGHT = 1.0
@@ -61,8 +61,7 @@ PAGERANK_ALPHA = 0.85
 
 # Cache Management
 CACHE_EXPIRY_DAYS = 90
-TWITTER_CACHE_EXPIRY = CACHE_EXPIRY_DAYS * 24 * 60 * 60  # Convert days to seconds
-TWITTER_CACHE_FRESHNESS = int(os.getenv('TWITTER_CACHE_FRESHNESS', str(6 * 60 * 60)))  # Default 6 hours in seconds
+DISCOVERY_CACHE_EXPIRY = CACHE_EXPIRY_DAYS * 24 * 60 * 60  # Convert days to seconds
 
 # Social Discovery Concurrency (1 = sequential, 2+ = concurrent)
 SOCIAL_DISCOVERY_MAX_WORKERS = 10
@@ -118,10 +117,9 @@ bt.logging.info(f"X_SOCIAL_MAP_ENDPOINT: {X_SOCIAL_MAP_ENDPOINT}")
 bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOINT}")
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
 bt.logging.info(f"TWITTER_API_PROVIDER: {TWITTER_API_PROVIDER}")
-bt.logging.info(f"INITIAL_FETCH_DAYS: {INITIAL_FETCH_DAYS}")
-bt.logging.info(f"INCREMENTAL_FETCH_DAYS: {INCREMENTAL_FETCH_DAYS}")
+bt.logging.info(f"SOCIAL_DISCOVERY_FETCH_DAYS: {SOCIAL_DISCOVERY_FETCH_DAYS}")
+bt.logging.info(f"TWEET_SCORING_FETCH_DAYS: {TWEET_SCORING_FETCH_DAYS}")
 bt.logging.info(f"MAX_TWEETS_PER_FETCH: {MAX_TWEETS_PER_FETCH}")
-bt.logging.info(f"TWITTER_CACHE_FRESHNESS: {TWITTER_CACHE_FRESHNESS}s ({TWITTER_CACHE_FRESHNESS/3600:.1f} hours)")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")
 bt.logging.info(f"REWARDS_DELAY_DAYS: {REWARDS_DELAY_DAYS}")
 bt.logging.info(f"REWARD_SMOOTHING_EXPONENT: {REWARD_SMOOTHING_EXPONENT}")

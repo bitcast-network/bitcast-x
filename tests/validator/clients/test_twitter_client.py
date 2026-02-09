@@ -96,8 +96,8 @@ class TestTwitterClientCaching:
     @mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test')
     @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
     @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
-    def test_fetch_uses_cache_when_fresh(self, mock_cache_set, mock_cache_get):
-        """Test that fresh cache is used without calling provider."""
+    def test_fetch_merges_with_cache(self, mock_cache_set, mock_cache_get):
+        """Test that fetch always calls provider and merges with cache."""
         recent_time = datetime.now() - timedelta(hours=1)
         mock_cache_get.return_value = {
             'tweets': [{'tweet_id': '123', 'text': 'Cached', 'author': 'testuser', 'created_at': 'Mon Jan 15 12:00:00 +0000 2024'}],
@@ -106,9 +106,16 @@ class TestTwitterClientCaching:
         }
         
         client = TwitterClient()
+        # Mock the provider to return new tweets
+        client.provider.fetch_user_tweets = mock.Mock(return_value=(
+            [{'tweet_id': '456', 'text': 'New', 'author': 'testuser', 'created_at': 'Mon Feb 01 12:00:00 +0000 2026'}],
+            {'username': 'testuser', 'followers_count': 1000},
+            True
+        ))
+        
         result = client.fetch_user_tweets('testuser')
         
-        # Verify cache was used
+        # Always fetches from provider and merges with cache
         assert result['cache_info']['cache_hit'] is True
-        assert result['cache_info']['provider_used'] == 'cache'
-        assert len(result['tweets']) == 1
+        assert result['cache_info']['provider_used'] == 'desearch'
+        assert len(result['tweets']) == 2  # 1 new + 1 cached

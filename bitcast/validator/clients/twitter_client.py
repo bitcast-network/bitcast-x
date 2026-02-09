@@ -1,5 +1,5 @@
 """
-Twitter client with switchable API provider support and intelligent caching.
+Twitter client with switchable API provider support and caching.
 
 Coordinates between multiple Twitter API providers (Desearch.ai, RapidAPI)
 with manual provider selection via configuration.
@@ -14,10 +14,8 @@ from bitcast.validator.utils.config import (
     TWITTER_API_PROVIDER,
     DESEARCH_API_KEY,
     RAPID_API_KEY,
-    INITIAL_FETCH_DAYS,
-    INCREMENTAL_FETCH_DAYS,
+    SOCIAL_DISCOVERY_FETCH_DAYS,
     MAX_TWEETS_PER_FETCH,
-    TWITTER_CACHE_FRESHNESS
 )
 from bitcast.validator.utils.twitter_cache import (
     get_cached_user_tweets,
@@ -69,7 +67,7 @@ class TwitterClient:
         endpoint_mode = "posts-only" if self.posts_only else "dual-endpoint"
         bt.logging.info(
             f"TwitterClient initialized with {self.provider_name} provider "
-            f"({TWITTER_CACHE_FRESHNESS/3600:.1f}h cache, {endpoint_mode} mode)"
+            f"({endpoint_mode} mode)"
         )
     
     def _create_provider(self, provider_name: str, 
@@ -223,87 +221,34 @@ class TwitterClient:
         
         return visible_tweets, tweets_to_cache
     
-    def fetch_user_tweets(self, username: str, force_refresh: bool = False) -> Dict[str, Any]:
+    def fetch_user_tweets(self, username: str, fetch_days: int = SOCIAL_DISCOVERY_FETCH_DAYS) -> Dict[str, Any]:
         """
-        Fetch tweets for a user with intelligent caching and incremental updates.
+        Fetch tweets for a user, always pulling fresh data and merging with cache.
         
-        Three fetch strategies:
-        - Initial (no cache): Bootstrap with 30 days of history
-        - Incremental (stale cache): Refresh last 4 days only
-        - Force refresh: Thorough 30-day update (merges with cache)
+        Always fetches the specified number of days from the API and merges with
+        any existing cached data. No freshness checks - the caller decides how
+        many days to fetch based on their use case:
+        - Social discovery: SOCIAL_DISCOVERY_FETCH_DAYS (30 days)
+        - Tweet scoring thorough mode: TWEET_SCORING_FETCH_DAYS (1 day)
         
         Args:
             username: Twitter username to fetch tweets for
-            force_refresh: If True, fetch 30 days (thorough refresh, merges with cache)
+            fetch_days: Number of days of tweet history to fetch from API
         
-        Filters to only tweets authored by the user (the tweetsandreplies API returns
-        both user's tweets AND replies from others).
-        
-        Fetches up to MAX_TWEETS_PER_FETCH tweets from API when cache is stale.
-        Returns ALL cached tweets regardless of age - callers apply their own date filtering.
-        Uses smart cache merging to preserve historical tweets while fetching recent updates.
-        
-        Returns dict with 'user_info', 'tweets', and 'cache_info'
+        Returns:
+            Dict with 'user_info', 'tweets', and 'cache_info'
         """
         username = username.lower()
         
-        # Check cache and determine fetch strategy
+        # Check cache for existing data to merge with
         cached_data = get_cached_user_tweets(username)
-        last_updated = cached_data.get('last_updated') if cached_data else None
         
-        # Determine fetch strategy: initial / incremental / force / fresh
-        if not cached_data:
-            # INITIAL FETCH: No cache exists - bootstrap with 30 days
-            fetch_days = INITIAL_FETCH_DAYS
-            base_time = datetime.now()
-            bt.logging.info(f"Initial fetch for @{username} (last {fetch_days} days)")
-            
-        elif force_refresh:
-            # FORCE REFRESH: Thorough update - fetch 30 days (merges with cache)
-            fetch_days = INITIAL_FETCH_DAYS
-            base_time = last_updated
-            bt.logging.info(f"Force refresh for @{username} (fetching last {fetch_days} days)")
-            
-        elif last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
-            # FRESH CACHE: Use cached data without fetching
-            bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
-            
-            # Apply post-processing: sorting, validation, and deletion removal
-            visible_tweets, tweets_to_cache = self._post_process_tweets(
-                tweets=cached_data['tweets'],
-                username=username
-            )
-            
-            # Update cache with post-processed tweets while preserving original timestamp
-            cache_data = {
-                'user_info': cached_data['user_info'],
-                'tweets': tweets_to_cache,
-                'last_updated': last_updated  # Keep original to maintain freshness window
-            }
-            cache_user_tweets(username, cache_data)
-            
-            return {
-                'user_info': cached_data['user_info'],
-                'tweets': visible_tweets,
-                'cache_info': {
-                    'cache_hit': True, 
-                    'new_tweets': 0,
-                    'cached_tweets': len(cached_data['tweets']),
-                    'provider_used': 'cache'
-                }
-            }
-        else:
-            # INCREMENTAL UPDATE: Cache is stale - refresh last 4 days
-            fetch_days = INCREMENTAL_FETCH_DAYS
-            base_time = last_updated
-            bt.logging.info(f"Incremental update for @{username} (last {fetch_days} days)")
+        bt.logging.info(f"Fetching tweets for @{username} (last {fetch_days} days)")
         
         # Calculate cutoff for API pagination stopping point
-        incremental_cutoff = base_time - timedelta(days=fetch_days)
+        incremental_cutoff = datetime.now() - timedelta(days=fetch_days)
         
         # API fetch limit (used for pagination)
-        # When using dual-endpoint mode, fetch 200 per endpoint (400 total)
-        # When using posts-only mode, fetch 400 from single endpoint
         if self.posts_only:
             tweet_limit = MAX_TWEETS_PER_FETCH  # 400 for single endpoint
         else:
@@ -337,7 +282,7 @@ class TwitterClient:
         for tweet in tweets:
             tweet['missing_count'] = 0
         
-        # Smart merge: combine new tweets with cached tweets, track deleted tweets
+        # Merge new tweets with cached tweets, track deleted tweets
         all_tweets = tweets.copy()
         cached_count = 0
         incremented_missing = 0
@@ -374,20 +319,15 @@ class TwitterClient:
             username=username
         )
         
-        # Cache all tweets including deleted ones
-        # Smart merge of user_info:
-        # - username: Always use freshly fetched (guaranteed correct)
-        # - followers_count: Use fresh IF non-zero (extraction succeeded), else preserve cached
+        # Smart merge of user_info
         final_user_info = {'username': username, 'followers_count': 0}
         
         if user_info and user_info.get('followers_count', 0) > 0:
-            # Fresh data with valid follower count - use it, ensure username is correct
             final_user_info = {**user_info, 'username': username}
         elif cached_data and cached_data.get('user_info'):
-            # Preserve cached follower count but ensure username is correct
             cached_user_info = cached_data['user_info']
             final_user_info = {
-                'username': username,  # Always use correct username
+                'username': username,
                 'followers_count': cached_user_info.get('followers_count', 0)
             }
         

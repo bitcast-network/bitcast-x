@@ -1,5 +1,5 @@
 """
-Accumulative tweet store for tweet scoring.
+Accumulative scoring store for tweet scoring.
 
 Permanently stores tweets and engagement data discovered from API searches.
 Once a tweet or engagement is found, it is never lost - even if the API
@@ -24,14 +24,14 @@ from bitcast.validator.utils.config import CACHE_DIRS
 
 
 # Store directory alongside existing twitter cache
-TWEET_STORE_DIR = os.path.join(CACHE_DIRS.get("twitter", "cache/twitter"), "tweet_store")
+SCORING_STORE_DIR = os.path.join(CACHE_DIRS.get("twitter", "cache/twitter"), "tweet_store")
 
 
-class TweetStore:
+class ScoringStore:
     """
-    Accumulative store for tweets and their engagements.
+    Accumulative store for tweet scoring data.
     
-    Tweets are stored permanently (no expiry). Each scoring run:
+    Stores tweets and engagements permanently (no expiry). Each scoring run:
     1. Makes fresh API calls
     2. Merges new tweets into the store (upsert)
     3. Queries the store for tweets matching brief criteria
@@ -44,7 +44,7 @@ class TweetStore:
     _cache: Cache = None
     
     @classmethod
-    def get_instance(cls) -> 'TweetStore':
+    def get_instance(cls) -> 'ScoringStore':
         """Thread-safe singleton access."""
         if cls._instance is None:
             with cls._lock:
@@ -53,16 +53,16 @@ class TweetStore:
         return cls._instance
     
     def __init__(self):
-        if TweetStore._cache is None:
-            os.makedirs(TWEET_STORE_DIR, exist_ok=True)
-            TweetStore._cache = Cache(
-                directory=TWEET_STORE_DIR,
+        if ScoringStore._cache is None:
+            os.makedirs(SCORING_STORE_DIR, exist_ok=True)
+            ScoringStore._cache = Cache(
+                directory=SCORING_STORE_DIR,
                 size_limit=2e9,  # 2GB
                 disk_min_file_size=0,
                 disk_pickle_protocol=4,
             )
             atexit.register(self.cleanup)
-            bt.logging.info(f"TweetStore initialized at: {TWEET_STORE_DIR}")
+            bt.logging.info(f"ScoringStore initialized at: {SCORING_STORE_DIR}")
     
     @classmethod
     def cleanup(cls):

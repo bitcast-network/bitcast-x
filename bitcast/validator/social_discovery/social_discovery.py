@@ -60,22 +60,23 @@ class TwitterNetworkAnalyzer:
     - Score normalization
     """
     
-    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, force_cache_refresh: bool = False, posts_only: bool = True):
+    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, fetch_days: Optional[int] = None, posts_only: bool = True):
         """
         Initialize analyzer with optional custom Twitter client.
         
         Args:
             twitter_client: Optional TwitterClient instance (typically for testing/mocking).
-                          If provided, force_cache_refresh and posts_only are ignored.
+                          If provided, posts_only is ignored.
             max_workers: Number of concurrent workers (1=sequential, 2+=concurrent)
                         If None, uses SOCIAL_DISCOVERY_MAX_WORKERS config
-            force_cache_refresh: If True, force Twitter API cache refresh (30-day fetch).
-                               Passed to fetch_user_tweets() calls.
+            fetch_days: Number of days of tweet history to fetch per account.
+                       If None, uses SOCIAL_DISCOVERY_FETCH_DAYS default (30 days).
             posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
                        Default: True for social discovery. Only applied when twitter_client is not provided.
         """
+        from bitcast.validator.utils.config import SOCIAL_DISCOVERY_FETCH_DAYS
         self.twitter_client = twitter_client or TwitterClient(posts_only=posts_only)
-        self.force_cache_refresh = force_cache_refresh
+        self.fetch_days = fetch_days or SOCIAL_DISCOVERY_FETCH_DAYS
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -104,7 +105,7 @@ class TwitterNetworkAnalyzer:
             Tuple of (username_lower, tweets_list, user_info, error_message)
         """
         try:
-            result = self.twitter_client.fetch_user_tweets(username.lower(), force_refresh=self.force_cache_refresh)
+            result = self.twitter_client.fetch_user_tweets(username.lower(), fetch_days=self.fetch_days)
             return username.lower(), result['tweets'], result['user_info'], None
         except Exception as e:
             bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
@@ -199,7 +200,7 @@ class TwitterNetworkAnalyzer:
             # Sequential execution
             for username in seed_accounts:
                 username_lower = username.lower()
-                result = self.twitter_client.fetch_user_tweets(username_lower, force_refresh=self.force_cache_refresh)
+                result = self.twitter_client.fetch_user_tweets(username_lower, fetch_days=self.fetch_days)
                 all_tweets[username_lower] = result['tweets']
                 user_info_map[username_lower] = result['user_info']
         
@@ -465,7 +466,6 @@ class TwitterNetworkAnalyzer:
 async def discover_social_network(
     pool_name: str = "tao", 
     run_id: Optional[str] = None,
-    force_cache_refresh: bool = False,
     posts_only: bool = True
 ) -> str:
     """
@@ -474,7 +474,6 @@ async def discover_social_network(
     Args:
         pool_name: Name of the pool to discover social network for
         run_id: Validation cycle identifier (auto-generated if not provided)
-        force_cache_refresh: If True, force Twitter API cache refresh for all accounts
         posts_only: If True, use only /user/tweets endpoint (faster, saves quota). Default: True
         
     Returns:
@@ -542,7 +541,7 @@ async def discover_social_network(
             bt.logging.info(f"Using {len(seed_accounts)} initial accounts as seeds")
         
         # Analyze network
-        analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
+        analyzer = TwitterNetworkAnalyzer(posts_only=posts_only)
         scores, adjacency_matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
@@ -746,7 +745,6 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
                 )
                 social_map_path, _ = await two_stage_discovery(
                     pool_name=pool_name,
-                    force_cache_refresh=True,
                     posts_only=True,
                 )
                 results[pool_name] = social_map_path

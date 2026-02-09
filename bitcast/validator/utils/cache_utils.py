@@ -4,7 +4,7 @@ import bittensor as bt
 from diskcache import Cache
 from bitcast.validator.utils.config import CACHE_DIRS, CACHE_ROOT
 from bitcast.validator.reward_engine.utils import BriefsCache
-from bitcast.validator.utils.twitter_cache import TimelineCache
+from bitcast.validator.utils.twitter_cache import DiscoveryCache
 
 def clear_all_caches():
     """Clear all cache directories and instances."""
@@ -64,27 +64,27 @@ def clear_expired_briefs_cache():
 
 
 def clear_twitter_cache():
-    """Clear timeline cache (legacy Twitter user timeline cache)."""
-    bt.logging.info("Clearing timeline cache")
+    """Clear discovery cache (social discovery user timeline cache)."""
+    bt.logging.info("Clearing discovery cache")
     try:
-        if TimelineCache._cache:
-            TimelineCache._cache.clear()
-            bt.logging.info("Successfully cleared timeline cache")
+        if DiscoveryCache._cache:
+            DiscoveryCache._cache.clear()
+            bt.logging.info("Successfully cleared discovery cache")
         else:
-            bt.logging.warning("Twitter cache not initialized")
+            bt.logging.warning("Discovery cache not initialized")
     except Exception as e:
-        bt.logging.error(f"Error clearing Twitter cache: {str(e)}")
+        bt.logging.error(f"Error clearing discovery cache: {str(e)}")
         raise
 
 def clear_expired_twitter_cache():
-    """Clear expired timeline cache entries."""
-    bt.logging.info("Clearing expired timeline cache entries")
+    """Clear expired discovery cache entries."""
+    bt.logging.info("Clearing expired discovery cache entries")
     try:
-        if TimelineCache._cache:
-            TimelineCache._cache.expire()
-            bt.logging.info("Successfully cleared expired timeline cache entries")
+        if DiscoveryCache._cache:
+            DiscoveryCache._cache.expire()
+            bt.logging.info("Successfully cleared expired discovery cache entries")
         else:
-            bt.logging.warning("Twitter cache not initialized")
+            bt.logging.warning("Discovery cache not initialized")
     except Exception as e:
-        bt.logging.error(f"Error clearing expired Twitter cache entries: {str(e)}")
+        bt.logging.error(f"Error clearing expired discovery cache entries: {str(e)}")
         raise

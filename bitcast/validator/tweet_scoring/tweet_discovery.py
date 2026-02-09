@@ -7,11 +7,11 @@ Two discovery modes:
 
 Both modes:
 1. Make fresh API calls
-2. Merge results into TweetStore (accumulative - never loses data)
-3. Query TweetStore for all tweets matching brief criteria
+2. Merge results into ScoringStore (accumulative - never loses data)
+3. Query ScoringStore for all tweets matching brief criteria
 4. Fetch fresh engagement data (RTs/QRTs) from API
-5. Merge engagements into TweetStore
-6. Query TweetStore for all known engagements
+5. Merge engagements into ScoringStore
+6. Query ScoringStore for all known engagements
 
 This ensures that once a tweet or engagement is discovered, it is never lost
 even if the search API stops returning it in subsequent calls.
@@ -23,7 +23,8 @@ from typing import Dict, List, Optional, Set
 import bittensor as bt
 
 from bitcast.validator.clients import TwitterClient
-from .tweet_store import TweetStore
+from bitcast.validator.utils.config import TWEET_SCORING_FETCH_DAYS
+from .tweet_store import ScoringStore
 
 # Max concurrent API calls for engagement retrieval
 ENGAGEMENT_MAX_WORKERS = 5
@@ -72,13 +73,13 @@ def build_search_query(
 
 class TweetDiscovery:
     """
-    Discovers tweets for a brief with accumulative caching via TweetStore.
+    Discovers tweets for a brief with accumulative caching via ScoringStore.
     
     Two discovery modes:
     - discover_tweets(): Lightweight search API queries (fast, may miss tweets)
     - discover_tweets_from_timelines(): Fetches connected accounts' profiles (thorough)
     
-    Both store results in TweetStore and query it for final output.
+    Both store results in ScoringStore and query it for final output.
     """
     
     def __init__(
@@ -100,7 +101,7 @@ class TweetDiscovery:
             if considered_accounts
             else {a: 1.0 for a in self.active_accounts}
         )
-        self.store = TweetStore.get_instance()
+        self.store = ScoringStore.get_instance()
         
         bt.logging.info(
             f"TweetDiscovery initialized: {len(self.active_accounts)} active accounts, "
@@ -215,10 +216,9 @@ class TweetDiscovery:
         """
         Discover tweets by fetching connected accounts' timelines.
         
-        Thorough mode: fetches each active account's profile tweets via the
-        timeline API, stores all tweets in TweetStore, then queries for matches.
-        Uses TimelineCache for cross-brief deduplication (cache freshness = 6h,
-        so multiple briefs in the same cycle get cache hits).
+        Thorough mode: fetches each active account's recent tweets via the
+        timeline API, stores all tweets in ScoringStore, then queries for matches.
+        Fetches TWEET_SCORING_FETCH_DAYS (1 day) of history per account.
         
         Args:
             tag: Optional tag/hashtag to filter for
@@ -247,7 +247,7 @@ class TweetDiscovery:
         failed = 0
         
         def fetch_timeline(username: str) -> List[Dict]:
-            result = timeline_client.fetch_user_tweets(username)
+            result = timeline_client.fetch_user_tweets(username, fetch_days=TWEET_SCORING_FETCH_DAYS)
             return result.get('tweets', [])
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -283,7 +283,7 @@ class TweetDiscovery:
             f"({failed} failed), {len(date_filtered)} within brief dates"
         )
         
-        # Store only date-relevant tweets in TweetStore
+        # Store only date-relevant tweets in ScoringStore
         if date_filtered:
             stats = self.store.store_tweets(date_filtered)
             bt.logging.info(

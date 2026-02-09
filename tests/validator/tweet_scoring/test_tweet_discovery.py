@@ -1,4 +1,4 @@
-"""Tests for tweet_discovery module with accumulative TweetStore."""
+"""Tests for tweet_discovery module with accumulative ScoringStore."""
 
 import pytest
 from datetime import datetime, timezone
@@ -81,14 +81,14 @@ class TestTweetDiscoveryInit:
 
 
 class TestTweetDiscoveryDiscover:
-    """Test TweetDiscovery discover methods using TweetStore."""
+    """Test TweetDiscovery discover methods using ScoringStore."""
     
     def setup_method(self):
         self.mock_client = Mock()
         self.mock_store = MagicMock()
         self.active_accounts = {"alice", "bob", "charlie"}
         
-        with patch('bitcast.validator.tweet_scoring.tweet_discovery.TweetStore') as mock_store_cls:
+        with patch('bitcast.validator.tweet_scoring.tweet_discovery.ScoringStore') as mock_store_cls:
             mock_store_cls.get_instance.return_value = self.mock_store
             self.discovery = TweetDiscovery(
                 client=self.mock_client,
@@ -181,7 +181,7 @@ class TestTimelineDiscovery:
         self.mock_store = MagicMock()
         self.active_accounts = {"alice", "bob"}
         
-        with patch('bitcast.validator.tweet_scoring.tweet_discovery.TweetStore') as mock_store_cls:
+        with patch('bitcast.validator.tweet_scoring.tweet_discovery.ScoringStore') as mock_store_cls:
             mock_store_cls.get_instance.return_value = self.mock_store
             self.discovery = TweetDiscovery(
                 client=self.mock_client,
@@ -276,7 +276,7 @@ class TestTimelineDiscovery:
     
     @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
     def test_accumulates_with_search_results(self, MockTwitterClient):
-        """Timeline discovery results accumulate in TweetStore alongside search results."""
+        """Timeline discovery results accumulate in ScoringStore alongside search results."""
         mock_timeline_client = Mock()
         MockTwitterClient.return_value = mock_timeline_client
         
@@ -312,7 +312,7 @@ class TestTweetDiscoveryEngagements:
         self.active_accounts = {"alice", "bob"}
         self.considered_accounts = {"alice": 0.5, "bob": 0.4, "influencer": 0.9}
         
-        with patch('bitcast.validator.tweet_scoring.tweet_discovery.TweetStore') as mock_store_cls:
+        with patch('bitcast.validator.tweet_scoring.tweet_discovery.ScoringStore') as mock_store_cls:
             mock_store_cls.get_instance.return_value = self.mock_store
             self.discovery = TweetDiscovery(
                 client=self.mock_client,

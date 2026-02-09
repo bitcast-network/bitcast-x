@@ -181,7 +181,6 @@ async def two_stage_discovery(
     run_id_prefix: Optional[str] = None,
     save_summary: bool = True,
     posts_only: bool = True,
-    force_cache_refresh: bool = False,
 ) -> Tuple[str, ConvergenceMetrics]:
     """
     Two-stage social discovery with personalized PageRank.
@@ -193,6 +192,8 @@ async def two_stage_discovery(
     
     Seeds are sourced from the latest existing social map (top N by score)
     or from initial_accounts in the pool config if no prior map exists.
+    
+    Always fetches SOCIAL_DISCOVERY_FETCH_DAYS (30 days) of tweet history.
     
     Args:
         pool_name: Pool name from API configuration
@@ -206,7 +207,6 @@ async def two_stage_discovery(
         run_id_prefix: Optional prefix for run IDs
         save_summary: Whether to save discovery summary to file
         posts_only: Use only /user/tweets endpoint (default: True)
-        force_cache_refresh: Force fresh Twitter API fetches (default: False)
         
     Returns:
         Tuple of (social_map_path, convergence_metrics)
@@ -256,9 +256,8 @@ async def two_stage_discovery(
     # Get seed accounts (from previous map or initial config)
     seed_accounts = _get_seed_accounts(pool_name, pool_config)
     
-    # Create analyzer
+    # Create analyzer (always uses SOCIAL_DISCOVERY_FETCH_DAYS)
     analyzer = TwitterNetworkAnalyzer(
-        force_cache_refresh=force_cache_refresh,
         posts_only=posts_only
     )
     
@@ -591,10 +590,6 @@ if __name__ == "__main__":
             "--dual-endpoint", action="store_true",
             help="Use both /user/tweets and /user/tweetsandreplies endpoints"
         )
-        parser.add_argument(
-            "--force-refresh", action="store_true",
-            help="Force Twitter API cache refresh"
-        )
         
         # Build args list with environment-based wallet defaults
         args_list = sys.argv[1:]
@@ -631,7 +626,6 @@ if __name__ == "__main__":
             extended_overrides['max_seed_accounts'] = config.ext_max_seeds
         
         posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
-        force_refresh = config.force_refresh if hasattr(config, 'force_refresh') else False
         
         path, metrics = asyncio.run(two_stage_discovery(
             pool_name=config.pool_name,
@@ -642,7 +636,6 @@ if __name__ == "__main__":
             run_id_prefix=config.run_id_prefix,
             save_summary=not config.no_summary,
             posts_only=posts_only,
-            force_cache_refresh=force_refresh,
         ))
         
         print(f"\nTwo-stage discovery complete: {path}")
