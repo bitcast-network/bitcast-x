@@ -40,7 +40,8 @@ from bitcast.validator.utils.config import (
     ENABLE_DATA_PUBLISH,
     WALLET_NAME,
     HOTKEY_NAME,
-    SOCIAL_DISCOVERY_MAX_WORKERS
+    SOCIAL_DISCOVERY_MAX_WORKERS,
+    SOCIAL_DISCOVERY_LOOKBACK
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher, initialize_global_publisher
 from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
@@ -60,10 +61,10 @@ class TwitterNetworkAnalyzer:
     - Score normalization
     """
     
-    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, fetch_days: Optional[int] = None, posts_only: bool = True):
+    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, fetch_days: Optional[int] = None, posts_only: bool = True, max_data_age_days: Optional[int] = None):
         """
         Initialize analyzer with optional custom Twitter client.
-        
+
         Args:
             twitter_client: Optional TwitterClient instance (typically for testing/mocking).
                           If provided, posts_only is ignored.
@@ -73,10 +74,13 @@ class TwitterNetworkAnalyzer:
                        If None, uses SOCIAL_DISCOVERY_FETCH_DAYS default (30 days).
             posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
                        Default: True for social discovery. Only applied when twitter_client is not provided.
+            max_data_age_days: Maximum age of cached tweets to use in analysis (in days).
+                              If None, uses all cached data. Default: None
         """
         from bitcast.validator.utils.config import SOCIAL_DISCOVERY_FETCH_DAYS
         self.twitter_client = twitter_client or TwitterClient(posts_only=posts_only)
         self.fetch_days = fetch_days or SOCIAL_DISCOVERY_FETCH_DAYS
+        self.max_data_age_days = max_data_age_days
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -207,11 +211,40 @@ class TwitterNetworkAnalyzer:
         fetch_time = time.time() - fetch_start
         total_tweets = sum(len(tweets) for tweets in all_tweets.values())
         bt.logging.info(f"Fetched {total_tweets} tweets from {len(all_tweets)} accounts in {fetch_time:.1f}s")
-        
+
         if failed_accounts:
             bt.logging.warning(f"Failed to fetch {len(failed_accounts)} accounts: {[acc for acc, _ in failed_accounts]}")
-        
-        # Step 2: Build interaction network
+
+        # Step 2: Filter tweets by age if max_data_age_days is specified
+        if self.max_data_age_days:
+            cutoff_date = datetime.now() - timedelta(days=self.max_data_age_days)
+            filtered_tweets = {}
+            total_before = sum(len(tweets) for tweets in all_tweets.values())
+
+            for username, tweets in all_tweets.items():
+                filtered = []
+                for tweet in tweets:
+                    try:
+                        if tweet.get('created_at'):
+                            tweet_date = datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                            # Make cutoff timezone-aware
+                            cutoff_with_tz = cutoff_date.replace(tzinfo=tweet_date.tzinfo)
+                            if tweet_date >= cutoff_with_tz:
+                                filtered.append(tweet)
+                    except Exception as e:
+                        bt.logging.debug(f"Error parsing tweet date for @{username}: {e}")
+                        # Include tweet if date parsing fails (safer than excluding)
+                        filtered.append(tweet)
+                filtered_tweets[username] = filtered
+
+            all_tweets = filtered_tweets
+            total_after = sum(len(tweets) for tweets in all_tweets.values())
+            bt.logging.info(
+                f"Filtered tweets by age ({self.max_data_age_days} days max): "
+                f"{total_after}/{total_before} tweets remain ({total_before - total_after} filtered out)"
+            )
+
+        # Step 3: Build interaction network
         interaction_weights = {}  # (from_user, to_user) -> max weight for influence (PageRank)
         relationship_scores = {}  # (from_user, to_user) -> sum of weighted interactions for cabal protection
         discovered_users = set()
@@ -541,7 +574,7 @@ async def discover_social_network(
             bt.logging.info(f"Using {len(seed_accounts)} initial accounts as seeds")
         
         # Analyze network
-        analyzer = TwitterNetworkAnalyzer(posts_only=posts_only)
+        analyzer = TwitterNetworkAnalyzer(posts_only=posts_only, max_data_age_days=SOCIAL_DISCOVERY_LOOKBACK)
         scores, adjacency_matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
             seed_accounts=seed_accounts,
             keywords=pool_config['keywords'],
