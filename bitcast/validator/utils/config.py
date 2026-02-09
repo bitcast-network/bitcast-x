@@ -81,7 +81,7 @@ TWEET_MAX_LENGTH = 10000
 
 # Validation cycle
 VALIDATOR_WAIT = 60  # 60 seconds
-SCORING_INTERVAL_MINUTES = 45
+SCORING_INTERVAL_MINUTES = 15
 THOROUGH_SCORING_INTERVAL_MINUTES = 480  # 8 hours
 
 # Tiered engagement fetching intervals (in hours)
