@@ -69,10 +69,11 @@ class TestTwitterClientProviderSelection:
 class TestTwitterClientHelperMethods:
     """Tests for TwitterClient helper methods (caching, validation, etc.)."""
     
+    @mock.patch('bitcast.validator.clients.twitter_client.TWITTER_API_PROVIDER', 'desearch')
+    @mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test')
     def test_validate_tweet_authors_strict(self):
         """Test strict tweet author validation (rejects None and wrong authors)."""
-        with mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test'):
-            client = TwitterClient()
+        client = TwitterClient()
         
         tweets = [
             {'tweet_id': '1', 'text': 'My tweet', 'author': 'testuser'},
@@ -93,8 +94,8 @@ class TestTwitterClientCaching:
     
     @mock.patch('bitcast.validator.clients.twitter_client.TWITTER_API_PROVIDER', 'desearch')
     @mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test')
-    @mock.patch('bitcast.validator.utils.twitter_cache.get_cached_user_tweets')
-    @mock.patch('bitcast.validator.utils.twitter_cache.cache_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
     def test_fetch_uses_cache_when_fresh(self, mock_cache_set, mock_cache_get):
         """Test that fresh cache is used without calling provider."""
         recent_time = datetime.now() - timedelta(hours=1)

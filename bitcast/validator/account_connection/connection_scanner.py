@@ -54,14 +54,16 @@ class ConnectionScanner:
     cross-references authors against the social map, and extracts connection tags.
     """
     
-    def __init__(self, lookback_days: int = 7, db_path: Optional[Path] = None):
+    def __init__(self, lookback_days: int = 7, db_path: Optional[Path] = None,
+                 twitter_client: Optional[TwitterClient] = None):
         """
         Args:
             lookback_days: Number of days to look back for tweets (default: 7)
             db_path: Optional custom database path (for testing)
+            twitter_client: Optional TwitterClient instance (for testing, creates default if None)
         """
         self.lookback_days = lookback_days
-        self.twitter_client = TwitterClient()
+        self.twitter_client = twitter_client or TwitterClient()
         self.database = ConnectionDatabase(db_path=db_path)
         self.tag_parser = TagParser()
         self.search_tag = CONNECTION_SEARCH_TAG

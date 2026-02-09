@@ -97,23 +97,15 @@ class TestTweetDiscoveryDiscover:
     
     def test_discover_tweets_by_qrt(self):
         """Test discovering QRT tweets: API calls + store merge + store query."""
-        # Mock dual-sort API responses
-        self.mock_client.search_tweets.side_effect = [
-            {
-                'tweets': [
-                    {'tweet_id': '1', 'author': 'alice', 'text': 'QRT1', 'quoted_tweet_id': '999'},
-                    {'tweet_id': '2', 'author': 'bob', 'text': 'QRT2', 'quoted_tweet_id': '999'},
-                ],
-                'api_succeeded': True
-            },
-            {
-                'tweets': [
-                    {'tweet_id': '1', 'author': 'alice', 'text': 'QRT1', 'quoted_tweet_id': '999'},
-                    {'tweet_id': '3', 'author': 'charlie', 'text': 'QRT3', 'quoted_tweet_id': '999'},
-                ],
-                'api_succeeded': True
-            }
-        ]
+        # Mock single-sort API response (latest only)
+        self.mock_client.search_tweets.return_value = {
+            'tweets': [
+                {'tweet_id': '1', 'author': 'alice', 'text': 'QRT1', 'quoted_tweet_id': '999'},
+                {'tweet_id': '2', 'author': 'bob', 'text': 'QRT2', 'quoted_tweet_id': '999'},
+                {'tweet_id': '3', 'author': 'charlie', 'text': 'QRT3', 'quoted_tweet_id': '999'},
+            ],
+            'api_succeeded': True
+        }
         
         self.mock_store.store_tweets.return_value = {'new': 3, 'updated': 0}
         
@@ -135,23 +127,23 @@ class TestTweetDiscoveryDiscover:
         # Should return all tweets from store (including previously found)
         assert len(result) == 4
         
-        # Should have called search_tweets twice (latest + top)
-        assert self.mock_client.search_tweets.call_count == 2
+        # Should have called search_tweets once (latest sort only)
+        assert self.mock_client.search_tweets.call_count == 1
         
-        # Should have stored the 3 deduplicated tweets
+        # Should have stored the 3 tweets
         self.mock_store.store_tweets.assert_called_once()
         stored_tweets = self.mock_store.store_tweets.call_args[0][0]
-        assert len(stored_tweets) == 3  # Deduplicated
+        assert len(stored_tweets) == 3
         
         # Should have queried store
         self.mock_store.query_tweets.assert_called_once()
     
     def test_discover_always_makes_api_calls(self):
         """Test that API calls are always made (no cache short-circuit)."""
-        self.mock_client.search_tweets.side_effect = [
-            {'tweets': [], 'api_succeeded': True},
-            {'tweets': [], 'api_succeeded': True}
-        ]
+        self.mock_client.search_tweets.return_value = {
+            'tweets': [], 
+            'api_succeeded': True
+        }
         self.mock_store.store_tweets.return_value = {'new': 0, 'updated': 0}
         self.mock_store.query_tweets.return_value = [
             {'tweet_id': 'old1', 'author': 'alice'}  # Previously found
@@ -168,8 +160,8 @@ class TestTweetDiscoveryDiscover:
         assert len(result) == 1
         assert result[0]['tweet_id'] == 'old1'
         
-        # API was still called (always fresh calls)
-        assert self.mock_client.search_tweets.call_count == 2
+        # API was still called (always fresh calls, single sort)
+        assert self.mock_client.search_tweets.call_count == 1
     
     def test_discover_tweets_requires_tag_or_qrt(self):
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
