@@ -137,7 +137,9 @@ class TwitterNetworkAnalyzer:
         min_followers: int = 0,
         lang: Optional[str] = None,
         min_tweets: int = 1,
-        min_interaction_weight: float = 0
+        min_interaction_weight: float = 0,
+        core_accounts: Optional[Set[str]] = None,
+        use_personalized_pagerank: bool = False
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
@@ -156,6 +158,11 @@ class TwitterNetworkAnalyzer:
             min_interaction_weight: Minimum total incoming interaction weight for quality filtering.
                                    Accounts with incoming weight below threshold are filtered out.
                                    Seed accounts are always preserved.
+            core_accounts: Optional set of "core" accounts for personalized PageRank.
+                          When provided with use_personalized_pagerank=True, the random walk
+                          restart distribution is biased toward these accounts.
+            use_personalized_pagerank: If True (and core_accounts provided), use personalized
+                                      PageRank biased toward core accounts instead of standard PageRank.
             
         Returns:
             Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
@@ -373,7 +380,23 @@ class TwitterNetworkAnalyzer:
         for (from_user, to_user), weight in interaction_weights.items():
             G.add_edge(from_user, to_user, weight=weight)
         
-        pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
+        if use_personalized_pagerank and core_accounts:
+            # Personalized PageRank biased toward core accounts
+            personalization = {
+                node: 1.0 if node in core_accounts else 0.0
+                for node in G.nodes()
+            }
+            if sum(personalization.values()) > 0:
+                bt.logging.info(f"Using personalized PageRank biased toward {int(sum(personalization.values()))} core accounts")
+                pagerank_scores = nx.pagerank(
+                    G, weight='weight', alpha=self.alpha,
+                    personalization=personalization, max_iter=1000
+                )
+            else:
+                bt.logging.warning("No core accounts found in graph, falling back to standard PageRank")
+                pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
+        else:
+            pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
         
         # Step 5: Calculate pool difficulty and absolute influence scores
         # Pool difficulty = total followers across all pool members
@@ -489,7 +512,7 @@ async def discover_social_network(
             social_map_files = [f for f in pool_dir.glob("*.json") 
                               if not f.name.endswith('_adjacency.json') 
                               and not f.name.endswith('_metadata.json')
-                              and not f.name.startswith('recursive_summary_')]
+                              and not f.name.startswith(('recursive_summary_', 'two_stage_summary_'))]
             if social_map_files:
                 # Use latest social map by filename timestamp
                 latest_file = max(
@@ -697,7 +720,7 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
             social_map_files = [
                 f for f in social_maps_dir.glob("*.json")
                 if not f.name.endswith(('_adjacency.json', '_metadata.json'))
-                and not f.name.startswith('recursive_summary_')
+                and not f.name.startswith(('recursive_summary_', 'two_stage_summary_'))
             ]
             
             if not social_map_files:
@@ -715,14 +738,16 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
         # Only run if needed
         if needs_update:
             try:
+                from .recursive_discovery import two_stage_discovery
+                
                 bt.logging.info(
-                    f"Running discovery for {pool_name} "
+                    f"Running two-stage discovery for {pool_name} "
                     f"(offset={date_offset}, no map from today)"
                 )
-                social_map_path = await discover_social_network(
-                    pool_name=pool_name, 
+                social_map_path, _ = await two_stage_discovery(
+                    pool_name=pool_name,
                     force_cache_refresh=True,
-                    posts_only=True  # Use posts-only mode for faster discovery
+                    posts_only=True,
                 )
                 results[pool_name] = social_map_path
             except Exception as e:
