@@ -90,6 +90,10 @@ PAGERANK_ALPHA = 0.85
 # Social Discovery Configuration
 # =============================================================================
 
+# Cache freshness for social discovery
+SOCIAL_DISCOVERY_CACHE_HOURS = 24
+CACHE_FRESHNESS_SECONDS = SOCIAL_DISCOVERY_CACHE_HOURS * 3600
+
 # Concurrency (1 = sequential, 2+ = concurrent)
 SOCIAL_DISCOVERY_MAX_WORKERS = 10
 
