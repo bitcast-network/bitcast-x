@@ -348,34 +348,71 @@ async def two_stage_discovery(
     
     metrics = ConvergenceMetrics()
     
-    # ===== STAGE 1: CORE DISCOVERY (STRICT) =====
+    # ===== STAGE 1: CORE DISCOVERY (STRICT, RECURSIVE) =====
+    CORE_MAX_ITERATIONS = 10
+    CORE_CONVERGENCE_THRESHOLD = 0.95
+    
     bt.logging.info("")
     bt.logging.info("-" * 80)
-    bt.logging.info("STAGE 1: CORE DISCOVERY (Strict Parameters)")
+    bt.logging.info("STAGE 1: CORE DISCOVERY (Strict Parameters, Recursive)")
     bt.logging.info("-" * 80)
     
     core_seeds = seed_accounts[:core_max_seed_accounts]
     bt.logging.info(f"Seeds: {len(core_seeds)} accounts")
+    bt.logging.info(f"Max iterations: {CORE_MAX_ITERATIONS}, convergence: {CORE_CONVERGENCE_THRESHOLD:.0%}")
     milestones.record("STAGE_1", "Started", {"seeds": len(core_seeds)})
     
-    core_scores, _, _, core_usernames, core_user_info, _ = analyzer.analyze_network(
-        seed_accounts=core_seeds,
-        keywords=pool_config['keywords'],
-        min_followers=0,
-        lang=pool_config.get('lang'),
-        min_tweets=core_min_tweets,
-        min_interaction_weight=core_min_interaction_weight,
-        skip_if_cache_fresh=True,
-    )
+    prev_core_top = set()
+    current_core_seeds = list(core_seeds)
+    core_accounts = set()
     
-    core_accounts = set(core_usernames)
-    bt.logging.info(f"Core discovery complete: {len(core_accounts)} accounts")
-    milestones.record("STAGE_1", "Complete", {"core_accounts": len(core_accounts)})
+    for core_iter in range(CORE_MAX_ITERATIONS):
+        bt.logging.info(f"  Core iteration {core_iter + 1}/{CORE_MAX_ITERATIONS} | Seeds: {len(current_core_seeds)}")
+        milestones.record("STAGE_1", f"Iteration {core_iter + 1} started", {"seeds": len(current_core_seeds)})
+        
+        core_scores, _, _, core_usernames, core_user_info, _ = analyzer.analyze_network(
+            seed_accounts=current_core_seeds,
+            keywords=pool_config['keywords'],
+            min_followers=0,
+            lang=pool_config.get('lang'),
+            min_tweets=core_min_tweets,
+            min_interaction_weight=core_min_interaction_weight,
+            skip_if_cache_fresh=True,
+        )
+        
+        core_accounts = set(core_usernames)
+        bt.logging.info(f"  Accounts: {len(core_accounts)}")
+        
+        # Get top accounts for convergence check and next iteration seeds
+        sorted_core = sorted(core_scores.items(), key=lambda x: x[1], reverse=True)
+        current_core_top = {acc for acc, _ in sorted_core[:core_max_seed_accounts]}
+        
+        # Convergence check
+        if prev_core_top:
+            core_stability = calculate_stability(prev_core_top, current_core_top)
+            bt.logging.info(f"  Stability: {core_stability:.1%}")
+            milestones.record("STAGE_1", f"Iteration {core_iter + 1} complete", {
+                "accounts": len(core_accounts),
+                "stability": round(core_stability, 4)
+            })
+            
+            if core_stability >= CORE_CONVERGENCE_THRESHOLD:
+                bt.logging.info(f"  Core converged at iteration {core_iter + 1} ({core_stability:.1%} >= {CORE_CONVERGENCE_THRESHOLD:.0%})")
+                milestones.record("STAGE_1", "Converged", {"iteration": core_iter + 1, "stability": round(core_stability, 4)})
+                break
+        else:
+            milestones.record("STAGE_1", f"Iteration {core_iter + 1} complete", {"accounts": len(core_accounts)})
+        
+        prev_core_top = current_core_top
+        current_core_seeds = list(current_core_top)
     
-    # ===== STAGE 2: EXTENDED DISCOVERY (RELAXED, RECURSIVE) =====
+    bt.logging.info(f"Core discovery complete: {len(core_accounts)} accounts ({core_iter + 1} iterations)")
+    milestones.record("STAGE_1", "Complete", {"core_accounts": len(core_accounts), "iterations": core_iter + 1})
+    
+    # ===== STAGE 2: EXTENDED DISCOVERY (RELAXED, RECURSIVE, PERSONALIZED PAGERANK) =====
     bt.logging.info("")
     bt.logging.info("-" * 80)
-    bt.logging.info("STAGE 2: EXTENDED DISCOVERY (Relaxed Parameters)")
+    bt.logging.info("STAGE 2: EXTENDED DISCOVERY (Relaxed Parameters, Personalized PageRank)")
     bt.logging.info("-" * 80)
     bt.logging.info(f"Seeding from {len(core_accounts)} core accounts")
     bt.logging.info(f"Max iterations: {ext_max_iterations}, convergence: {ext_convergence:.0%}")
@@ -384,6 +421,14 @@ async def two_stage_discovery(
     all_discovered = set(core_accounts)
     prev_top_accounts = set()
     current_seeds = list(core_accounts)
+    
+    # These will hold the final iteration's results for building the social map
+    scores = {}
+    adj_matrix = None
+    rel_matrix = None
+    usernames = []
+    user_info_map = {}
+    total_pool_followers = 0
 
     for iteration in range(ext_max_iterations):
         bt.logging.info("")
@@ -391,20 +436,22 @@ async def two_stage_discovery(
         bt.logging.info(f"  Seeds: {len(current_seeds)}")
         milestones.record("STAGE_2", f"Iteration {iteration + 1} started", {"seeds": len(current_seeds)})
 
-        # Discover with relaxed params (no keyword filter during expansion)
-        # Enable cache freshness skip for iterations after the first to save API quota
-        iter_scores, _, _, iter_usernames, _, _ = analyzer.analyze_network(
+        # Discover with extended (relaxed) params and personalized PageRank
+        # biased toward core accounts from Stage 1
+        scores, adj_matrix, rel_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
             seed_accounts=current_seeds,
-            keywords=[],  # No keyword filter during discovery
+            keywords=pool_config['keywords'],
             min_followers=0,
             lang=pool_config.get('lang'),
-            min_tweets=0,
-            min_interaction_weight=0,
+            min_tweets=ext_min_tweets,
+            min_interaction_weight=ext_min_interaction_weight,
+            core_accounts=core_accounts,
+            use_personalized_pagerank=True,
             skip_if_cache_fresh=True,
         )
         
         # Track discoveries
-        iteration_accounts = set(iter_usernames)
+        iteration_accounts = set(usernames)
         newly_discovered = iteration_accounts - all_discovered
         all_discovered.update(iteration_accounts)
         
@@ -412,7 +459,7 @@ async def two_stage_discovery(
         bt.logging.info(f"  Total discovered: {len(all_discovered)}")
         
         # Get top accounts for convergence check and next iteration seeds
-        sorted_accounts = sorted(iter_scores.items(), key=lambda x: x[1], reverse=True)
+        sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         current_top = {acc for acc, _ in sorted_accounts[:ext_max_seed_accounts]}
         
         # Convergence check
@@ -455,32 +502,10 @@ async def two_stage_discovery(
         current_seeds = list(current_top)
     
     bt.logging.info("")
-    bt.logging.info(f"Extended discovery complete: {len(all_discovered)} total accounts")
-    milestones.record("STAGE_2", "Complete", {"total_accounts": len(all_discovered), "iterations_completed": iteration + 1})
+    bt.logging.info(f"Extended discovery complete: {len(scores)} accounts ranked")
+    milestones.record("STAGE_2", "Complete", {"total_accounts": len(scores), "iterations_completed": iteration + 1})
     
-    # ===== STAGE 3: FINAL RANKING (PERSONALIZED PAGERANK) =====
-    bt.logging.info("")
-    bt.logging.info("-" * 80)
-    bt.logging.info("STAGE 3: FINAL RANKING (Personalized PageRank)")
-    bt.logging.info("-" * 80)
-    bt.logging.info(f"Ranking {len(all_discovered)} accounts with core bias ({len(core_accounts)} core)")
-    milestones.record("STAGE_3", "Started", {"accounts_to_rank": len(all_discovered), "core_accounts": len(core_accounts)})
-    
-    scores, adj_matrix, rel_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
-        seed_accounts=list(all_discovered),
-        keywords=pool_config['keywords'],
-        min_followers=0,
-        lang=pool_config.get('lang'),
-        min_tweets=ext_min_tweets,
-        min_interaction_weight=ext_min_interaction_weight,
-        core_accounts=core_accounts,
-        use_personalized_pagerank=True,
-        skip_if_cache_fresh=True,
-    )
-    
-    milestones.record("STAGE_3", "Complete", {"accounts_ranked": len(scores)})
-    
-    # Build social map with is_core flag
+    # Build social map from the final iteration's results
     sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     scaled_pool_difficulty = total_pool_followers / 1000
     core_in_final = core_accounts & set(usernames)
@@ -506,7 +531,7 @@ async def two_stage_discovery(
         }
     }
     
-    bt.logging.info(f"Final network: {len(scores)} accounts ({len(core_in_final)} core, {len(set(usernames) - core_accounts)} extended)")
+    bt.logging.info(f"Final social map: {len(scores)} accounts ({len(core_in_final)} core, {len(set(usernames) - core_accounts)} extended)")
     
     # ===== SAVE RESULTS =====
     social_maps_dir = Path(__file__).parent / "social_maps"
