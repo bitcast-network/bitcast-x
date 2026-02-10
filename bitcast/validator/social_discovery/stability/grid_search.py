@@ -1,9 +1,10 @@
 """
 Grid search runner for stability analysis.
 
-Sweeps parameter combinations, runs the stability pipeline for each,
-and collects results.  Output is written to the stability output
-directory — never to ``social_maps/`` and never published.
+Sweeps parameter combinations for the two-stage recursive discovery
+pipeline, runs the stability analysis for each, and collects results.
+Output is written to the stability output directory — never to
+``social_maps/`` and never published.
 """
 
 import json
@@ -17,8 +18,7 @@ import bittensor as bt
 
 from .analyzer import StabilityAnalyzer
 from .config import (
-    GRID_DEFINITIONS,
-    SINGLE_STAGE_GRID,
+    GRID,
     OUTPUT_DIR,
     TOP_N_ACCOUNTS,
 )
@@ -26,7 +26,7 @@ from .config import (
 
 class GridSearchRunner:
     """
-    Runs parameter grid search for a single pool.
+    Runs a parameter grid search for a single pool.
 
     Shares one ``StabilityAnalyzer`` (and therefore one ``TwitterClient``)
     across all combinations so that the tweet cache is reused.
@@ -53,33 +53,30 @@ class GridSearchRunner:
     # Public API
     # ------------------------------------------------------------------
 
-    def run_two_stage(
+    def run(
         self,
         *,
-        recursive: bool = False,
         core_grid: Optional[Dict[str, List]] = None,
         extended_grid: Optional[Dict[str, List]] = None,
     ) -> List[Dict]:
         """
-        Run a two-stage grid search.
+        Run the two-stage recursive grid search.
 
         If *core_grid* / *extended_grid* are not supplied they are loaded
-        from ``config.GRID_DEFINITIONS[pool_name]``.
+        from ``config.GRID``.
 
         Returns:
             List of result dicts, one per combination.
         """
-        defaults = GRID_DEFINITIONS.get(self.pool_name, GRID_DEFINITIONS.get("bittensor", {}))
-        core_grid = core_grid or defaults.get("core", {})
-        ext_key = "extended_recursive" if recursive else "extended"
-        extended_grid = extended_grid or defaults.get(ext_key, {})
+        core_grid = core_grid or GRID["core"]
+        extended_grid = extended_grid or GRID["extended"]
 
         combinations = self._build_combinations(core_grid, extended_grid)
         total = len(combinations)
 
         bt.logging.info("=" * 80)
-        bt.logging.info(f"TWO-STAGE GRID SEARCH — {self.pool_name}")
-        bt.logging.info(f"Combinations: {total}  (recursive={recursive})")
+        bt.logging.info(f"GRID SEARCH — {self.pool_name}")
+        bt.logging.info(f"Combinations: {total}")
         bt.logging.info(f"Core grid:     {core_grid}")
         bt.logging.info(f"Extended grid: {extended_grid}")
         bt.logging.info("=" * 80)
@@ -92,40 +89,7 @@ class GridSearchRunner:
             bt.logging.info(f"  Extended: {ext_params}")
             bt.logging.info("-" * 80)
 
-            result = self._run_two_stage_combination(core_params, ext_params)
-            results.append(result)
-
-        self._log_summary(results)
-        return results
-
-    def run_single_stage(
-        self,
-        *,
-        param_grid: Optional[Dict[str, List]] = None,
-    ) -> List[Dict]:
-        """
-        Run a single-stage grid search.
-
-        Returns:
-            List of result dicts, one per combination.
-        """
-        param_grid = param_grid or SINGLE_STAGE_GRID
-        combinations = self._build_flat_combinations(param_grid)
-        total = len(combinations)
-
-        bt.logging.info("=" * 80)
-        bt.logging.info(f"SINGLE-STAGE GRID SEARCH — {self.pool_name}")
-        bt.logging.info(f"Combinations: {total}")
-        bt.logging.info(f"Grid: {param_grid}")
-        bt.logging.info("=" * 80)
-
-        results: List[Dict] = []
-        for i, params in enumerate(combinations):
-            bt.logging.info("-" * 80)
-            bt.logging.info(f"Combination {i+1}/{total}: {params}")
-            bt.logging.info("-" * 80)
-
-            result = self._run_single_combination(params)
+            result = self._run_combination(core_params, ext_params)
             results.append(result)
 
         self._log_summary(results)
@@ -135,17 +99,13 @@ class GridSearchRunner:
     # Result persistence
     # ------------------------------------------------------------------
 
-    def save_results(
-        self,
-        results: List[Dict],
-        grid_type: str = "two_stage",
-    ) -> Path:
+    def save_results(self, results: List[Dict]) -> Path:
         """
         Save grid search results to the output directory.
 
         Returns the path to the saved file.
         """
-        grid_dir = self.output_dir / "grid_searches" / grid_type
+        grid_dir = self.output_dir / "grid_searches"
         grid_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -164,7 +124,7 @@ class GridSearchRunner:
     # Private: running combinations
     # ------------------------------------------------------------------
 
-    def _run_two_stage_combination(
+    def _run_combination(
         self,
         core_params: Dict,
         ext_params: Dict,
@@ -184,19 +144,6 @@ class GridSearchRunner:
                 "parameters": {"core": core_params, "extended": ext_params},
                 "error": str(e),
             }
-
-    def _run_single_combination(self, params: Dict) -> Dict:
-        try:
-            result = self.analyzer.run_analysis(
-                params=params,
-                top_n=self.top_n,
-            )
-            result["parameters"] = params
-            return result
-        except Exception as e:
-            bt.logging.error(f"Combination failed: {e}")
-            traceback.print_exc()
-            return {"parameters": params, "error": str(e)}
 
     # ------------------------------------------------------------------
     # Private: combination generation
@@ -226,14 +173,6 @@ class GridSearchRunner:
             for cc, ec in product(core_combos, ext_combos)
         ]
 
-    @staticmethod
-    def _build_flat_combinations(
-        param_grid: Dict[str, List],
-    ) -> List[Dict]:
-        names = list(param_grid.keys())
-        combos = list(product(*param_grid.values()))
-        return [dict(zip(names, c)) for c in combos]
-
     # ------------------------------------------------------------------
     # Private: summary / logging
     # ------------------------------------------------------------------
@@ -257,17 +196,13 @@ class GridSearchRunner:
                 "components": r["stability"]["components"],
             }
 
-            # Two-stage extras
             meta = r.get("metadata", {})
-            if meta.get("two_stage") or meta.get("core_accounts_count"):
-                entry["core_accounts"] = meta.get("core_accounts_count", 0)
-                entry["extended_accounts"] = (
-                    len(r["social_map"]["accounts"]) - meta.get("core_accounts_count", 0)
-                )
-                ext = r.get("parameters", {}).get("extended", {})
-                if ext.get("recursive"):
-                    entry["recursive"] = True
-                    entry["max_iterations"] = ext.get("max_iterations")
+            entry["core_accounts"] = meta.get("core_accounts_count", 0)
+            entry["extended_accounts"] = (
+                len(r["social_map"]["accounts"]) - meta.get("core_accounts_count", 0)
+            )
+            ext = r.get("parameters", {}).get("extended", {})
+            entry["max_iterations"] = ext.get("max_iterations")
 
             summary.append(entry)
         return summary
@@ -292,13 +227,12 @@ class GridSearchRunner:
         for rank, r in enumerate(valid, 1):
             stab = r["stability"]["overall"]
             accts = len(r["social_map"]["accounts"])
-            params = r.get("parameters", {})
             core_ct = r.get("metadata", {}).get("core_accounts_count", "")
             core_str = f", core={core_ct}" if core_ct else ""
             bt.logging.info(
                 f"  #{rank}: stability={stab:.3f}, accounts={accts}{core_str}"
             )
-            bt.logging.info(f"         params={params}")
+            bt.logging.info(f"         params={r.get('parameters', {})}")
 
         for r in errors:
             bt.logging.info(f"  ERROR: {r['parameters']} — {r['error']}")

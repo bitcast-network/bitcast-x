@@ -174,7 +174,6 @@ class StabilityAnalyzer:
             "max_seed_accounts",
             self.pool_config.get("extended_max_seed_accounts", 300),
         )
-        recursive = extended_params.get("recursive", False)
         ext_max_iter = extended_params.get("max_iterations", 3)
         ext_convergence = extended_params.get("convergence_threshold", 0.90)
 
@@ -187,7 +186,7 @@ class StabilityAnalyzer:
         )
         bt.logging.info(
             f"Extended: min_weight={ext_min_weight}, min_tweets={ext_min_tweets}, "
-            f"max_seeds={ext_max_seeds}, recursive={recursive}"
+            f"max_seeds={ext_max_seeds}"
         )
 
         # ====== STAGE 1: Core discovery (strict, recursive) ============
@@ -242,16 +241,15 @@ class StabilityAnalyzer:
         all_discovered: Set[str] = set(core_accounts)
         prev_top: Set[str] = set()
 
-        ext_iterations = ext_max_iter if recursive else 1
         scores: Dict[str, float] = {}
         adj_matrix = None
         usernames: List[str] = []
         user_info_map: Dict[str, Dict] = {}
         total_pool_followers = 0
 
-        for iteration in range(ext_iterations):
+        for iteration in range(ext_max_iter):
             bt.logging.info(
-                f"  Extended iter {iteration + 1}/{ext_iterations} | "
+                f"  Extended iter {iteration + 1}/{ext_max_iter} | "
                 f"seeds={len(current_seeds)}"
             )
 
@@ -273,9 +271,6 @@ class StabilityAnalyzer:
             newly_discovered = iteration_accounts - all_discovered
             all_discovered.update(iteration_accounts)
             bt.logging.info(f"  New={len(newly_discovered)}, total={len(all_discovered)}")
-
-            if not recursive:
-                break
 
             sorted_ext = sorted(scores.items(), key=lambda x: x[1], reverse=True)
             current_top = {acc for acc, _ in sorted_ext[:ext_max_seeds]}
@@ -356,135 +351,6 @@ class StabilityAnalyzer:
             },
             "social_map": social_map,
             "core_accounts": list(core_accounts),
-            "window_metrics": window_results,
-            "window_summary": calculate_per_window_summary(window_results),
-            "stability": stability,
-            "account_stability": account_stab,
-        }
-
-    # ------------------------------------------------------------------
-    # Public: single-stage analysis
-    # ------------------------------------------------------------------
-
-    def run_analysis(
-        self,
-        *,
-        params: Optional[Dict] = None,
-        top_n: int = TOP_N_ACCOUNTS,
-        force_refresh: bool = False,
-    ) -> Dict:
-        """
-        Run single-stage (recursive discovery) stability analysis.
-
-        Args:
-            params: Optional overrides (min_interaction_weight, min_tweets,
-                    max_seed_accounts)
-            top_n: Top accounts to track
-            force_refresh: Force-refresh cache
-
-        Returns:
-            Result dict
-        """
-        params = params or {}
-        now = datetime.now(timezone.utc)
-
-        min_weight = params.get(
-            "min_interaction_weight",
-            self.pool_config.get("min_interaction_weight", 2),
-        )
-        min_tweets = params.get(
-            "min_tweets",
-            self.pool_config.get("min_tweets", 1),
-        )
-        max_seeds = params.get(
-            "max_seed_accounts",
-            self.pool_config.get("max_seed_accounts", 150),
-        )
-
-        bt.logging.info("=" * 80)
-        bt.logging.info("STABILITY: SINGLE-STAGE ANALYSIS")
-        bt.logging.info("=" * 80)
-
-        # Recursive discovery
-        seed_accounts = list(self.pool_config["initial_accounts"])
-        max_iterations = 10
-        convergence_threshold = 0.95
-        prev_top: Set[str] = set()
-        scores: Dict[str, float] = {}
-        usernames: List[str] = []
-        user_info_map: Dict[str, Dict] = {}
-        total_pool_followers = 0
-
-        for iteration in range(max_iterations):
-            seeds = seed_accounts if iteration == 0 else list(prev_top)
-            bt.logging.info(f"  Iter {iteration + 1}/{max_iterations} | seeds={len(seeds)}")
-
-            scores, adj_matrix, _, usernames, user_info_map, total_pool_followers = (
-                self.network_analyzer.analyze_network(
-                    seed_accounts=seeds,
-                    keywords=self.pool_config["keywords"],
-                    min_followers=0,
-                    lang=self.pool_config.get("lang"),
-                    min_tweets=min_tweets,
-                    min_interaction_weight=min_weight,
-                    skip_if_cache_fresh=True,
-                )
-            )
-
-            sorted_accs = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-            current_top = {acc for acc, _ in sorted_accs[:max_seeds]}
-
-            if prev_top:
-                stab = _jaccard(prev_top, current_top)
-                bt.logging.info(f"  Stability: {stab:.1%}")
-                if stab >= convergence_threshold:
-                    bt.logging.info(f"  Converged at iter {iteration + 1}")
-                    break
-            prev_top = current_top
-
-        sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        social_map = {
-            "metadata": {
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "pool_name": self.pool_name,
-                "total_accounts": len(scores),
-                "total_followers": total_pool_followers,
-            },
-            "accounts": {
-                username: {
-                    "score": score,
-                    "followers_count": user_info_map.get(username, {}).get("followers_count", 0),
-                }
-                for username, score in sorted_accounts
-            },
-        }
-
-        # Windowed stability analysis
-        top_accounts = [acc for acc, _ in sorted_accounts[:top_n]]
-        extended_tweets = self._fetch_pool_tweets(top_accounts, days=EXTENDED_FETCH_DAYS)
-
-        windows = self._define_windows(now)
-        window_results = self._analyze_windows(
-            windows=windows,
-            extended_tweets=extended_tweets,
-            top_accounts=top_accounts,
-            keywords=self.pool_config["keywords"],
-        )
-
-        stability = calculate_cross_window_stability(window_results, top_n=top_n)
-        account_stab = calculate_account_stability(window_results, top_accounts)
-
-        bt.logging.info(f"Overall stability: {stability['overall']:.3f}")
-        bt.logging.info("=" * 80)
-
-        return {
-            "metadata": {
-                "analysis_time": datetime.now(timezone.utc).isoformat(),
-                "pool_name": self.pool_name,
-                "top_n": top_n,
-                "params": params,
-            },
-            "social_map": social_map,
             "window_metrics": window_results,
             "window_summary": calculate_per_window_summary(window_results),
             "stability": stability,

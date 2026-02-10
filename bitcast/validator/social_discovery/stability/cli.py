@@ -2,19 +2,18 @@
 """
 CLI for running stability analysis and grid searches.
 
+The validator runs in two-stage recursive mode, so that is the only
+mode supported here.  The pool name is used for output file naming.
+
 Usage (from the bitcast-x root):
 
-    # Two-stage grid search (recursive) for bittensor pool
+    # Grid search for the tao pool
     python -m bitcast.validator.social_discovery.stability.cli \
-        --pool tao --grid --two-stage --recursive
+        --pool tao --grid
 
     # Single analysis run
     python -m bitcast.validator.social_discovery.stability.cli \
-        --pool tao --two-stage
-
-    # Single-stage grid search
-    python -m bitcast.validator.social_discovery.stability.cli \
-        --pool tao --grid
+        --pool tao
 """
 
 import argparse
@@ -42,18 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default="tao",
         help="Pool name to analyse (default: tao)",
-    )
-
-    # Analysis mode
-    parser.add_argument(
-        "--two-stage",
-        action="store_true",
-        help="Use two-stage discovery (core + extended)",
-    )
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Enable recursive expansion in Stage 2 (requires --two-stage)",
     )
 
     # Grid search
@@ -131,15 +118,9 @@ def main(argv=None):
         )
 
         try:
-            if config.two_stage:
-                results = runner.run_two_stage(recursive=config.recursive)
-                grid_type = "two_stage_recursive" if config.recursive else "two_stage"
-            else:
-                results = runner.run_single_stage()
-                grid_type = "single_stage"
-
+            results = runner.run()
             if not config.no_save:
-                saved = runner.save_results(results, grid_type=grid_type)
+                saved = runner.save_results(results)
                 bt.logging.info(f"Results saved to {saved}")
         finally:
             runner.close()
@@ -154,34 +135,20 @@ def main(argv=None):
     )
 
     try:
-        if config.two_stage:
-            # Build param dicts from CLI overrides
-            core_params = {}
-            ext_params = {}
-            if config.min_interaction_weight is not None:
-                core_params["min_interaction_weight"] = config.min_interaction_weight
-            if config.min_tweets is not None:
-                core_params["min_tweets"] = config.min_tweets
-            if config.max_seed_accounts is not None:
-                core_params["max_seed_accounts"] = config.max_seed_accounts
-            if config.recursive:
-                ext_params["recursive"] = True
+        core_params = {}
+        ext_params = {}
+        if config.min_interaction_weight is not None:
+            core_params["min_interaction_weight"] = config.min_interaction_weight
+        if config.min_tweets is not None:
+            core_params["min_tweets"] = config.min_tweets
+        if config.max_seed_accounts is not None:
+            core_params["max_seed_accounts"] = config.max_seed_accounts
 
-            result = analyzer.run_two_stage_analysis(
-                core_params=core_params,
-                extended_params=ext_params,
-                top_n=top_n,
-            )
-        else:
-            params = {}
-            if config.min_interaction_weight is not None:
-                params["min_interaction_weight"] = config.min_interaction_weight
-            if config.min_tweets is not None:
-                params["min_tweets"] = config.min_tweets
-            if config.max_seed_accounts is not None:
-                params["max_seed_accounts"] = config.max_seed_accounts
-
-            result = analyzer.run_analysis(params=params, top_n=top_n)
+        result = analyzer.run_two_stage_analysis(
+            core_params=core_params,
+            extended_params=ext_params,
+            top_n=top_n,
+        )
 
         # Save
         if not config.no_save:
