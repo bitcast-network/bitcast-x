@@ -418,9 +418,13 @@ async def two_stage_discovery(
     bt.logging.info(f"Max iterations: {ext_max_iterations}, convergence: {ext_convergence:.0%}")
     milestones.record("STAGE_2", "Started", {"core_accounts": len(core_accounts), "max_iterations": ext_max_iterations})
 
+    # Limit initial seeds to max_seed_accounts using Stage 1 scores to rank
     all_discovered = set(core_accounts)
     prev_top_accounts = set()
-    current_seeds = list(core_accounts)
+    sorted_core_by_score = sorted(core_scores.items(), key=lambda x: x[1], reverse=True)
+    current_seeds = [acc for acc, _ in sorted_core_by_score[:ext_max_seed_accounts]]
+    if len(core_accounts) > ext_max_seed_accounts:
+        bt.logging.info(f"Limiting initial seeds to top {ext_max_seed_accounts} of {len(core_accounts)} core accounts (by Stage 1 score)")
     
     # These will hold the final iteration's results for building the social map
     scores = {}
