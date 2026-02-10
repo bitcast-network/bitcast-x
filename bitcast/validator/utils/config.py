@@ -7,7 +7,13 @@ import bittensor as bt
 env_path = Path(__file__).parents[1] / '.env'
 load_dotenv(dotenv_path=env_path)
 
+__version__ = "1.2.5"
+
+# =============================================================================
 # Cache Configuration
+# =============================================================================
+
+# Cache directories
 CACHE_ROOT = Path(__file__).resolve().parents[2] / "cache"
 CACHE_DIRS = {
     "briefs": os.path.join(CACHE_ROOT, "briefs"),
@@ -15,13 +21,25 @@ CACHE_DIRS = {
     "llm": os.path.join(CACHE_ROOT, "llm")
 }
 
-__version__ = "1.2.5"
+# Cache expiry settings
+CACHE_EXPIRY_DAYS = 90
+CACHE_EXPIRY_SECONDS = CACHE_EXPIRY_DAYS * 24 * 60 * 60  # Convert days to seconds
 
+# LLM caching
+DISABLE_LLM_CACHING = os.getenv('DISABLE_LLM_CACHING', 'False').lower() == 'true'
+LLM_CACHE_EXPIRY = 7 * 24 * 60 * 60  # 7 days in seconds
+
+# =============================================================================
 # Wallet Configuration
+# =============================================================================
 WALLET_NAME = os.getenv('WALLET_NAME')
 HOTKEY_NAME = os.getenv('HOTKEY_NAME')
 
 MECHID = int(os.getenv('MECHID', '1'))
+
+# =============================================================================
+# Server Endpoints
+# =============================================================================
 
 # Bitcast server
 BITCAST_SERVER_URL = os.getenv('BITCAST_SERVER_URL', 'http://44.227.253.127')
@@ -35,6 +53,10 @@ X_SOCIAL_MAP_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-social-map"
 X_ACCOUNT_CONNECTIONS_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-account-connections"
 TWEETS_SUBMIT_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/brief-tweets"
 
+# =============================================================================
+# API Keys and Providers
+# =============================================================================
+
 # Twitter API Provider Configuration
 TWITTER_API_PROVIDER = os.getenv('TWITTER_API_PROVIDER', 'rapidapi')  # Options: 'desearch' or 'rapidapi'
 
@@ -47,7 +69,11 @@ CHUTES_API_KEY = os.getenv('CHUTES_API_KEY')
 WANDB_API_KEY = os.getenv('WANDB_API_KEY')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 
-# Twitter API Configuration - Fetching Strategy
+# =============================================================================
+# Twitter API Configuration
+# =============================================================================
+
+# Fetching Strategy
 SOCIAL_DISCOVERY_FETCH_DAYS = 30  # Days of tweet history for social network discovery
 SOCIAL_DISCOVERY_LOOKBACK = 60  # Maximum age of cached tweets to use in analysis (in days, None = use all)
 TWEET_SCORING_FETCH_DAYS = 1     # Days of tweet history for thorough scoring timeline pulls
@@ -60,21 +86,25 @@ PAGERANK_QUOTE_WEIGHT = 3.0
 BASELINE_TWEET_SCORE_FACTOR = 2
 PAGERANK_ALPHA = 0.85
 
-# Cache Management
-CACHE_EXPIRY_DAYS = 90
-DISCOVERY_CACHE_EXPIRY = CACHE_EXPIRY_DAYS * 24 * 60 * 60  # Convert days to seconds
+# =============================================================================
+# Social Discovery Configuration
+# =============================================================================
 
-# Social Discovery Concurrency (1 = sequential, 2+ = concurrent)
+# Concurrency (1 = sequential, 2+ = concurrent)
 SOCIAL_DISCOVERY_MAX_WORKERS = 10
+
+# =============================================================================
+# Emissions and Rewards
+# =============================================================================
 
 # Twitter emissions
 EMISSIONS_PERIOD = 7  # 7 days
 REWARDS_DELAY_DAYS = 1  # Wait period before rewards start after brief closes
 REWARD_SMOOTHING_EXPONENT = 0.65
 
-# LLM caching
-DISABLE_LLM_CACHING = os.getenv('DISABLE_LLM_CACHING', 'False').lower() == 'true'
-LLM_CACHE_EXPIRY = 7 * 24 * 60 * 60  # 7 days in seconds
+# =============================================================================
+# LLM and Validation Settings
+# =============================================================================
 
 # Content length limit for LLM evaluation
 TWEET_MAX_LENGTH = 10000
@@ -83,6 +113,10 @@ TWEET_MAX_LENGTH = 10000
 VALIDATOR_WAIT = 60  # 60 seconds
 SCORING_INTERVAL_MINUTES = 45
 THOROUGH_SCORING_INTERVAL_MINUTES = 480  # 8 hours
+
+# =============================================================================
+# Subnet Treasury and No-Code Mining
+# =============================================================================
 
 # Subnet treasury
 SUBNET_TREASURY_PERCENTAGE = 0
@@ -119,6 +153,7 @@ bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOIN
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
 bt.logging.info(f"TWITTER_API_PROVIDER: {TWITTER_API_PROVIDER}")
 bt.logging.info(f"SOCIAL_DISCOVERY_FETCH_DAYS: {SOCIAL_DISCOVERY_FETCH_DAYS}")
+bt.logging.info(f"SOCIAL_DISCOVERY_CACHE_HOURS: {SOCIAL_DISCOVERY_CACHE_HOURS}")
 bt.logging.info(f"TWEET_SCORING_FETCH_DAYS: {TWEET_SCORING_FETCH_DAYS}")
 bt.logging.info(f"MAX_TWEETS_PER_FETCH: {MAX_TWEETS_PER_FETCH}")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")

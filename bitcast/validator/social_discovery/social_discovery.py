@@ -61,7 +61,16 @@ class TwitterNetworkAnalyzer:
     - Score normalization
     """
     
-    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, fetch_days: Optional[int] = None, posts_only: bool = True, max_data_age_days: Optional[int] = None):
+    def __init__(
+        self,
+        twitter_client: Optional[TwitterClient] = None,
+        max_workers: Optional[int] = None,
+        fetch_days: Optional[int] = None,
+        posts_only: bool = True,
+        max_data_age_days: Optional[int] = None,
+        skip_if_cache_fresh: bool = False,
+        cache_freshness_hours: Optional[int] = None
+    ):
         """
         Initialize analyzer with optional custom Twitter client.
 
@@ -76,11 +85,17 @@ class TwitterNetworkAnalyzer:
                        Default: True for social discovery. Only applied when twitter_client is not provided.
             max_data_age_days: Maximum age of cached tweets to use in analysis (in days).
                               If None, uses all cached data. Default: None
+            skip_if_cache_fresh: If True, skip API calls if cache was updated within freshness window.
+                                Default: False for full fetches, useful for extended iterations.
+            cache_freshness_hours: Hours to consider cache fresh before re-fetching.
+                                  If None, uses SOCIAL_DISCOVERY_CACHE_HOURS config value.
         """
         from bitcast.validator.utils.config import SOCIAL_DISCOVERY_FETCH_DAYS
         self.twitter_client = twitter_client or TwitterClient(posts_only=posts_only)
         self.fetch_days = fetch_days or SOCIAL_DISCOVERY_FETCH_DAYS
         self.max_data_age_days = max_data_age_days
+        self.skip_if_cache_fresh = skip_if_cache_fresh
+        self.cache_freshness_hours = cache_freshness_hours
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -98,24 +113,31 @@ class TwitterNetworkAnalyzer:
         else:
             bt.logging.info("Sequential mode (concurrency disabled)")
     
-    def _fetch_tweets_safe(self, username: str) -> Tuple[str, List[Dict], Dict, Optional[str]]:
+    def _fetch_tweets_safe(self, username: str, skip_if_cache_fresh: Optional[bool] = None) -> Tuple[str, List[Dict], Dict, Optional[str]]:
         """
         Fetch tweets for a user with error handling.
-        
+
         Args:
             username: Twitter username
-            
+            skip_if_cache_fresh: If provided, overrides instance's skip_if_cache_fresh setting
+
         Returns:
             Tuple of (username_lower, tweets_list, user_info, error_message)
         """
         try:
-            result = self.twitter_client.fetch_user_tweets(username.lower(), fetch_days=self.fetch_days)
+            skip_fresh = skip_if_cache_fresh if skip_if_cache_fresh is not None else self.skip_if_cache_fresh
+            result = self.twitter_client.fetch_user_tweets(
+                username.lower(),
+                fetch_days=self.fetch_days,
+                skip_if_cache_fresh=skip_fresh,
+                cache_freshness_hours=self.cache_freshness_hours
+            )
             return username.lower(), result['tweets'], result['user_info'], None
         except Exception as e:
             bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
             return username.lower(), [], {'username': username.lower(), 'followers_count': 0}, str(e)
     
-    def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None, min_tweets: int = 1) -> Tuple[str, bool]:
+    def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None, min_tweets: int = 1, skip_if_cache_fresh: bool = False) -> Tuple[str, bool]:
         """
         Check user relevance with error handling.
         
@@ -125,35 +147,41 @@ class TwitterNetworkAnalyzer:
             min_followers: Minimum follower threshold
             lang: Optional language filter
             min_tweets: Minimum number of tweets containing keywords
+            skip_if_cache_fresh: If True, skip API call if cache was updated within freshness window
             
         Returns:
             Tuple of (username, is_relevant)
         """
         try:
-            return username, self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets)
+            return username, self.twitter_client.check_user_relevance(
+                username, keywords, min_followers, lang, min_tweets,
+                skip_if_cache_fresh=skip_if_cache_fresh,
+                cache_freshness_hours=self.cache_freshness_hours
+            )
         except Exception as e:
             bt.logging.warning(f"Relevance check failed for @{username}: {e}")
             return username, False
     
     def analyze_network(
-        self, 
-        seed_accounts: List[str], 
-        keywords: List[str], 
+        self,
+        seed_accounts: List[str],
+        keywords: List[str],
         min_followers: int = 0,
         lang: Optional[str] = None,
         min_tweets: int = 1,
         min_interaction_weight: float = 0,
         core_accounts: Optional[Set[str]] = None,
-        use_personalized_pagerank: bool = False
+        use_personalized_pagerank: bool = False,
+        skip_if_cache_fresh: Optional[bool] = None
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
-        
+
         Scores are calculated as: PageRank × (total_pool_followers / 1000)
         This gives "absolute influence" that can be compared across pools with different
         difficulty levels (pools with more followers = higher difficulty).
         The division by 1000 keeps scores at a reasonable scale for UIs.
-        
+
         Args:
             seed_accounts: Initial accounts to analyze
             keywords: Keywords to filter accounts by
@@ -168,6 +196,8 @@ class TwitterNetworkAnalyzer:
                           restart distribution is biased toward these accounts.
             use_personalized_pagerank: If True (and core_accounts provided), use personalized
                                       PageRank biased toward core accounts instead of standard PageRank.
+            skip_if_cache_fresh: If provided, overrides the instance's skip_if_cache_fresh setting
+                                for this analyze_network call only.
             
         Returns:
             Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
@@ -178,22 +208,28 @@ class TwitterNetworkAnalyzer:
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
-        
+
+        # Determine if we should skip API calls based on cache freshness
+        # Use parameter override if provided, otherwise use instance setting
+        skip_if_fresh = skip_if_cache_fresh if skip_if_cache_fresh is not None else self.skip_if_cache_fresh
+        if skip_if_fresh:
+            bt.logging.info(f"Cache freshness check enabled (fresh if < {self.cache_freshness_hours or 24}h old)")
+
         # Step 1: Fetch tweets for seed accounts
         fetch_start = time.time()
         all_tweets = {}
         user_info_map = {}
         failed_accounts = []
-        
+
         if self.max_workers > 1:
             # Concurrent execution
             bt.logging.info(f"Fetching tweets concurrently ({self.max_workers} workers)...")
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_username = {
-                    executor.submit(self._fetch_tweets_safe, username): username 
+                    executor.submit(self._fetch_tweets_safe, username, skip_if_fresh): username
                     for username in seed_accounts
                 }
-                
+
                 for future in as_completed(future_to_username):
                     username, tweets, user_info, error = future.result()
                     if error:
@@ -204,7 +240,12 @@ class TwitterNetworkAnalyzer:
             # Sequential execution
             for username in seed_accounts:
                 username_lower = username.lower()
-                result = self.twitter_client.fetch_user_tweets(username_lower, fetch_days=self.fetch_days)
+                result = self.twitter_client.fetch_user_tweets(
+                    username_lower,
+                    fetch_days=self.fetch_days,
+                    skip_if_cache_fresh=skip_if_fresh,
+                    cache_freshness_hours=self.cache_freshness_hours
+                )
                 all_tweets[username_lower] = result['tweets']
                 user_info_map[username_lower] = result['user_info']
         
@@ -322,10 +363,10 @@ class TwitterNetworkAnalyzer:
                 bt.logging.info(f"Checking relevance concurrently ({self.max_workers} workers)...")
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
-                        executor.submit(self._check_relevance_safe, username, keywords, min_followers, lang, min_tweets): username
+                        executor.submit(self._check_relevance_safe, username, keywords, min_followers, lang, min_tweets, skip_if_fresh): username
                         for username in all_accounts_to_check
                     }
-                    
+
                     for future in as_completed(futures):
                         username, is_relevant = future.result()
                         if is_relevant:
@@ -333,7 +374,7 @@ class TwitterNetworkAnalyzer:
             else:
                 # Sequential relevance checking
                 for username in all_accounts_to_check:
-                    if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets):
+                    if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets, skip_if_cache_fresh=skip_if_fresh, cache_freshness_hours=self.cache_freshness_hours):
                         relevant_users.add(username)
             
             relevance_time = time.time() - relevance_start

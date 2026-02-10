@@ -1,14 +1,13 @@
 """
 Accumulative scoring store for tweet scoring.
 
-Permanently stores tweets and engagement data discovered from API searches.
-Once a tweet or engagement is found, it is never lost - even if the API
-stops returning it in future searches.
+Stores tweets and engagement data discovered from API searches.
+Once a tweet or engagement is found, it is retained for 90 days.
 
 Key design:
 - Tweets are stored by tweet_id with all fields
 - Engagements (RTs and QRTs) are stored per tweet, accumulating over time
-- No expiry - data persists permanently
+- 90-day expiry - data persists for 90 days from last update
 - Always make fresh API calls and merge results into the store
 """
 
@@ -20,7 +19,7 @@ from typing import Dict, List, Optional, Set
 from diskcache import Cache
 import bittensor as bt
 
-from bitcast.validator.utils.config import CACHE_DIRS
+from bitcast.validator.utils.config import CACHE_DIRS, CACHE_EXPIRY_SECONDS
 
 
 # Store directory alongside existing twitter cache
@@ -31,7 +30,7 @@ class ScoringStore:
     """
     Accumulative store for tweet scoring data.
     
-    Stores tweets and engagements permanently (no expiry). Each scoring run:
+    Stores tweets and engagements with 90-day expiry. Each scoring run:
     1. Makes fresh API calls
     2. Merges new tweets into the store (upsert)
     3. Queries the store for tweets matching brief criteria
@@ -126,8 +125,8 @@ class ScoringStore:
                 'first_seen': datetime.now().isoformat(),
                 'last_updated': datetime.now().isoformat(),
             }
-            # No expiry - permanent storage
-            self._cache.set(key, record)
+            # 90-day expiry from config
+            self._cache.set(key, record, expire=CACHE_EXPIRY_SECONDS)
             return True
         else:
             # Existing tweet - update engagement stats and timestamp
@@ -271,8 +270,8 @@ class ScoringStore:
                 new_count += 1
         
         existing['last_updated'] = datetime.now().isoformat()
-        self._cache.set(key, existing)
-        
+        self._cache.set(key, existing, expire=CACHE_EXPIRY_SECONDS)
+
         return {'new': new_count, 'total': len(existing['retweeters'])}
     
     def store_quoters(self, tweet_id: str, qrt_tweets: List[Dict]) -> Dict[str, int]:
@@ -307,8 +306,8 @@ class ScoringStore:
                 new_count += 1
         
         existing['last_updated'] = datetime.now().isoformat()
-        self._cache.set(key, existing)
-        
+        self._cache.set(key, existing, expire=CACHE_EXPIRY_SECONDS)
+
         return {'new': new_count, 'total': len(existing['quoters'])}
     
     def get_engagements(self, tweet_id: str) -> Dict:

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional
 from diskcache import Cache
 import bittensor as bt
 
-from bitcast.validator.utils.config import CACHE_DIRS, DISCOVERY_CACHE_EXPIRY
+from bitcast.validator.utils.config import CACHE_DIRS, CACHE_EXPIRY_SECONDS
 
 
 class DiscoveryCache:
@@ -94,8 +94,8 @@ def cache_user_tweets(username: str, data: Dict[str, Any]) -> None:
         'cache_timestamp': datetime.now().isoformat()
     }
     
-    cache.set(cache_key, data_with_timestamp, expire=DISCOVERY_CACHE_EXPIRY)
-    bt.logging.debug(f"Cached tweets for @{username} (expires in {DISCOVERY_CACHE_EXPIRY}s)")
+    cache.set(cache_key, data_with_timestamp, expire=CACHE_EXPIRY_SECONDS)
+    bt.logging.debug(f"Cached tweets for @{username} (expires in {CACHE_EXPIRY_SECONDS}s)")
 
 
 def get_cached_user_tweets(username: str) -> Optional[Dict[str, Any]]:
@@ -136,7 +136,7 @@ def cache_user_info(username: str, user_info: Dict[str, Any]) -> None:
         'cache_timestamp': datetime.now().isoformat()
     }
     
-    cache.set(cache_key, info_with_timestamp, expire=DISCOVERY_CACHE_EXPIRY)
+    cache.set(cache_key, info_with_timestamp, expire=CACHE_EXPIRY_SECONDS)
     bt.logging.debug(f"Cached user info for @{username}")
 
 

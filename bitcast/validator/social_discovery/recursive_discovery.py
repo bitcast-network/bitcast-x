@@ -31,6 +31,81 @@ from bitcast.validator.utils.data_publisher import get_global_publisher
 from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 
 
+class MilestoneTracker:
+    """Tracks key milestones with timestamps for performance analysis."""
+    
+    def __init__(self, pool_name: str, run_id: str, output_dir: Optional[Path] = None):
+        self.pool_name = pool_name
+        self.run_id = run_id
+        self.milestones = []
+        self.start_time = datetime.now()
+        
+        # Set output directory
+        if output_dir is None:
+            output_dir = Path(__file__).parent / "social_maps" / pool_name
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create filename with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.milestone_file = self.output_dir / f"milestones_{run_id}_{timestamp}.log"
+        
+        # Write header
+        self._write_line(f"# Milestone Log for {pool_name}")
+        self._write_line(f"# Run ID: {run_id}")
+        self._write_line(f"# Started: {self.start_time.isoformat()}")
+        self._write_line("-" * 80)
+    
+    def _write_line(self, line: str):
+        """Write a line to the milestone file."""
+        with open(self.milestone_file, 'a') as f:
+            f.write(line + "\n")
+    
+    def record(self, stage: str, event: str, details: Optional[Dict] = None):
+        """Record a milestone with timestamp."""
+        now = datetime.now()
+        elapsed = (now - self.start_time).total_seconds()
+        
+        milestone = {
+            'timestamp': now.isoformat(),
+            'elapsed_seconds': round(elapsed, 2),
+            'stage': stage,
+            'event': event,
+            'details': details or {}
+        }
+        self.milestones.append(milestone)
+        
+        # Format details
+        details_str = ""
+        if details:
+            details_str = " | " + ", ".join(f"{k}={v}" for k, v in details.items())
+        
+        # Write to file immediately
+        elapsed_str = f"{elapsed/60:.1f}m" if elapsed > 60 else f"{elapsed:.1f}s"
+        self._write_line(f"[{now.strftime('%H:%M:%S')} | +{elapsed_str}] {stage}: {event}{details_str}")
+        
+        # Also log to console
+        bt.logging.info(f"[MILESTONE] {stage}: {event} (elapsed: {elapsed_str}){details_str}")
+    
+    def summary(self) -> Dict:
+        """Get summary of all milestones."""
+        return {
+            'run_id': self.run_id,
+            'pool_name': self.pool_name,
+            'started_at': self.start_time.isoformat(),
+            'completed_at': datetime.now().isoformat() if self.milestones else None,
+            'total_elapsed_seconds': (datetime.now() - self.start_time).total_seconds(),
+            'milestones': self.milestones,
+            'milestone_file': str(self.milestone_file)
+        }
+    
+    def finalize(self):
+        """Write final summary to file."""
+        self._write_line("-" * 80)
+        self._write_line(f"# Completed: {datetime.now().isoformat()}")
+        self._write_line(f"# Total elapsed: {(datetime.now() - self.start_time).total_seconds()/60:.1f} minutes")
+
+
 class ConvergenceMetrics:
     """Tracks convergence metrics across iterations."""
     
@@ -253,8 +328,18 @@ async def two_stage_discovery(
         except RuntimeError:
             run_id = f"two_stage_{timestamp}"
     
+    # Initialize milestone tracker
+    milestones = MilestoneTracker(pool_name=pool_name, run_id=run_id)
+    milestones.record("INIT", "Discovery started", {
+        "pool": pool_name,
+        "run_id": run_id,
+        "core_params": f"min_weight={core_min_interaction_weight}, min_tweets={core_min_tweets}, max_seeds={core_max_seed_accounts}",
+        "extended_params": f"min_weight={ext_min_interaction_weight}, min_tweets={ext_min_tweets}, max_seeds={ext_max_seed_accounts}, max_iter={ext_max_iterations}"
+    })
+    
     # Get seed accounts (from previous map or initial config)
     seed_accounts = _get_seed_accounts(pool_name, pool_config)
+    milestones.record("INIT", "Seed accounts loaded", {"count": len(seed_accounts)})
     
     # Create analyzer (always uses SOCIAL_DISCOVERY_FETCH_DAYS)
     analyzer = TwitterNetworkAnalyzer(
@@ -271,6 +356,7 @@ async def two_stage_discovery(
     
     core_seeds = seed_accounts[:core_max_seed_accounts]
     bt.logging.info(f"Seeds: {len(core_seeds)} accounts")
+    milestones.record("STAGE_1", "Started", {"seeds": len(core_seeds)})
     
     core_scores, _, _, core_usernames, core_user_info, _ = analyzer.analyze_network(
         seed_accounts=core_seeds,
@@ -279,10 +365,12 @@ async def two_stage_discovery(
         lang=pool_config.get('lang'),
         min_tweets=core_min_tweets,
         min_interaction_weight=core_min_interaction_weight,
+        skip_if_cache_fresh=True,
     )
     
     core_accounts = set(core_usernames)
     bt.logging.info(f"Core discovery complete: {len(core_accounts)} accounts")
+    milestones.record("STAGE_1", "Complete", {"core_accounts": len(core_accounts)})
     
     # ===== STAGE 2: EXTENDED DISCOVERY (RELAXED, RECURSIVE) =====
     bt.logging.info("")
@@ -291,17 +379,20 @@ async def two_stage_discovery(
     bt.logging.info("-" * 80)
     bt.logging.info(f"Seeding from {len(core_accounts)} core accounts")
     bt.logging.info(f"Max iterations: {ext_max_iterations}, convergence: {ext_convergence:.0%}")
-    
+    milestones.record("STAGE_2", "Started", {"core_accounts": len(core_accounts), "max_iterations": ext_max_iterations})
+
     all_discovered = set(core_accounts)
     prev_top_accounts = set()
     current_seeds = list(core_accounts)
-    
+
     for iteration in range(ext_max_iterations):
         bt.logging.info("")
         bt.logging.info(f"  Extended iteration {iteration + 1}/{ext_max_iterations}")
         bt.logging.info(f"  Seeds: {len(current_seeds)}")
-        
+        milestones.record("STAGE_2", f"Iteration {iteration + 1} started", {"seeds": len(current_seeds)})
+
         # Discover with relaxed params (no keyword filter during expansion)
+        # Enable cache freshness skip for iterations after the first to save API quota
         iter_scores, _, _, iter_usernames, _, _ = analyzer.analyze_network(
             seed_accounts=current_seeds,
             keywords=[],  # No keyword filter during discovery
@@ -309,6 +400,7 @@ async def two_stage_discovery(
             lang=pool_config.get('lang'),
             min_tweets=0,
             min_interaction_weight=0,
+            skip_if_cache_fresh=True,
         )
         
         # Track discoveries
@@ -343,12 +435,20 @@ async def two_stage_discovery(
             stability=stability,
         )
         
+        milestones.record("STAGE_2", f"Iteration {iteration + 1} complete", {
+            "new_accounts": len(newly_discovered),
+            "total_accounts": len(all_discovered),
+            "stability": round(stability, 4) if stability else None
+        })
+        
         if stability is not None and stability >= ext_convergence:
             bt.logging.info(f"  Converged at iteration {iteration + 1} ({stability:.1%} >= {ext_convergence:.0%})")
+            milestones.record("STAGE_2", "Converged early", {"iteration": iteration + 1, "stability": round(stability, 4)})
             break
         
         if not newly_discovered:
             bt.logging.info("  No new accounts discovered, stopping")
+            milestones.record("STAGE_2", "Stopped - no new accounts", {"iteration": iteration + 1})
             break
         
         prev_top_accounts = current_top
@@ -356,6 +456,7 @@ async def two_stage_discovery(
     
     bt.logging.info("")
     bt.logging.info(f"Extended discovery complete: {len(all_discovered)} total accounts")
+    milestones.record("STAGE_2", "Complete", {"total_accounts": len(all_discovered), "iterations_completed": iteration + 1})
     
     # ===== STAGE 3: FINAL RANKING (PERSONALIZED PAGERANK) =====
     bt.logging.info("")
@@ -363,6 +464,7 @@ async def two_stage_discovery(
     bt.logging.info("STAGE 3: FINAL RANKING (Personalized PageRank)")
     bt.logging.info("-" * 80)
     bt.logging.info(f"Ranking {len(all_discovered)} accounts with core bias ({len(core_accounts)} core)")
+    milestones.record("STAGE_3", "Started", {"accounts_to_rank": len(all_discovered), "core_accounts": len(core_accounts)})
     
     scores, adj_matrix, rel_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
         seed_accounts=list(all_discovered),
@@ -373,7 +475,10 @@ async def two_stage_discovery(
         min_interaction_weight=ext_min_interaction_weight,
         core_accounts=core_accounts,
         use_personalized_pagerank=True,
+        skip_if_cache_fresh=True,
     )
+    
+    milestones.record("STAGE_3", "Complete", {"accounts_ranked": len(scores)})
     
     # Build social map with is_core flag
     sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -484,6 +589,14 @@ async def two_stage_discovery(
     else:
         bt.logging.debug("Social map publishing disabled by config")
     
+    # Final milestone
+    milestones.record("COMPLETE", "Discovery finished", {
+        "total_accounts": len(scores),
+        "core_accounts": len(core_in_final),
+        "extended_accounts": len(set(usernames) - core_accounts)
+    })
+    milestones.finalize()
+    
     # Save discovery summary
     if save_summary:
         summary_path = pool_dir / f"two_stage_summary_{timestamp}.json"
@@ -498,6 +611,7 @@ async def two_stage_discovery(
             'core_params': metadata['core_params'],
             'extended_params': metadata['extended_params'],
             'convergence': metrics.summary(),
+            'milestones': milestones.summary(),
         }
         with open(summary_path, 'w') as f:
             json.dump(summary_data, f, indent=2)
@@ -516,6 +630,7 @@ async def two_stage_discovery(
     if final_stability is not None:
         bt.logging.info(f"  Final stability: {final_stability:.1%}")
     bt.logging.info(f"  Social map: {social_map_file}")
+    bt.logging.info(f"  Milestone log: {milestones.milestone_file}")
     bt.logging.info("=" * 80)
     
     return str(social_map_file), metrics

@@ -16,6 +16,7 @@ from bitcast.validator.utils.config import (
     RAPID_API_KEY,
     SOCIAL_DISCOVERY_FETCH_DAYS,
     MAX_TWEETS_PER_FETCH,
+    CACHE_FRESHNESS_SECONDS,
 )
 from bitcast.validator.utils.twitter_cache import (
     get_cached_user_tweets,
@@ -221,28 +222,65 @@ class TwitterClient:
         
         return visible_tweets, tweets_to_cache
     
-    def fetch_user_tweets(self, username: str, fetch_days: int = SOCIAL_DISCOVERY_FETCH_DAYS) -> Dict[str, Any]:
+    def fetch_user_tweets(
+        self,
+        username: str,
+        fetch_days: int = SOCIAL_DISCOVERY_FETCH_DAYS,
+        skip_if_cache_fresh: bool = False,
+        cache_freshness_hours: Optional[int] = None
+    ) -> Dict[str, Any]:
         """
-        Fetch tweets for a user, always pulling fresh data and merging with cache.
-        
-        Always fetches the specified number of days from the API and merges with
-        any existing cached data. No freshness checks - the caller decides how
-        many days to fetch based on their use case:
-        - Social discovery: SOCIAL_DISCOVERY_FETCH_DAYS (30 days)
-        - Tweet scoring thorough mode: TWEET_SCORING_FETCH_DAYS (1 day)
-        
+        Fetch tweets for a user, pulling fresh data and merging with cache.
+
+        By default, always fetches from the API. When skip_if_cache_fresh=True,
+        checks if cache was updated within the freshness window and skips API call if so.
+
         Args:
             username: Twitter username to fetch tweets for
             fetch_days: Number of days of tweet history to fetch from API
-        
+            skip_if_cache_fresh: If True, skip API call if cache was updated within freshness window
+            cache_freshness_hours: Hours to consider cache fresh (defaults to SOCIAL_DISCOVERY_CACHE_HOURS)
+
         Returns:
             Dict with 'user_info', 'tweets', and 'cache_info'
         """
         username = username.lower()
-        
-        # Check cache for existing data to merge with
+
+        # Check cache for existing data
         cached_data = get_cached_user_tweets(username)
-        
+
+        # Check if cache is fresh and we should skip API call
+        if skip_if_cache_fresh and cached_data:
+            freshness_seconds = (cache_freshness_hours or CACHE_FRESHNESS_SECONDS // 3600) * 3600
+            cache_timestamp = cached_data.get('cache_timestamp')
+
+            if cache_timestamp:
+                try:
+                    cache_time = datetime.fromisoformat(cache_timestamp)
+                    age_seconds = (datetime.now() - cache_time).total_seconds()
+
+                    if age_seconds < freshness_seconds:
+                        bt.logging.info(f"Cache fresh for @{username} ({age_seconds/3600:.1f}h old), skipping API call")
+                        # Return cached data with cache hit info
+                        visible_tweets, _ = self._post_process_tweets(
+                            tweets=cached_data.get('tweets', []),
+                            username=username
+                        )
+                        return {
+                            'user_info': cached_data.get('user_info', {'username': username, 'followers_count': 0}),
+                            'tweets': visible_tweets,
+                            'cache_info': {
+                                'cache_hit': True,
+                                'cache_fresh': True,
+                                'cache_age_hours': round(age_seconds / 3600, 1),
+                                'new_tweets': 0,
+                                'cached_tweets': len(cached_data.get('tweets', [])),
+                                'provider_used': 'cache'
+                            }
+                        }
+                except (ValueError, TypeError):
+                    pass  # Fall through to API fetch if timestamp parsing fails
+
         bt.logging.info(f"Fetching tweets for @{username} (last {fetch_days} days)")
         
         # Calculate cutoff for API pagination stopping point
@@ -331,15 +369,33 @@ class TwitterClient:
                 'followers_count': cached_user_info.get('followers_count', 0)
             }
         
-        cache_data = {
-            'user_info': final_user_info,
-            'tweets': tweets_to_cache,
-            'last_updated': datetime.now()
-        }
-        cache_user_tweets(username, cache_data)
+        # Only update cache timestamp if API fetch succeeded
+        # If API failed, preserve original timestamp so cache appears stale for retry
+        if api_fetch_succeeded:
+            cache_data = {
+                'user_info': final_user_info,
+                'tweets': tweets_to_cache,
+                'last_updated': datetime.now()
+            }
+            cache_user_tweets(username, cache_data)
+        elif not cached_data:
+            # No cached data and API failed - store with current timestamp (no other option)
+            cache_data = {
+                'user_info': final_user_info,
+                'tweets': tweets_to_cache,
+                'last_updated': datetime.now()
+            }
+            cache_user_tweets(username, cache_data)
+        else:
+            # API failed but we have cached data - preserve original timestamps
+            # so next run will retry the API call
+            bt.logging.debug(f"API failed for @{username}, preserving original cache timestamp for retry")
+            # Do not update cache - keep existing entry with original timestamp
+            # Use cached data for return values
+            cache_data = cached_data
         
         return {
-            'user_info': cache_data['user_info'],
+            'user_info': final_user_info,
             'tweets': visible_tweets,
             'cache_info': {
                 'cache_hit': bool(cached_data), 
@@ -349,7 +405,7 @@ class TwitterClient:
             }
         }
     
-    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None, min_tweets: int = 1) -> bool:
+    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None, min_tweets: int = 1, skip_if_cache_fresh: bool = False, cache_freshness_hours: Optional[int] = None) -> bool:
         """Check if user tweets about keywords and meets follower threshold.
         
         Args:
@@ -359,11 +415,13 @@ class TwitterClient:
             lang: Optional language filter (e.g., 'en', 'zh'). If specified, user must have at least 
                   one tweet in this language, but keywords are checked across all tweets.
             min_tweets: Minimum number of tweets containing keywords for user to be considered relevant
+            skip_if_cache_fresh: If True, skip API call if cache was updated within freshness window
+            cache_freshness_hours: Hours to consider cache fresh (defaults to SOCIAL_DISCOVERY_CACHE_HOURS)
         
         Returns:
             True if user is relevant (meets all criteria), False otherwise
         """
-        result = self.fetch_user_tweets(username)
+        result = self.fetch_user_tweets(username, skip_if_cache_fresh=skip_if_cache_fresh, cache_freshness_hours=cache_freshness_hours)
         
         if not result['tweets']:
             return False
