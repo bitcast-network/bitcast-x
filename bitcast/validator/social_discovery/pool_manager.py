@@ -39,15 +39,12 @@ class PoolManager:
                 pools[name] = {
                     'keywords': [kw.lower() for kw in pool_data.get('keywords', [])],
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
-                    'max_seed_accounts': pool_data.get('max_seed_accounts', 150),
-                    'min_interaction_weight': pool_data.get('min_interaction_weight', 0),
-                    'min_tweets': pool_data.get('min_tweets', 1),
                     'lang': pool_data.get('lang'),
                     'date_offset': pool_data.get('date_offset', 0),
                     'active': True,
-                    # Two-stage discovery config (optional, falls back to sensible defaults)
-                    'core_min_interaction_weight': pool_data.get('core_min_interaction_weight', pool_data.get('min_interaction_weight', 2)),
-                    'core_min_tweets': pool_data.get('core_min_tweets', pool_data.get('min_tweets', 5)),
+                    # Two-stage discovery config
+                    'core_min_interaction_weight': pool_data.get('core_min_interaction_weight', 2),
+                    'core_min_tweets': pool_data.get('core_min_tweets', 5),
                     'core_max_seed_accounts': pool_data.get('core_max_seed_accounts', 100),
                     'extended_min_interaction_weight': pool_data.get('extended_min_interaction_weight', 1),
                     'extended_min_tweets': pool_data.get('extended_min_tweets', 1),

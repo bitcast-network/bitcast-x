@@ -9,10 +9,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-from bitcast.validator.social_discovery.social_discovery import (
-    TwitterNetworkAnalyzer,
-    discover_social_network
-)
+from bitcast.validator.social_discovery.social_discovery import TwitterNetworkAnalyzer
 from bitcast.validator.social_discovery.pool_manager import PoolManager
 
 
@@ -73,10 +70,10 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username, fetch_days=30):
+        def mock_fetch(username, fetch_days=30, skip_if_cache_fresh=False):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
-        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1, skip_if_cache_fresh=False):
             return True  # All users are relevant
         
         mock_client.fetch_user_tweets.side_effect = mock_fetch
@@ -122,10 +119,10 @@ class TestTwitterNetworkAnalyzer:
             ]
         }
         
-        def mock_fetch(username, fetch_days=30):
+        def mock_fetch(username, fetch_days=30, skip_if_cache_fresh=False):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
         
-        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1, skip_if_cache_fresh=False):
             return True  # All users are relevant
         
         mock_client.fetch_user_tweets.side_effect = mock_fetch
@@ -164,115 +161,72 @@ class TestTwitterNetworkAnalyzer:
     def test_analyze_network_min_interaction_weight_filter(self):
         """Test that min_interaction_weight filters accounts with low incoming weight."""
         mock_client = mock.Mock()
-        
-        # user1 mentions user2, user3 and retweets user4
-        # user2 mentions user3, user4
-        # Incoming weight accumulates from all edges pointing to each user
-        mock_tweets = {
-            'user1': [
-                {'text': 'Hello @user2 @user3', 'tagged_accounts': ['user2', 'user3'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user1'},
-                {'text': 'RT @user4: Great', 'tagged_accounts': [], 'retweeted_user': 'user4', 'quoted_user': None, 'author': 'user1'}
-            ],
-            'user2': [
-                {'text': 'Hello @user3 @user4', 'tagged_accounts': ['user3', 'user4'], 'retweeted_user': None, 'quoted_user': None, 'author': 'user2'}
+
+        # Create 20+ seed accounts to avoid auto-relaxation of min_interaction_weight
+        # when seed count < 20, parameters are relaxed to bootstrap discovery
+        seed_accounts = [f'seed{i}' for i in range(20)]
+        non_seed_accounts = ['user_a', 'user_b', 'user_c']
+        all_accounts = seed_accounts + non_seed_accounts
+
+        # Build mock tweets:
+        # - Each seed mentions user_a (gives user_a 20 mentions)
+        # - Note: PAGERANK_MENTION_WEIGHT = 2.0, so user_a gets 40.0 incoming weight
+        # - Only 2 seeds mention user_b (gives user_b 2 mentions = 4.0 weight)
+        # - Only 1 seed mentions user_c (gives user_c 1 mention = 2.0 weight)
+        # - Add seed-to-seed interactions to ensure network connectivity when non-seeds are filtered
+        mock_tweets = {}
+        for i, seed in enumerate(seed_accounts):
+            mock_tweets[seed] = [
+                {'text': f'Hello @user_a', 'tagged_accounts': ['user_a'], 'retweeted_user': None, 'quoted_user': None, 'author': seed},
+                # Add interaction to another seed to ensure network remains connected
+                {'text': f'Hello @{seed_accounts[(i+1) % 20]}', 'tagged_accounts': [seed_accounts[(i+1) % 20]], 'retweeted_user': None, 'quoted_user': None, 'author': seed}
             ]
-        }
-        
-        def mock_fetch(username, fetch_days=30):
+        # Add extra mentions for user_b and user_c from a couple seeds
+        mock_tweets['seed0'].append({'text': 'Hello @user_b', 'tagged_accounts': ['user_b'], 'retweeted_user': None, 'quoted_user': None, 'author': 'seed0'})
+        mock_tweets['seed1'].append({'text': 'Hello @user_b @user_c', 'tagged_accounts': ['user_b', 'user_c'], 'retweeted_user': None, 'quoted_user': None, 'author': 'seed1'})
+
+        def mock_fetch(username, fetch_days=30, skip_if_cache_fresh=False):
             return {'tweets': mock_tweets.get(username, []), 'user_info': {'followers_count': 1000}}
-        
-        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1):
-            return True
-        
+
+        def mock_relevance(username, keywords, min_followers, lang=None, min_tweets=1, skip_if_cache_fresh=False):
+            # All accounts (seeds and non-seeds) are relevant
+            return username in all_accounts
+
         mock_client.fetch_user_tweets.side_effect = mock_fetch
         mock_client.check_user_relevance.side_effect = mock_relevance
-        
+
         analyzer = TwitterNetworkAnalyzer(mock_client, max_workers=1)
-        
-        # Without filter: should have all 4 users
+
+        # Without filter: should have all relevant accounts (20 seeds + 3 non-seeds)
         scores_no_filter, _, _, _, _, _ = analyzer.analyze_network(
-            ['user1', 'user2'], ['test'], min_interaction_weight=0
+            seed_accounts, ['test'], min_interaction_weight=0
         )
-        assert len(scores_no_filter) == 4
-        
-        # With moderate filter: some non-seeds may be filtered, but seeds preserved
+        assert len(scores_no_filter) == 23
+
+        # With filter weight=5: user_a has 40.0, user_b has 4.0, user_c has 2.0
+        # user_a (40.0 >= 5) stays, user_b and user_c are filtered out
         scores_filtered, _, _, _, _, _ = analyzer.analyze_network(
-            ['user1', 'user2'], ['test'], min_interaction_weight=3.0
+            seed_accounts, ['test'], min_interaction_weight=5.0
         )
-        
-        # Seeds are always preserved
-        assert 'user1' in scores_filtered
-        assert 'user2' in scores_filtered
-        # user3 and user4 have sufficient incoming weight
-        assert 'user3' in scores_filtered
-        assert 'user4' in scores_filtered
-        # Total should be 4 (seeds + qualified non-seeds)
-        assert len(scores_filtered) == 4
-        
-        # With high filter: only seeds remain (non-seeds filtered out)
+
+        # All seeds are preserved regardless of their outgoing interactions
+        for seed in seed_accounts:
+            assert seed in scores_filtered
+        # user_a has weight 40.0, should be included
+        assert 'user_a' in scores_filtered
+        # user_b (weight 4.0) and user_c (weight 2.0) are filtered out
+        assert 'user_b' not in scores_filtered
+        assert 'user_c' not in scores_filtered
+
+        # With high filter (weight=41): user_a is filtered (40.0 < 41), only seeds remain
+        # Seeds have interactions with each other, so network stays valid
         scores_high_filter, _, _, _, _, _ = analyzer.analyze_network(
-            ['user1', 'user2'], ['test'], min_interaction_weight=4.5
+            seed_accounts, ['test'], min_interaction_weight=41.0
         )
-        assert 'user1' in scores_high_filter  # seed
-        assert 'user2' in scores_high_filter  # seed
-        # user3 and user4 don't meet threshold, so filtered
-        assert 'user3' not in scores_high_filter
-        assert 'user4' not in scores_high_filter
-
-
-class TestSocialDiscoveryIntegration:
-    """Integration tests for social discovery."""
-    
-    def setup_method(self):
-        """Set up test environment."""
-        self.temp_dir = tempfile.mkdtemp()
-    
-    def teardown_method(self):
-        """Cleanup."""
-        import shutil
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    @pytest.mark.asyncio
-    @mock.patch('bitcast.validator.social_discovery.social_discovery.PoolManager')
-    @mock.patch('bitcast.validator.social_discovery.social_discovery.TwitterNetworkAnalyzer')
-    async def test_discover_social_network_success(self, mock_analyzer_class, mock_pool_manager_class):
-        """Test successful social discovery."""
-        # Mock pool manager
-        mock_pool_manager = mock.Mock()
-        mock_pool_manager.get_pool.return_value = {
-            'keywords': ['test'],
-            'initial_accounts': ['user1'],
-            'max_members': 64,
-            'min_interaction_weight': 0
-        }
-        mock_pool_manager_class.return_value = mock_pool_manager
-        
-        # Mock analyzer
-        mock_analyzer = mock.Mock()
-        mock_analyzer.analyze_network.return_value = (
-            {'user1': 900.0, 'user2': 600.0},  # absolute scores (PageRank × pool_difficulty)
-            np.array([[0, 1], [1, 0]]),    # adjacency matrix (max weights)
-            np.array([[0, 1.5], [2.0, 0]]),  # relationship scores matrix
-            ['user1', 'user2'],            # usernames
-            {'user1': {'username': 'user1', 'followers_count': 1000}, 'user2': {'username': 'user2', 'followers_count': 500}},  # user_info_map
-            1500  # total_pool_followers (pool difficulty)
-        )
-        mock_analyzer_class.return_value = mock_analyzer
-        
-        # Test with mocked file operations
-        with mock.patch('builtins.open', mock.mock_open()), \
-             mock.patch('pathlib.Path.mkdir'), \
-             mock.patch('pathlib.Path.exists', return_value=False), \
-             mock.patch('json.dump'):
-            
-            result = await discover_social_network("test_pool")
-            
-            # Should have called the analyzer
-            mock_analyzer.analyze_network.assert_called_once()
-            assert "test_pool" in result
-    
-    @pytest.mark.asyncio
-    async def test_regenerate_with_nonexistent_pool(self):
-        """Test error handling for nonexistent pool."""
-        with pytest.raises(Exception, match="not found"):
-            await discover_social_network("nonexistent_pool")
+        # Seeds preserved
+        for seed in seed_accounts:
+            assert seed in scores_high_filter
+        # All non-seeds filtered (user_a has 40.0 < 41.0)
+        assert 'user_a' not in scores_high_filter
+        assert 'user_b' not in scores_high_filter
+        assert 'user_c' not in scores_high_filter

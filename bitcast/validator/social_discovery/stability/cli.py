@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 
 from .analyzer import StabilityAnalyzer
 from .grid_search import GridSearchRunner
-from .config import OUTPUT_DIR, TOP_N_ACCOUNTS
+from .config import OUTPUT_DIR, TOP_N_ACCOUNTS, POOL_GRIDS
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--grid",
         action="store_true",
         help="Run parameter grid search instead of a single analysis",
+    )
+    parser.add_argument(
+        "--single-params",
+        type=str,
+        default=None,
+        help='Run a single parameter combination as JSON (e.g., \'{"core": {"min_interaction_weight": 2, "min_tweets": 5, "max_seed_accounts": 100}, "extended": {"min_interaction_weight": 1, "min_tweets": 1, "max_seed_accounts": 300, "max_iterations": 3, "convergence_threshold": 0.9}}\')',
     )
 
     # Tuning
@@ -110,6 +116,12 @@ def main(argv=None):
 
     # ---- Grid search mode ----
     if config.grid:
+        # Log if using pool-specific grid
+        if pool_name in POOL_GRIDS:
+            bt.logging.info(f"Using pool-specific grid for '{pool_name}'")
+        else:
+            bt.logging.info(f"Using default grid for '{pool_name}'")
+
         runner = GridSearchRunner(
             pool_name=pool_name,
             max_workers=config.max_workers,
@@ -118,7 +130,12 @@ def main(argv=None):
         )
 
         try:
-            results = runner.run()
+            # Single params mode for debugging
+            if config.single_params:
+                single_params = json.loads(config.single_params)
+                results = runner.run(single_params=single_params)
+            else:
+                results = runner.run()
             if not config.no_save:
                 saved = runner.save_results(results)
                 bt.logging.info(f"Results saved to {saved}")
@@ -175,7 +192,10 @@ def main(argv=None):
         # Print headline
         stability = result.get("stability", {}).get("overall", 0)
         accounts = len(result.get("social_map", {}).get("accounts", {}))
+        milestone_file = result.get("metadata", {}).get("milestone_file")
         bt.logging.info(f"Stability={stability:.3f}, accounts={accounts}")
+        if milestone_file:
+            bt.logging.info(f"Milestone log: {milestone_file}")
 
     finally:
         analyzer.close()

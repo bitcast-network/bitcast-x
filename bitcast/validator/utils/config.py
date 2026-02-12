@@ -62,6 +62,8 @@ TWITTER_API_PROVIDER = os.getenv('TWITTER_API_PROVIDER', 'rapidapi')  # Options:
 
 # Twitter API Keys
 DESEARCH_API_KEY = os.getenv('DESEARCH_API_KEY')  # Required for Desearch.ai provider
+# RapidAPI: Supports single key OR comma-separated list for load balancing
+# Example: RAPID_API_KEY=key1,key2,key3 (distributes requests across all keys)
 RAPID_API_KEY = os.getenv('RAPID_API_KEY')  # Optional: Required only if using RapidAPI provider
 
 # Other API Keys
@@ -91,7 +93,7 @@ PAGERANK_ALPHA = 0.85
 # =============================================================================
 
 # Cache freshness for social discovery
-SOCIAL_DISCOVERY_CACHE_HOURS = 24
+SOCIAL_DISCOVERY_CACHE_HOURS = 48
 CACHE_FRESHNESS_SECONDS = SOCIAL_DISCOVERY_CACHE_HOURS * 3600
 
 # Concurrency (1 = sequential, 2+ = concurrent)
@@ -157,7 +159,6 @@ bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOIN
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
 bt.logging.info(f"TWITTER_API_PROVIDER: {TWITTER_API_PROVIDER}")
 bt.logging.info(f"SOCIAL_DISCOVERY_FETCH_DAYS: {SOCIAL_DISCOVERY_FETCH_DAYS}")
-bt.logging.info(f"SOCIAL_DISCOVERY_CACHE_HOURS: {SOCIAL_DISCOVERY_CACHE_HOURS}")
 bt.logging.info(f"TWEET_SCORING_FETCH_DAYS: {TWEET_SCORING_FETCH_DAYS}")
 bt.logging.info(f"MAX_TWEETS_PER_FETCH: {MAX_TWEETS_PER_FETCH}")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")

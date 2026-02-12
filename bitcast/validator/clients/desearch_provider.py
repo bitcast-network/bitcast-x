@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 import bittensor as bt
 
 from .twitter_provider import TwitterProvider
+from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
 
 
 class DesearchProvider(TwitterProvider):
@@ -263,7 +264,10 @@ class DesearchProvider(TwitterProvider):
                 retweeted_tweet_id = str(retweet_data.get('id', ''))
                 retweet_user = retweet_data.get('user', {})
                 if retweet_user:
-                    retweeted_user = retweet_user.get('username', '').lower()
+                    username = retweet_user.get('username', '').lower()
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if is_valid_twitter_username(username):
+                        retweeted_user = username
             
             # Extract quote info
             is_quote = desearch_data.get('is_quote_tweet', False)
@@ -273,7 +277,10 @@ class DesearchProvider(TwitterProvider):
                 quoted_tweet_id = str(quoted_tweet_id)
                 # Try to extract from quote object if available
                 if desearch_data.get('quote') and desearch_data['quote'].get('user'):
-                    quoted_user = desearch_data['quote']['user'].get('username', '').lower()
+                    username = desearch_data['quote']['user'].get('username', '').lower()
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if is_valid_twitter_username(username):
+                        quoted_user = username
             
             # Extract tagged accounts from entities (if available)
             tagged_accounts = []
@@ -281,21 +288,23 @@ class DesearchProvider(TwitterProvider):
             if entities:
                 user_mentions = entities.get('user_mentions', [])
                 if isinstance(user_mentions, list):
+                    # Filter out numeric user IDs (suspended/deleted accounts)
                     tagged_accounts = [
                         m.get('screen_name', '').lower()
                         for m in user_mentions
-                        if m.get('screen_name')
+                        if m.get('screen_name') and is_valid_twitter_username(m.get('screen_name'))
                     ]
             
             # Extract reply info
             in_reply_to_status_id = desearch_data.get('in_reply_to_status_id')
             if in_reply_to_status_id:
                 in_reply_to_status_id = str(in_reply_to_status_id)
-            in_reply_to_user = (
-                desearch_data.get('in_reply_to_screen_name', '').lower()
-                if desearch_data.get('in_reply_to_screen_name')
-                else None
-            )
+            in_reply_to_user = None
+            if desearch_data.get('in_reply_to_screen_name'):
+                username = desearch_data.get('in_reply_to_screen_name', '').lower()
+                # Filter out numeric user IDs (suspended/deleted accounts)
+                if is_valid_twitter_username(username):
+                    in_reply_to_user = username
             
             return {
                 'tweet_id': tweet_id,
@@ -542,16 +551,22 @@ class DesearchProvider(TwitterProvider):
             # Extract author from user object in search results
             user_data = desearch_data.get('user', {})
             author_username = user_data.get('username', '').lower() if user_data else ''
-            if not author_username:
-                # Try alternate field names
-                author_username = (
-                    user_data.get('screen_name', '') or
-                    desearch_data.get('username', '') or
-                    desearch_data.get('screen_name', '')
-                ).lower()
+            
+            # Try alternate field names if not found or numeric ID
+            if not author_username or not is_valid_twitter_username(author_username):
+                # Try alternate field names, preferring valid usernames
+                candidates = [
+                    (user_data.get('screen_name', '') or '').lower(),
+                    (desearch_data.get('username', '') or '').lower(),
+                    (desearch_data.get('screen_name', '') or '').lower(),
+                ]
+                author_username = next(
+                    (c for c in candidates if c and is_valid_twitter_username(c)),
+                    ''
+                )
             
             if not author_username:
-                return None  # Can't use tweet without author
+                return None  # Can't use tweet without valid author
             
             created_at_iso = desearch_data.get('created_at', '')
             
@@ -575,7 +590,10 @@ class DesearchProvider(TwitterProvider):
                 retweeted_tweet_id = str(retweet_data.get('id', ''))
                 retweet_user = retweet_data.get('user', {})
                 if retweet_user:
-                    retweeted_user = retweet_user.get('username', '').lower()
+                    username = retweet_user.get('username', '').lower()
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if is_valid_twitter_username(username):
+                        retweeted_user = username
             
             # Extract quote info
             quoted_user = None
@@ -583,7 +601,10 @@ class DesearchProvider(TwitterProvider):
             if quoted_tweet_id:
                 quoted_tweet_id = str(quoted_tweet_id)
                 if desearch_data.get('quote') and desearch_data['quote'].get('user'):
-                    quoted_user = desearch_data['quote']['user'].get('username', '').lower()
+                    username = desearch_data['quote']['user'].get('username', '').lower()
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if is_valid_twitter_username(username):
+                        quoted_user = username
             
             # Extract tagged accounts from entities
             tagged_accounts = []
@@ -591,21 +612,23 @@ class DesearchProvider(TwitterProvider):
             if entities:
                 user_mentions = entities.get('user_mentions', [])
                 if isinstance(user_mentions, list):
+                    # Filter out numeric user IDs (suspended/deleted accounts)
                     tagged_accounts = [
                         m.get('screen_name', '').lower()
                         for m in user_mentions
-                        if m.get('screen_name')
+                        if m.get('screen_name') and is_valid_twitter_username(m.get('screen_name'))
                     ]
             
             # Extract reply info
             in_reply_to_status_id = desearch_data.get('in_reply_to_status_id')
             if in_reply_to_status_id:
                 in_reply_to_status_id = str(in_reply_to_status_id)
-            in_reply_to_user = (
-                desearch_data.get('in_reply_to_screen_name', '').lower()
-                if desearch_data.get('in_reply_to_screen_name')
-                else None
-            )
+            in_reply_to_user = None
+            if desearch_data.get('in_reply_to_screen_name'):
+                username = desearch_data.get('in_reply_to_screen_name', '').lower()
+                # Filter out numeric user IDs (suspended/deleted accounts)
+                if is_valid_twitter_username(username):
+                    in_reply_to_user = username
             
             return {
                 'tweet_id': tweet_id,
@@ -764,10 +787,14 @@ class DesearchProvider(TwitterProvider):
                         user.get('username', '') or
                         user.get('screen_name', '')
                     ).lower()
-                    if username:
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if username and is_valid_twitter_username(username):
                         usernames.append(username)
                 elif isinstance(user, str):
-                    usernames.append(user.lower())
+                    username = user.lower()
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if is_valid_twitter_username(username):
+                        usernames.append(username)
             
         except Exception as e:
             bt.logging.error(f"Desearch retweeters API error for tweet {tweet_id}: {e}")

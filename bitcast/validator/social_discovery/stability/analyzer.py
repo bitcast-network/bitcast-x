@@ -11,6 +11,7 @@ Pipeline:
   4. Calculate cross-window stability metrics
 """
 
+import json
 import numpy as np
 import networkx as nx
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,7 @@ import bittensor as bt
 
 from ..social_discovery import TwitterNetworkAnalyzer
 from ..pool_manager import PoolManager
+from ..recursive_discovery import MilestoneTracker
 from bitcast.validator.clients.twitter_client import TwitterClient
 from bitcast.validator.utils.config import (
     PAGERANK_MENTION_WEIGHT,
@@ -147,6 +149,14 @@ class StabilityAnalyzer:
             Result dict with social_map, window_metrics, stability, etc.
         """
         now = datetime.now(timezone.utc)
+        
+        # Initialize milestone tracker
+        run_id = f"stability_{self.pool_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        milestones = MilestoneTracker(
+            pool_name=self.pool_name,
+            run_id=run_id,
+            output_dir=self.output_dir
+        )
 
         # --- Resolve parameters (override > pool config > defaults) ----
         core_min_weight = core_params.get(
@@ -188,11 +198,41 @@ class StabilityAnalyzer:
             f"Extended: min_weight={ext_min_weight}, min_tweets={ext_min_tweets}, "
             f"max_seeds={ext_max_seeds}"
         )
+        
+        # Record initialization milestone
+        milestones.record(
+            "INIT",
+            "Stability analysis started",
+            {
+                "pool": self.pool_name,
+                "run_id": run_id,
+                f"core_params": f"min_weight={core_min_weight}, min_tweets={core_min_tweets}, max_seeds={core_max_seeds}",
+                f"extended_params": f"min_weight={ext_min_weight}, min_tweets={ext_min_tweets}, max_seeds={ext_max_seeds}, max_iter={ext_max_iter}",
+            }
+        )
+        # Machine-readable params for grid-search resume (skip already-completed)
+        params_for_resume = {
+            "core": {
+                "min_interaction_weight": core_min_weight,
+                "min_tweets": core_min_tweets,
+                "max_seed_accounts": core_max_seeds,
+            },
+            "extended": {
+                "min_interaction_weight": ext_min_weight,
+                "min_tweets": ext_min_tweets,
+                "max_seed_accounts": ext_max_seeds,
+                "max_iterations": ext_max_iter,
+                "convergence_threshold": ext_convergence,
+            },
+        }
+        milestones.write_comment("PARAMS_JSON: " + json.dumps(params_for_resume, sort_keys=True))
 
         # ====== STAGE 1: Core discovery (strict, recursive) ============
         bt.logging.info("-" * 80)
         bt.logging.info("STAGE 1: Core discovery (strict)")
         bt.logging.info("-" * 80)
+        
+        milestones.record("STAGE_1", "Started", {"max_iterations": MAX_CORE_ITERATIONS})
 
         seed_accounts = list(self.pool_config["initial_accounts"])
         current_core_seeds = seed_accounts[:core_max_seeds]
@@ -204,6 +244,12 @@ class StabilityAnalyzer:
             bt.logging.info(
                 f"  Core iter {core_iter + 1}/{MAX_CORE_ITERATIONS} | "
                 f"seeds={len(current_core_seeds)}"
+            )
+            
+            milestones.record(
+                "STAGE_1",
+                f"Iteration {core_iter + 1} started",
+                {"seeds": len(current_core_seeds)}
             )
 
             core_scores, _, _, core_usernames, _, _ = self.network_analyzer.analyze_network(
@@ -223,13 +269,34 @@ class StabilityAnalyzer:
             if prev_core_top:
                 stability = _jaccard(prev_core_top, current_core_top)
                 bt.logging.info(f"  Stability: {stability:.1%}")
+                milestones.record(
+                    "STAGE_1",
+                    f"Iteration {core_iter + 1} complete",
+                    {"accounts": len(core_accounts), "stability": round(stability, 4)}
+                )
                 if stability >= CORE_CONVERGENCE_THRESHOLD:
                     bt.logging.info(f"  Core converged at iter {core_iter + 1}")
+                    milestones.record(
+                        "STAGE_1",
+                        "Converged",
+                        {"iteration": core_iter + 1, "stability": round(stability, 4)}
+                    )
                     break
+            else:
+                milestones.record(
+                    "STAGE_1",
+                    f"Iteration {core_iter + 1} complete",
+                    {"accounts": len(core_accounts)}
+                )
             prev_core_top = current_core_top
             current_core_seeds = list(current_core_top)
 
         bt.logging.info(f"Core discovery complete: {len(core_accounts)} accounts")
+        milestones.record(
+            "STAGE_1",
+            "Complete",
+            {"core_accounts": len(core_accounts), "iterations": core_iter + 1}
+        )
 
         # ====== STAGE 2: Extended discovery (relaxed, PPR) =============
         bt.logging.info("-" * 80)
@@ -240,6 +307,12 @@ class StabilityAnalyzer:
         current_seeds = [acc for acc, _ in sorted_core_by_score[:ext_max_seeds]]
         all_discovered: Set[str] = set(core_accounts)
         prev_top: Set[str] = set()
+        
+        milestones.record(
+            "STAGE_2",
+            "Started",
+            {"core_accounts": len(core_accounts), "max_iterations": ext_max_iter}
+        )
 
         scores: Dict[str, float] = {}
         adj_matrix = None
@@ -251,6 +324,12 @@ class StabilityAnalyzer:
             bt.logging.info(
                 f"  Extended iter {iteration + 1}/{ext_max_iter} | "
                 f"seeds={len(current_seeds)}"
+            )
+            
+            milestones.record(
+                "STAGE_2",
+                f"Iteration {iteration + 1} started",
+                {"seeds": len(current_seeds)}
             )
 
             scores, adj_matrix, _, usernames, user_info_map, total_pool_followers = (
@@ -278,16 +357,53 @@ class StabilityAnalyzer:
             if prev_top:
                 stab = _jaccard(prev_top, current_top)
                 bt.logging.info(f"  Stability: {stab:.1%}")
+                milestones.record(
+                    "STAGE_2",
+                    f"Iteration {iteration + 1} complete",
+                    {
+                        "new_accounts": len(newly_discovered),
+                        "total_accounts": len(all_discovered),
+                        "stability": round(stab, 4) if stab else None
+                    }
+                )
                 if stab >= ext_convergence:
                     bt.logging.info(f"  Extended converged at iter {iteration + 1}")
+                    milestones.record(
+                        "STAGE_2",
+                        "Converged early",
+                        {"iteration": iteration + 1, "stability": round(stab, 4)}
+                    )
                     break
                 if not newly_discovered:
                     bt.logging.info("  No new accounts; stopping")
+                    milestones.record(
+                        "STAGE_2",
+                        "Stopped (no new accounts)",
+                        {"iteration": iteration + 1}
+                    )
                     break
+            else:
+                milestones.record(
+                    "STAGE_2",
+                    f"Iteration {iteration + 1} complete",
+                    {
+                        "new_accounts": len(newly_discovered),
+                        "total_accounts": len(all_discovered),
+                        "stability": None
+                    }
+                )
             prev_top = current_top
             current_seeds = list(current_top)
 
         bt.logging.info(f"Extended discovery complete: {len(scores)} accounts")
+        milestones.record(
+            "STAGE_2",
+            "Complete",
+            {
+                "total_accounts": len(set(usernames) - core_accounts),
+                "iterations_completed": iteration + 1
+            }
+        )
 
         # ====== Build social map from final iteration =================
         sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
@@ -320,8 +436,25 @@ class StabilityAnalyzer:
         bt.logging.info(
             f"Fetching {EXTENDED_FETCH_DAYS}d history for top {len(top_accounts)} accounts"
         )
+        
+        milestones.record(
+            "WINDOWED_ANALYSIS",
+            "Started",
+            {
+                "top_accounts": len(top_accounts),
+                "fetch_days": EXTENDED_FETCH_DAYS,
+                "num_windows": NUM_WINDOWS,
+                "window_days": WINDOW_DAYS
+            }
+        )
 
         extended_tweets = self._fetch_pool_tweets(top_accounts, days=EXTENDED_FETCH_DAYS)
+        
+        milestones.record(
+            "WINDOWED_ANALYSIS",
+            "Tweet history fetched",
+            {"accounts_fetched": len(extended_tweets)}
+        )
 
         windows = self._define_windows(now)
         window_results = self._analyze_windows(
@@ -338,6 +471,28 @@ class StabilityAnalyzer:
 
         bt.logging.info(f"Overall stability: {stability['overall']:.3f}")
         bt.logging.info("=" * 80)
+        
+        milestones.record(
+            "WINDOWED_ANALYSIS",
+            "Complete",
+            {
+                "overall_stability": round(stability['overall'], 4),
+                "windows_analyzed": len(window_results)
+            }
+        )
+        
+        milestones.record(
+            "COMPLETE",
+            "Analysis finished",
+            {
+                "total_accounts": len(scores),
+                "core_accounts": len(core_in_final),
+                "extended_accounts": len(set(usernames) - core_accounts),
+                "overall_stability": round(stability['overall'], 4)
+            }
+        )
+        
+        milestones.finalize()
 
         return {
             "metadata": {
@@ -348,6 +503,7 @@ class StabilityAnalyzer:
                 "core_accounts_count": len(core_in_final),
                 "core_params": core_params,
                 "extended_params": extended_params,
+                "milestone_file": str(milestones.milestone_file),
             },
             "social_map": social_map,
             "core_accounts": list(core_accounts),

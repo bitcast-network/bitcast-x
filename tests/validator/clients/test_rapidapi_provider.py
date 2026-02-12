@@ -750,3 +750,135 @@ class TestRapidAPIProviderGetRetweeters:
         
         assert success is False
         assert len(usernames) == 0
+
+
+class TestRapidAPIProviderNumericIDFiltering:
+    """Test that numeric user IDs (from suspended/deleted accounts) are filtered during parsing."""
+    
+    def test_parse_tweet_filters_numeric_user_ids(self):
+        """Test that numeric user IDs are filtered from tagged_accounts, retweeted_user, quoted_user, and in_reply_to_user."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        # Test 1: Regular tweet with tagged accounts (not a retweet)
+        regular_tweet = {
+            'rest_id': '123456789',
+            'legacy': {
+                'full_text': 'Hello @validuser and @911245230426525697 and @1098881129057112064',
+                'created_at': 'Mon Jan 15 12:00:00 +0000 2024',
+                'entities': {
+                    'user_mentions': [
+                        {'screen_name': 'validuser'},
+                        {'screen_name': '911245230426525697'},  # Should be filtered
+                        {'screen_name': '1098881129057112064'},  # Should be filtered
+                    ]
+                },
+                'in_reply_to_screen_name': '555444333222111',  # Numeric ID - should be filtered
+            },
+            'core': {
+                'user_results': {
+                    'result': {
+                        'legacy': {'screen_name': 'testuser'}
+                    }
+                }
+            }
+        }
+        
+        tweet = provider._parse_tweet(regular_tweet, 'testuser')
+        
+        assert tweet is not None
+        # tagged_accounts should only contain valid usernames
+        assert 'validuser' in tweet['tagged_accounts']
+        assert '911245230426525697' not in tweet['tagged_accounts']
+        assert '1098881129057112064' not in tweet['tagged_accounts']
+        assert len(tweet['tagged_accounts']) == 1
+        
+        # in_reply_to_user should be None (numeric ID filtered)
+        assert tweet['in_reply_to_user'] is None
+        
+        # Test 2: Retweet with numeric ID (should be filtered)
+        retweet_data = {
+            'rest_id': '987654321',
+            'legacy': {
+                'full_text': 'RT @911245230426525697: Test',  # Numeric ID in RT
+                'created_at': 'Mon Jan 15 12:00:00 +0000 2024',
+            },
+            'core': {
+                'user_results': {
+                    'result': {
+                        'legacy': {'screen_name': 'testuser'}
+                    }
+                }
+            }
+        }
+        
+        retweet = provider._parse_tweet(retweet_data, 'testuser')
+        assert retweet is not None
+        # retweeted_user should be None (numeric ID filtered from RT @xxx pattern)
+        assert retweet['retweeted_user'] is None
+    
+    @mock.patch('requests.get')
+    def test_get_retweeters_filters_numeric_ids(self, mock_get):
+        """Test that numeric user IDs are filtered from retweeters list."""
+        provider = RapidAPIProvider(api_key="test_key")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'data': {
+                'retweeters_timeline': {
+                    'timeline': {
+                        'instructions': [{
+                            '__typename': 'TimelineAddEntries',
+                            'entries': [
+                                {
+                                    'entry_id': 'user-validuser1',
+                                    'content': {
+                                        'itemContent': {
+                                            'user_results': {
+                                                'result': {
+                                                    'legacy': {'screen_name': 'validuser1'}
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    'entry_id': 'user-911245230426525697',
+                                    'content': {
+                                        'itemContent': {
+                                            'user_results': {
+                                                'result': {
+                                                    'legacy': {'screen_name': '911245230426525697'}  # Should be filtered
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                {
+                                    'entry_id': 'user-validuser2',
+                                    'content': {
+                                        'itemContent': {
+                                            'user_results': {
+                                                'result': {
+                                                    'legacy': {'screen_name': 'validuser2'}
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                            ]
+                        }]
+                    }
+                }
+            }
+        }
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        # Should only have 2 valid usernames (numeric ID filtered out)
+        assert len(usernames) == 2
+        assert 'validuser1' in usernames
+        assert 'validuser2' in usernames
+        assert '911245230426525697' not in usernames

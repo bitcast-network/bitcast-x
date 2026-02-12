@@ -742,3 +742,116 @@ class TestDesearchProviderGetRetweeters:
         assert len(usernames) == 2
         assert 'user1' in usernames
         assert 'user2' in usernames
+
+    @mock.patch('requests.get')
+    def test_get_retweeters_filters_numeric_ids(self, mock_get):
+        """Test that numeric user IDs are filtered from retweeters."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        mock_response = mock.Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "retweeters": [
+                {"username": "validuser1"},
+                {"username": "911245230426525697"},  # Numeric ID - should be filtered
+                {"screen_name": "validuser2"},
+                {"screen_name": "1098881129057112064"},  # Numeric ID - should be filtered
+                "stringuser",  # Valid string
+                "999999999",  # Numeric ID as string - should be filtered
+            ]
+        }
+        mock_get.return_value = mock_response
+        
+        usernames, success = provider.get_retweeters("123456789")
+        
+        assert success is True
+        # Should only have 3 valid usernames (numeric IDs filtered out)
+        assert len(usernames) == 3
+        assert "validuser1" in usernames
+        assert "validuser2" in usernames
+        assert "stringuser" in usernames
+        assert "911245230426525697" not in usernames
+        assert "1098881129057112064" not in usernames
+        assert "999999999" not in usernames
+
+
+class TestDesearchProviderNumericIDFiltering:
+    """Tests for numeric user ID filtering in Desearch provider."""
+    
+    def test_parse_tweet_filters_numeric_user_ids(self):
+        """Test that numeric user IDs are filtered from tagged_accounts and in_reply_to_user."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        # Mock tweet with numeric IDs in various fields
+        tweet_data = {
+            'id': 1234567890,
+            'text': 'Hello @user1 and @911245230426525697',
+            'created_at': '2024-01-15T12:00:00.000Z',
+            'like_count': 10,
+            'in_reply_to_screen_name': '1098881129057112064',  # Numeric ID should be filtered
+            'entities': {
+                'user_mentions': [
+                    {'screen_name': 'validuser'},
+                    {'screen_name': '911245230426525697'},  # Should be filtered
+                    {'screen_name': 'user123'},  # Should be kept (has letters)
+                    {'screen_name': '999999999'},  # Should be filtered
+                ]
+            }
+        }
+        
+        tweet = provider._parse_tweet(tweet_data, 'testuser')
+        
+        assert tweet is not None
+        # tagged_accounts should only contain valid usernames
+        assert 'validuser' in tweet['tagged_accounts']
+        assert 'user123' in tweet['tagged_accounts']
+        assert '911245230426525697' not in tweet['tagged_accounts']
+        assert '999999999' not in tweet['tagged_accounts']
+        assert len(tweet['tagged_accounts']) == 2
+        
+        # in_reply_to_user should be None (numeric ID filtered)
+        assert tweet['in_reply_to_user'] is None
+    
+    def test_parse_search_tweet_filters_numeric_author(self):
+        """Test that numeric user IDs are filtered from author field in search tweets."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        # Test with numeric ID in username field
+        tweet_data = {
+            'id': 1234567890,
+            'text': 'Test tweet',
+            'created_at': '2024-01-15T12:00:00.000Z',
+            'like_count': 10,
+            'user': {
+                'username': '987654321098765',  # Numeric ID
+                'screen_name': 'validusername'  # Valid fallback
+            },
+            'entities': {}
+        }
+        
+        tweet = provider._parse_search_tweet(tweet_data)
+        
+        assert tweet is not None
+        # Should fall back to screen_name since username is numeric
+        assert tweet['author'] == 'validusername'
+    
+    def test_parse_search_tweet_rejects_all_numeric_ids(self):
+        """Test that tweets with only numeric IDs are rejected."""
+        provider = DesearchProvider(api_key="dt_$test")
+        
+        tweet_data = {
+            'id': 1234567890,
+            'text': 'Test tweet',
+            'created_at': '2024-01-15T12:00:00.000Z',
+            'like_count': 10,
+            'user': {
+                'username': '987654321098765',  # Numeric ID
+                'screen_name': '123456789012345'  # Also numeric ID
+            },
+            'entities': {}
+        }
+        
+        tweet = provider._parse_search_tweet(tweet_data)
+        
+        # Should return None since no valid username found
+        assert tweet is None

@@ -60,7 +60,11 @@ class MilestoneTracker:
         """Write a line to the milestone file."""
         with open(self.milestone_file, 'a') as f:
             f.write(line + "\n")
-    
+
+    def write_comment(self, text: str):
+        """Write a comment line (# text) to the milestone file."""
+        self._write_line("# " + text)
+
     def record(self, stage: str, event: str, details: Optional[Dict] = None):
         """Record a milestone with timestamp."""
         now = datetime.now()
@@ -232,7 +236,8 @@ def _get_seed_accounts(pool_name: str, pool_config: Dict) -> List[str]:
             with open(latest_file, 'r') as f:
                 existing_data = json.load(f)
             
-            max_seed_accounts = pool_config.get('max_seed_accounts', 150)
+            # Use core_max_seed_accounts since Stage 1 will use this many
+            max_seed_accounts = pool_config.get('core_max_seed_accounts', 100)
             all_accounts = [
                 (acc, data.get('score', 0.0))
                 for acc, data in existing_data['accounts'].items()

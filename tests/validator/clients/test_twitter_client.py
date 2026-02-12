@@ -119,3 +119,27 @@ class TestTwitterClientCaching:
         assert result['cache_info']['cache_hit'] is True
         assert result['cache_info']['provider_used'] == 'desearch'
         assert len(result['tweets']) == 2  # 1 new + 1 cached
+
+
+class TestTwitterClientUsernameValidation:
+    """Test username validation at TwitterClient entry point."""
+    
+    def test_fetch_user_tweets_rejects_numeric_username(self):
+        """Test that fetch_user_tweets rejects numeric user IDs (suspended/deleted accounts)."""
+        client = TwitterClient()
+        
+        result = client.fetch_user_tweets('911245230426525697')
+        
+        assert result['tweets'] == []
+        assert result['user_info']['username'] == '911245230426525697'
+        assert result['cache_info']['provider_used'] == 'none'
+    
+    def test_fetch_user_tweets_accepts_valid_username(self):
+        """Test that fetch_user_tweets accepts valid usernames."""
+        from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
+        
+        # Validation function should distinguish between valid usernames and numeric IDs
+        assert is_valid_twitter_username('elonmusk')
+        assert is_valid_twitter_username('jack')
+        assert is_valid_twitter_username('user123')  # Has letters - valid
+        assert not is_valid_twitter_username('911245230426525697')  # Purely numeric - invalid

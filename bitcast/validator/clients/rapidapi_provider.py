@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import bittensor as bt
 
 from .twitter_provider import TwitterProvider
+from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
 
 
 class RapidAPIProvider(TwitterProvider):
@@ -21,6 +22,9 @@ class RapidAPIProvider(TwitterProvider):
     
     Handles RapidAPI-specific API communication, complex response parsing,
     and cursor-based pagination logic.
+    
+    Supports multiple API keys for load balancing - requests are distributed
+    across keys using round-robin to maximize throughput.
     """
     
     def __init__(self, api_key: str, max_retries: int = 3,
@@ -29,30 +33,59 @@ class RapidAPIProvider(TwitterProvider):
         Initialize RapidAPI provider.
         
         Args:
-            api_key: RapidAPI key for Twitter API access
+            api_key: Single RapidAPI key or comma-separated list of keys for load balancing
             max_retries: Maximum number of API request retries
             retry_delay: Delay in seconds between retries
             rate_limit_delay: Delay in seconds between API calls
         """
-        self.api_key = api_key.strip()
+        # Support multiple API keys (comma-separated)
+        if ',' in api_key:
+            self.api_keys = [k.strip() for k in api_key.split(',') if k.strip()]
+            bt.logging.info(f"RapidAPIProvider initialized with {len(self.api_keys)} API keys for load balancing")
+        else:
+            self.api_keys = [api_key.strip()]
+        
         self.base_url = "https://twitter-v24.p.rapidapi.com"
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limit_delay = rate_limit_delay
         
-        self.headers = {
-            "x-rapidapi-key": self.api_key,
-            "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
-        }
+        # Round-robin counter for key selection
+        self._key_index = 0
+        
+        # Build headers for each key
+        self._headers_list = [
+            {
+                "x-rapidapi-key": key,
+                "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
+            }
+            for key in self.api_keys
+        ]
+    
+    @property
+    def headers(self) -> Dict[str, str]:
+        """Get headers for the next API key (round-robin)."""
+        headers = self._headers_list[self._key_index]
+        self._key_index = (self._key_index + 1) % len(self._headers_list)
+        return headers
+    
+    @property
+    def api_key(self) -> str:
+        """Get the current API key."""
+        return self.api_keys[self._key_index]
+    
+    def get_key_count(self) -> int:
+        """Return the number of API keys available."""
+        return len(self.api_keys)
     
     def validate_api_key(self) -> bool:
         """
-        Validate RapidAPI key (any non-empty string).
+        Validate RapidAPI keys (all keys must be non-empty).
         
         Returns:
-            True if key is non-empty, False otherwise
+            True if all keys are non-empty, False otherwise
         """
-        return bool(self.api_key and len(self.api_key) > 0)
+        return all(bool(key and len(key) > 0) for key in self.api_keys)
     
     def fetch_user_tweets(
         self,
@@ -223,17 +256,21 @@ class RapidAPIProvider(TwitterProvider):
             if note_tweet and note_tweet.get('text'):
                 text = note_tweet['text']
                 entity_set = note_tweet.get('entity_set', {})
+                # Filter out numeric user IDs (suspended/deleted accounts)
                 tagged_accounts = [
                     m.get('screen_name', '').lower()
                     for m in entity_set.get('user_mentions', [])
+                    if m.get('screen_name') and is_valid_twitter_username(m.get('screen_name'))
                 ]
             else:
                 text = legacy.get('full_text', '')
                 if not text:
                     return None
+                # Filter out numeric user IDs (suspended/deleted accounts)
                 tagged_accounts = [
                     m.get('screen_name', '').lower()
                     for m in legacy.get('entities', {}).get('user_mentions', [])
+                    if m.get('screen_name') and is_valid_twitter_username(m.get('screen_name'))
                 ]
             
             # Parse retweet
@@ -242,7 +279,11 @@ class RapidAPIProvider(TwitterProvider):
             retweeted_tweet_id = None
             if is_retweet:
                 rt_match = re.match(r'RT @(\w+):', text)
-                retweeted_user = rt_match.group(1).lower() if rt_match else None
+                if rt_match:
+                    username = rt_match.group(1).lower()
+                    # Filter out numeric user IDs (suspended/deleted accounts)
+                    if is_valid_twitter_username(username):
+                        retweeted_user = username
                 tagged_accounts = []
                 retweeted_status = legacy.get('retweeted_status_result', {}).get('result', {})
                 retweeted_tweet_id = retweeted_status.get('rest_id')
@@ -264,22 +305,31 @@ class RapidAPIProvider(TwitterProvider):
                     url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
                     match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
                     if match:
-                        quoted_user = match.group(1).lower()
+                        username = match.group(1).lower()
+                        # Filter out numeric user IDs (suspended/deleted accounts)
+                        if is_valid_twitter_username(username):
+                            quoted_user = username
                         quoted_tweet_id = match.group(2)
                 
                 # Extract quoted user if not already found
                 if quoted_tweet_id and not quoted_user:
                     try:
                         quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
-                        quoted_user = (
+                        username = (
                             quoted_status_result['core']['user_results']['result']['legacy']['screen_name']
                             .lower()
                         )
+                        # Filter out numeric user IDs (suspended/deleted accounts)
+                        if is_valid_twitter_username(username):
+                            quoted_user = username
                     except (KeyError, AttributeError, TypeError):
                         url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
                         match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
                         if match:
-                            quoted_user = match.group(1).lower()
+                            username = match.group(1).lower()
+                            # Filter out numeric user IDs (suspended/deleted accounts)
+                            if is_valid_twitter_username(username):
+                                quoted_user = username
             
             # Extract actual author from core.user_results
             # Different structure for search results vs user timeline
@@ -306,7 +356,12 @@ class RapidAPIProvider(TwitterProvider):
             in_reply_to_status_id = legacy.get('in_reply_to_status_id_str')
             in_reply_to_user = legacy.get('in_reply_to_screen_name')
             if in_reply_to_user:
-                in_reply_to_user = in_reply_to_user.lower()
+                username = in_reply_to_user.lower()
+                # Filter out numeric user IDs (suspended/deleted accounts)
+                if is_valid_twitter_username(username):
+                    in_reply_to_user = username
+                else:
+                    in_reply_to_user = None
             
             # Extract views count (at tweet_result level, not in legacy)
             # Views object format: {"count": "123456", "state": "EnabledWithCount"} or {"state": "Enabled"}
@@ -733,7 +788,10 @@ class RapidAPIProvider(TwitterProvider):
                             )
                             username = user_result.get('legacy', {}).get('screen_name', '')
                             if username:
-                                usernames.append(username.lower())
+                                username_lower = username.lower()
+                                # Filter out numeric user IDs (suspended/deleted accounts)
+                                if is_valid_twitter_username(username_lower):
+                                    usernames.append(username_lower)
                                 
                                 if len(usernames) >= max_results:
                                     cursor = None

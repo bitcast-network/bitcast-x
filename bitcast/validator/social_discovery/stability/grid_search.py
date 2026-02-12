@@ -8,17 +8,19 @@ Output is written to the stability output directory — never to
 """
 
 import json
+import re
 import traceback
 from datetime import datetime
 from itertools import product
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import bittensor as bt
 
 from .analyzer import StabilityAnalyzer
 from .config import (
     GRID,
+    POOL_GRIDS,
     OUTPUT_DIR,
     TOP_N_ACCOUNTS,
 )
@@ -58,6 +60,7 @@ class GridSearchRunner:
         *,
         core_grid: Optional[Dict[str, List]] = None,
         extended_grid: Optional[Dict[str, List]] = None,
+        single_params: Optional[Dict] = None,
     ) -> List[Dict]:
         """
         Run the two-stage recursive grid search.
@@ -65,26 +68,59 @@ class GridSearchRunner:
         If *core_grid* / *extended_grid* are not supplied they are loaded
         from ``config.GRID``.
 
+        If *single_params* is provided, only that single parameter combination
+        is run (for debugging purposes). Format: {"core": {...}, "extended": {...}}
+
         Returns:
             List of result dicts, one per combination.
         """
-        core_grid = core_grid or GRID["core"]
-        extended_grid = extended_grid or GRID["extended"]
+        # Single parameter mode for debugging
+        if single_params:
+            bt.logging.info("=" * 80)
+            bt.logging.info(f"SINGLE PARAM RUN — {self.pool_name}")
+            bt.logging.info(f"Core:     {single_params['core']}")
+            bt.logging.info(f"Extended: {single_params['extended']}")
+            bt.logging.info("=" * 80)
+
+            result = self._run_combination(single_params["core"], single_params["extended"])
+            results = [result]
+            self._log_summary(results)
+            return results
+
+        # Use pool-specific grid if available, otherwise use default
+        if core_grid is None:
+            pool_grid = POOL_GRIDS.get(self.pool_name, GRID)
+            core_grid = pool_grid["core"]
+        if extended_grid is None:
+            pool_grid = POOL_GRIDS.get(self.pool_name, GRID)
+            extended_grid = pool_grid["extended"]
 
         combinations = self._build_combinations(core_grid, extended_grid)
         total = len(combinations)
 
+        # Load already-completed runs from milestone logs (resume support)
+        completed_results = self._load_completed_from_logs()
+        completed_keys = {
+            self._normalize_params(r["parameters"]["core"], r["parameters"]["extended"])
+            for r in completed_results
+        }
+        to_run = [
+            (c, e) for c, e in combinations
+            if self._normalize_params(c, e) not in completed_keys
+        ]
+        skipped = total - len(to_run)
+
         bt.logging.info("=" * 80)
         bt.logging.info(f"GRID SEARCH — {self.pool_name}")
-        bt.logging.info(f"Combinations: {total}")
+        bt.logging.info(f"Combinations: {total} total, {skipped} already completed, {len(to_run)} to run")
         bt.logging.info(f"Core grid:     {core_grid}")
         bt.logging.info(f"Extended grid: {extended_grid}")
         bt.logging.info("=" * 80)
 
-        results: List[Dict] = []
-        for i, (core_params, ext_params) in enumerate(combinations):
+        results: List[Dict] = list(completed_results)
+        for i, (core_params, ext_params) in enumerate(to_run):
             bt.logging.info("-" * 80)
-            bt.logging.info(f"Combination {i+1}/{total}")
+            bt.logging.info(f"Combination {i+1}/{len(to_run)} (of {len(to_run)} remaining)")
             bt.logging.info(f"  Core:     {core_params}")
             bt.logging.info(f"  Extended: {ext_params}")
             bt.logging.info("-" * 80)
@@ -172,6 +208,122 @@ class GridSearchRunner:
             )
             for cc, ec in product(core_combos, ext_combos)
         ]
+
+    # ------------------------------------------------------------------
+    # Private: resume (skip already-completed from milestone logs)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_params(core: Dict, ext: Dict) -> Tuple[Tuple, Tuple]:
+        """Hashable key for (core_params, extended_params) comparison."""
+        return (
+            tuple(sorted((k, v) for k, v in core.items())),
+            tuple(sorted((k, v) for k, v in ext.items())),
+        )
+
+    def _load_completed_from_logs(self) -> List[Dict]:
+        """
+        Scan output_dir for milestone logs that finished successfully.
+        Return list of minimal result dicts (params + stability) so summary
+        includes them and we skip re-running those combinations.
+        """
+        completed: List[Dict] = []
+        prefix = f"milestones_stability_{self.pool_name}_"
+        for path in self.output_dir.glob("*.log"):
+            if not path.name.startswith(prefix):
+                continue
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            if "# Completed:" not in text:
+                continue
+            params = self._parse_params_from_log(text)
+            if not params:
+                continue
+            overall = self._parse_overall_stability_from_log(text)
+            if overall is None:
+                overall = 0.0
+            completed.append({
+                "parameters": params,
+                "stability": {"overall": overall, "components": {}},
+                "social_map": {"accounts": {}},
+                "metadata": {"core_accounts_count": 0},
+                "skipped": True,
+            })
+        return completed
+
+    @staticmethod
+    def _parse_params_from_log(text: str) -> Optional[Dict]:
+        """Extract {core, extended} from PARAMS_JSON line or INIT line."""
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("# PARAMS_JSON:"):
+                try:
+                    return json.loads(line[len("# PARAMS_JSON:"):].strip())
+                except json.JSONDecodeError:
+                    pass
+                break
+        # Fallback: parse INIT line (old logs; convergence_threshold defaults to 0.9)
+        for line in text.splitlines():
+            if "INIT:" not in line or "core_params=" not in line or " extended_params=" not in line:
+                continue
+            m = re.search(r"core_params=(.+?), extended_params=(.+)", line)
+            if not m:
+                continue
+            core = GridSearchRunner._parse_kv_pairs(m.group(1))
+            ext = GridSearchRunner._parse_kv_pairs(m.group(2))
+            if not core or not ext:
+                continue
+            core_map = {
+                "min_interaction_weight": core.get("min_weight", core.get("min_interaction_weight")),
+                "min_tweets": core.get("min_tweets"),
+                "max_seed_accounts": core.get("max_seeds", core.get("max_seed_accounts")),
+            }
+            ext_map = {
+                "min_interaction_weight": ext.get("min_weight", ext.get("min_interaction_weight")),
+                "min_tweets": ext.get("min_tweets"),
+                "max_seed_accounts": ext.get("max_seeds", ext.get("max_seed_accounts")),
+                "max_iterations": ext.get("max_iter", ext.get("max_iterations")),
+                "convergence_threshold": ext.get("convergence_threshold", 0.9),
+            }
+            if None in core_map.values() or None in ext_map.values():
+                continue
+            return {"core": core_map, "extended": ext_map}
+        return None
+
+    @staticmethod
+    def _parse_kv_pairs(s: str) -> Dict[str, Any]:
+        """Parse 'k1=v1, k2=v2' into dict; values as int/float where possible."""
+        out: Dict[str, Any] = {}
+        for part in s.split(","):
+            part = part.strip()
+            if "=" not in part:
+                continue
+            k, v = part.split("=", 1)
+            k, v = k.strip(), v.strip()
+            try:
+                v = int(v)
+            except ValueError:
+                try:
+                    v = float(v)
+                except ValueError:
+                    pass
+            out[k] = v
+        return out
+
+    @staticmethod
+    def _parse_overall_stability_from_log(text: str) -> Optional[float]:
+        """Extract overall_stability from COMPLETE or WINDOWED_ANALYSIS line."""
+        for line in text.splitlines():
+            if "overall_stability=" in line:
+                m = re.search(r"overall_stability=([\d.]+)", line)
+                if m:
+                    try:
+                        return float(m.group(1))
+                    except ValueError:
+                        pass
+        return None
 
     # ------------------------------------------------------------------
     # Private: summary / logging

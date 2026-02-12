@@ -18,12 +18,11 @@ Discovers and analyzes Twitter/X social influence networks using PageRank algori
 
 ```
 social_discovery/
-├── social_discovery.py          # Main analyzer & CLI
+├── social_discovery.py          # Main analyzer (TwitterNetworkAnalyzer)
 ├── pool_manager.py               # Pool configuration loader
 ├── pool_status_manager.py        # Membership & transitions
-├── recursive_discovery.py        # Iterative discovery
+├── recursive_discovery.py        # Two-stage discovery with CLI
 ├── social_map_publisher.py       # Publishing to API
-├── pools_config.json             # Pool definitions
 └── social_maps/                  # Output directory
     ├── tao/
     ├── ai_crypto/
@@ -35,32 +34,23 @@ social_discovery/
 ### Command Line
 
 ```bash
-# Single discovery run
-python -m bitcast.validator.social_discovery.social_discovery \
-  --pool-name tao
-
-# Recursive discovery (runs until convergence)
+# Two-stage discovery with convergence (default)
 python -m bitcast.validator.social_discovery.recursive_discovery \
   --pool-name tao \
-  --max-iterations 10 \
-  --convergence-threshold 0.95
+  --max-iterations 3 \
+  --convergence-threshold 0.90
 ```
 
 ### Programmatic
 
 ```python
-from bitcast.validator.social_discovery import discover_social_network
+from bitcast.validator.social_discovery import two_stage_discovery
 
-# Single discovery
-social_map_path = discover_social_network(pool_name="tao")
-
-# Recursive discovery until convergence
-from bitcast.validator.social_discovery.recursive_discovery import recursive_social_discovery
-
-path, iterations, converged, metrics = recursive_social_discovery(
+# Two-stage discovery with core/extended phases
+path, metrics = await two_stage_discovery(
     pool_name="tao",
-    max_iterations=10,
-    convergence_threshold=0.95
+    max_iterations=3,
+    convergence_threshold=0.90
 )
 ```
 
@@ -338,7 +328,7 @@ ValueError: No interactions found in network
 
 2. Run discovery:
 ```bash
-python -m bitcast.validator.social_discovery.social_discovery --pool-name my_pool
+python -m bitcast.validator.social_discovery.recursive_discovery --pool-name my_pool
 ```
 
 ### Testing
