@@ -4,7 +4,7 @@ Scores tweets from pool members based on engagement from influential accounts, w
 
 ## Overview
 
-Two discovery modes feed the same accumulative `ScoringStore`:
+Two discovery modes feed the same accumulative `TweetStore`:
 - **Lightweight (every 45 min)**: Search API queries by tag/QRT -- fast but may miss tweets
 - **Thorough (every 8 hours)**: Fetches connected accounts' timelines -- slower but comprehensive
 
@@ -272,9 +272,9 @@ With search-based discovery (typical brief with 50-100 matching tweets):
 - Scoring: <5 seconds
 - **Total**: 1-2 minutes
 
-### Accumulative ScoringStore
+### Accumulative TweetStore
 
-Data accumulates permanently in ScoringStore:
+Data accumulates permanently in TweetStore:
 - Tweets found once are scored in all future runs (even if API stops returning them)
 - Engagements (RTs/QRTs) accumulate across runs
 - Each run makes fresh API calls to discover new data

@@ -5,7 +5,7 @@ DiscoveryCache: Cache for social discovery user timeline fetches (90-day expiry)
 - Used by social discovery to cache account timelines for network building
 - Keys: user_tweets_{username}, user_info_{username}
 
-For tweet scoring, use ScoringStore (accumulative, no expiry) instead.
+For tweet scoring, use TweetStore (accumulative, no expiry) instead.
 """
 
 import os
@@ -24,7 +24,7 @@ class DiscoveryCache:
     Thread-safe singleton cache for social discovery user timeline data.
     
     Stores account timelines fetched during social discovery with a 90-day expiry.
-    Tweet scoring uses ScoringStore (accumulative, no expiry) instead.
+    Tweet scoring uses TweetStore (accumulative, no expiry) instead.
     """
     
     _instance = None

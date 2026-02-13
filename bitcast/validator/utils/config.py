@@ -117,8 +117,14 @@ TWEET_MAX_LENGTH = 10000
 
 # Validation cycle
 VALIDATOR_WAIT = 60  # 60 seconds
-SCORING_INTERVAL_MINUTES = 45
+SCORING_INTERVAL_MINUTES = 15
 THOROUGH_SCORING_INTERVAL_MINUTES = 480  # 8 hours
+
+# Tiered engagement fetching intervals (in hours)
+# Reduces API calls by fetching engagements less frequently for older tweets
+ENGAGEMENT_FETCH_INTERVAL_NEW = 1  # Hours: tweets < 1 hour old
+ENGAGEMENT_FETCH_INTERVAL_RECENT = 4  # Hours: tweets 1-24 hours old
+ENGAGEMENT_FETCH_INTERVAL_OLD = 24  # Hours: tweets > 24 hours old
 
 # =============================================================================
 # Subnet Treasury and No-Code Mining
@@ -167,6 +173,9 @@ bt.logging.info(f"REWARD_SMOOTHING_EXPONENT: {REWARD_SMOOTHING_EXPONENT}")
 bt.logging.info(f"VALIDATOR_WAIT: {VALIDATOR_WAIT}")
 bt.logging.info(f"SCORING_INTERVAL_MINUTES: {SCORING_INTERVAL_MINUTES}")
 bt.logging.info(f"THOROUGH_SCORING_INTERVAL_MINUTES: {THOROUGH_SCORING_INTERVAL_MINUTES}")
+bt.logging.info(f"ENGAGEMENT_FETCH_INTERVAL_NEW: {ENGAGEMENT_FETCH_INTERVAL_NEW}h (tweets < 1h old)")
+bt.logging.info(f"ENGAGEMENT_FETCH_INTERVAL_RECENT: {ENGAGEMENT_FETCH_INTERVAL_RECENT}h (tweets 1-24h old)")
+bt.logging.info(f"ENGAGEMENT_FETCH_INTERVAL_OLD: {ENGAGEMENT_FETCH_INTERVAL_OLD}h (tweets > 24h old)")
 bt.logging.info(f"SUBNET_TREASURY_PERCENTAGE: {SUBNET_TREASURY_PERCENTAGE}")
 bt.logging.info(f"SUBNET_TREASURY_UID: {SUBNET_TREASURY_UID}")
 bt.logging.info(f"NOCODE_UID: {NOCODE_UID}")

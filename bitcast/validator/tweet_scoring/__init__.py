@@ -18,7 +18,7 @@ from .social_map_loader import (
 from .tweet_filter import TweetFilter
 from .score_calculator import ScoreCalculator
 from .tweet_discovery import TweetDiscovery, build_search_query
-from .tweet_store import ScoringStore
+from .tweet_store import TweetStore
 
 __all__ = [
     'score_tweets_for_pool',
@@ -31,6 +31,6 @@ __all__ = [
     'ScoreCalculator',
     'TweetDiscovery',
     'build_search_query',
-    'ScoringStore'
+    'TweetStore'
 ]
 

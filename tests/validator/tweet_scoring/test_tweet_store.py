@@ -1,4 +1,4 @@
-"""Tests for ScoringStore accumulative cache."""
+"""Tests for TweetStore accumulative cache."""
 
 import pytest
 import tempfile
@@ -6,19 +6,19 @@ import os
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from bitcast.validator.tweet_scoring.tweet_store import ScoringStore
+from bitcast.validator.tweet_scoring.tweet_store import TweetStore
 
 
 @pytest.fixture
 def store(tmp_path):
-    """Create a ScoringStore with a temporary directory."""
-    with patch.object(ScoringStore, '_cache', None), \
-         patch.object(ScoringStore, '_instance', None), \
-         patch('bitcast.validator.tweet_scoring.tweet_store.SCORING_STORE_DIR', str(tmp_path)):
-        s = ScoringStore()
+    """Create a TweetStore with a temporary directory."""
+    with patch.object(TweetStore, '_cache', None), \
+         patch.object(TweetStore, '_instance', None), \
+         patch('bitcast.validator.tweet_scoring.tweet_store.TWEET_STORE_DIR', str(tmp_path)):
+        s = TweetStore()
         yield s
-        ScoringStore.cleanup()
-        ScoringStore._instance = None
+        TweetStore.cleanup()
+        TweetStore._instance = None
 
 
 class TestTweetStorage:

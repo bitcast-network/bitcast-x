@@ -1,13 +1,14 @@
 """
-Accumulative scoring store for tweet scoring.
+Accumulative tweet store for tweet scoring.
 
-Stores tweets and engagement data discovered from API searches.
-Once a tweet or engagement is found, it is retained for 90 days.
+Permanently stores tweets and engagement data discovered from API searches.
+Once a tweet or engagement is found, it is never lost - even if the API
+stops returning it in future searches.
 
 Key design:
 - Tweets are stored by tweet_id with all fields
 - Engagements (RTs and QRTs) are stored per tweet, accumulating over time
-- 90-day expiry - data persists for 90 days from last update
+- No expiry - data persists permanently
 - Always make fresh API calls and merge results into the store
 """
 
@@ -19,18 +20,18 @@ from typing import Dict, List, Optional, Set
 from diskcache import Cache
 import bittensor as bt
 
-from bitcast.validator.utils.config import CACHE_DIRS, CACHE_EXPIRY_SECONDS
+from bitcast.validator.utils.config import CACHE_DIRS
 
 
 # Store directory alongside existing twitter cache
-SCORING_STORE_DIR = os.path.join(CACHE_DIRS.get("twitter", "cache/twitter"), "tweet_store")
+TWEET_STORE_DIR = os.path.join(CACHE_DIRS.get("twitter", "cache/twitter"), "tweet_store")
 
 
-class ScoringStore:
+class TweetStore:
     """
-    Accumulative store for tweet scoring data.
+    Accumulative store for tweets and their engagements.
     
-    Stores tweets and engagements with 90-day expiry. Each scoring run:
+    Tweets are stored permanently (no expiry). Each scoring run:
     1. Makes fresh API calls
     2. Merges new tweets into the store (upsert)
     3. Queries the store for tweets matching brief criteria
@@ -43,7 +44,7 @@ class ScoringStore:
     _cache: Cache = None
     
     @classmethod
-    def get_instance(cls) -> 'ScoringStore':
+    def get_instance(cls) -> 'TweetStore':
         """Thread-safe singleton access."""
         if cls._instance is None:
             with cls._lock:
@@ -52,16 +53,16 @@ class ScoringStore:
         return cls._instance
     
     def __init__(self):
-        if ScoringStore._cache is None:
-            os.makedirs(SCORING_STORE_DIR, exist_ok=True)
-            ScoringStore._cache = Cache(
-                directory=SCORING_STORE_DIR,
-                size_limit=2e9,  # 2GB
+        if TweetStore._cache is None:
+            os.makedirs(TWEET_STORE_DIR, exist_ok=True)
+            TweetStore._cache = Cache(
+                directory=TWEET_STORE_DIR,
+                size_limit=3e9,  # 3GB
                 disk_min_file_size=0,
                 disk_pickle_protocol=4,
             )
             atexit.register(self.cleanup)
-            bt.logging.info(f"ScoringStore initialized at: {SCORING_STORE_DIR}")
+            bt.logging.info(f"TweetStore initialized at: {TWEET_STORE_DIR}")
     
     @classmethod
     def cleanup(cls):
@@ -125,8 +126,8 @@ class ScoringStore:
                 'first_seen': datetime.now().isoformat(),
                 'last_updated': datetime.now().isoformat(),
             }
-            # 90-day expiry from config
-            self._cache.set(key, record, expire=CACHE_EXPIRY_SECONDS)
+            # No expiry - permanent storage
+            self._cache.set(key, record)
             return True
         else:
             # Existing tweet - update engagement stats and timestamp
@@ -270,7 +271,7 @@ class ScoringStore:
                 new_count += 1
         
         existing['last_updated'] = datetime.now().isoformat()
-        self._cache.set(key, existing, expire=CACHE_EXPIRY_SECONDS)
+        self._cache.set(key, existing)
 
         return {'new': new_count, 'total': len(existing['retweeters'])}
     
@@ -306,7 +307,7 @@ class ScoringStore:
                 new_count += 1
         
         existing['last_updated'] = datetime.now().isoformat()
-        self._cache.set(key, existing, expire=CACHE_EXPIRY_SECONDS)
+        self._cache.set(key, existing)
 
         return {'new': new_count, 'total': len(existing['quoters'])}
     
@@ -326,6 +327,43 @@ class ScoringStore:
         if result:
             return result
         return {'tweet_id': tweet_id, 'retweeters': {}, 'quoters': {}}
+    
+    # -------------------------------------------------------------------------
+    # Engagement fetch tracking (for tiered fetching)
+    # -------------------------------------------------------------------------
+    
+    def _engagement_fetch_key(self, tweet_id: str) -> str:
+        return f"engagement_fetch:{tweet_id}"
+    
+    def get_last_engagement_fetch(self, tweet_id: str) -> Optional[datetime]:
+        """
+        Get the timestamp of the last engagement fetch for a tweet.
+        
+        Args:
+            tweet_id: Tweet ID
+            
+        Returns:
+            datetime of last fetch, or None if never fetched
+        """
+        key = self._engagement_fetch_key(tweet_id)
+        timestamp_str = self._cache.get(key)
+        if timestamp_str:
+            try:
+                return datetime.fromisoformat(timestamp_str)
+            except ValueError:
+                return None
+        return None
+    
+    def set_last_engagement_fetch(self, tweet_id: str, fetch_time: datetime) -> None:
+        """
+        Set the timestamp of the last engagement fetch for a tweet.
+        
+        Args:
+            tweet_id: Tweet ID
+            fetch_time: datetime of the fetch
+        """
+        key = self._engagement_fetch_key(tweet_id)
+        self._cache.set(key, fetch_time.isoformat())
     
     # -------------------------------------------------------------------------
     # Stats
