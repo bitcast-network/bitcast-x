@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 from .social_discovery import TwitterNetworkAnalyzer
 from .social_map_publisher import publish_social_map
 from .pool_manager import PoolManager
+from .adjacency_utils import serialize_adjacency_matrix
 from bitcast.validator.utils.config import ENABLE_DATA_PUBLISH
 from bitcast.validator.utils.data_publisher import get_global_publisher
 from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
@@ -554,16 +555,16 @@ async def two_stage_discovery(
     with open(social_map_file, 'w') as f:
         json.dump(social_map_data, f, indent=2)
     
-    # Adjacency matrix with relationship scores
+    # Adjacency matrix with relationship scores (compact edge format)
     matrix_file = pool_dir / f"{timestamp_str}_adjacency.json"
-    matrix_data = {
-        'usernames': usernames,
-        'adjacency_matrix': adj_matrix.tolist(),
-        'relationship_scores': rel_matrix.tolist(),
-        'created_at': datetime.now().isoformat()
-    }
+    matrix_data = serialize_adjacency_matrix(
+        adjacency_matrix=adj_matrix,
+        relationship_matrix=rel_matrix,
+        usernames=usernames,
+        metadata={'created_at': datetime.now().isoformat()}
+    )
     with open(matrix_file, 'w') as f:
-        json.dump(matrix_data, f, indent=2)
+        json.dump(matrix_data, f)
     
     # Metadata
     validator_hotkey = None
@@ -606,7 +607,8 @@ async def two_stage_discovery(
                 social_map_data=social_map_data,
                 adjacency_matrix=adj_matrix,
                 usernames=usernames,
-                run_id=run_id
+                run_id=run_id,
+                relationship_matrix=rel_matrix
             )
             if success:
                 bt.logging.info(f"Social map published for pool {pool_name}")

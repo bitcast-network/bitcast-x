@@ -170,13 +170,31 @@ Saved to `social_maps/{pool_name}/{timestamp}.json`:
 ### Adjacency Matrix
 Saved to `social_maps/{pool_name}/{timestamp}_adjacency.json`:
 
+**Compact edge format (v2.0):**
 ```json
 {
   "usernames": ["user1", "user2", "user3"],
-  "adjacency_matrix": [[0, 2.0, 1.0], [1.0, 0, 0], [1.5, 0, 0]],
+  "format_version": "2.0",
+  "adjacency_edges": {
+    "sources": [0, 0, 1, 2],
+    "targets": [1, 2, 0, 0],
+    "weights": [2.0, 1.0, 1.0, 1.5]
+  },
+  "adjacency_shape": [3, 3],
+  "relationship_edges": {
+    "sources": [0, 0, 1, 2],
+    "targets": [1, 2, 0, 0],
+    "weights": [3.0, 1.5, 1.0, 2.0]
+  },
+  "relationship_shape": [3, 3],
   "created_at": "2025-11-11T12:00:00"
 }
 ```
+
+**Format Notes:**
+- The compact edge format stores only non-zero edges as parallel arrays (`sources`, `targets`, `weights`)
+- This reduces file size by ~700-1000x for typical sparse social networks (99%+ sparsity)
+- Only the v2.0 compact format is supported; old dense files must be re-generated via social discovery
 
 ### Metadata
 Saved to `social_maps/{pool_name}/{timestamp}_metadata.json`:
