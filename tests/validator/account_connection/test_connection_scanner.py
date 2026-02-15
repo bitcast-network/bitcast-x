@@ -69,7 +69,7 @@ class TestConnectionScanner:
         assert scanner.twitter_client is not None
         assert scanner.database is not None
         assert scanner.tag_parser is not None
-        assert scanner.search_tag == '@bitcast'
+        assert scanner.search_tag == '@bitcast_network'
     
     def test_build_query(self, temp_db_path, mock_twitter_client):
         scanner = ConnectionScanner(
@@ -79,7 +79,7 @@ class TestConnectionScanner:
         )
         query = scanner._build_query()
         
-        assert '@bitcast' in query
+        assert '@bitcast_network' in query
         assert 'since:' in query
     
     def test_extract_connections_from_tweets(self, temp_db_path, mock_twitter_client):
@@ -95,22 +95,22 @@ class TestConnectionScanner:
             {
                 'tweet_id': '111',
                 'author': 'alice',
-                'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                'text': '@bitcast_network bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
             },
             {
                 'tweet_id': '222',
                 'author': 'bob',
-                'text': '@bitcast bitcast-xabc123',
+                'text': '@bitcast_network bitcast-xabc123',
             },
             {
                 'tweet_id': '333',
                 'author': 'unknown_user',  # Not in social map
-                'text': '@bitcast bitcast-hk:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
+                'text': '@bitcast_network bitcast-hk:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY',
             },
             {
                 'tweet_id': '444',
                 'author': 'charlie',
-                'text': '@bitcast no tags here just chatting',
+                'text': '@bitcast_network no tags here just chatting',
             },
         ]
         
@@ -139,7 +139,7 @@ class TestConnectionScanner:
             {
                 'tweet_id': '111',
                 'author': 'alice',
-                'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                'text': '@bitcast_network bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
                 'retweeted_user': 'someone',  # This is a retweet
             },
         ]
@@ -157,7 +157,7 @@ class TestConnectionScanner:
             {
                 'tweet_id': '111',
                 'author': 'alice',
-                'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq bitcast-xabc123',
+                'text': '@bitcast_network bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq bitcast-xabc123',
             },
         ]
         
@@ -176,12 +176,12 @@ class TestConnectionScanner:
                 {
                     'tweet_id': '111',
                     'author': 'alice',
-                    'text': '@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                    'text': '@bitcast_network bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
                 },
                 {
                     'tweet_id': '222',
                     'author': 'bob',
-                    'text': '@bitcast bitcast-xtest123',
+                    'text': '@bitcast_network bitcast-xtest123',
                 },
             ],
             'api_succeeded': True,

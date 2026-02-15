@@ -1,7 +1,7 @@
 """
 Account connection module for tracking Twitter-based connections.
 
-Searches for tweets containing a connection search tag (e.g. '@bitcast'),
+Searches for tweets containing a connection search tag (e.g. '@bitcast_network'),
 extracts connection tags, and stores them in a local database.
 """
 

@@ -1,7 +1,7 @@
 """
 Connection scanner for finding connection tags via search API.
 
-Searches for tweets containing the connection search tag (e.g. '@bitcast'),
+Searches for tweets containing the connection search tag (e.g. '@bitcast_network'),
 cross-references authors against social map accounts, and extracts connection tags.
 """
 
@@ -50,7 +50,7 @@ class ConnectionScanner:
     """
     Scans for connection tags using search API.
     
-    Searches for tweets containing the connection search tag (e.g. '@bitcast'),
+    Searches for tweets containing the connection search tag (e.g. '@bitcast_network'),
     cross-references authors against the social map, and extracts connection tags.
     """
     

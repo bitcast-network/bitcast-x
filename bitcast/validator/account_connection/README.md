@@ -1,11 +1,11 @@
 # Account Connection
 
-Discovers connection tags by searching for tweets containing a search keyword (e.g. `@bitcast`), then extracting `bitcast-hk:` and `bitcast-x` tags from matching tweets.
+Discovers connection tags by searching for tweets containing a search keyword (e.g. `@bitcast_network`), then extracting `bitcast-hk:` and `bitcast-x` tags from matching tweets.
 
 ## Overview
 
 Connection tweets must include:
-1. The search keyword (default: `@bitcast`) - so the search API can find them
+1. The search keyword (default: `@bitcast_network`) - so the search API can find them
 2. A connection tag - to link the X account to a Bittensor UID
 
 ### Tag Formats
@@ -14,12 +14,12 @@ Connection tweets must include:
 
 ### Example Connection Tweet
 ```
-@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq
+@bitcast_network bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq
 ```
 
 ## How It Works
 
-1. **Search API** - Searches for tweets containing `@bitcast` (configurable via `CONNECTION_SEARCH_TAG`)
+1. **Search API** - Searches for tweets containing `@bitcast_network` (configurable via `CONNECTION_SEARCH_TAG`)
 2. **Cross-reference** - Filters results to authors in the social map
 3. **Extract tags** - Parses `bitcast-hk:` and `bitcast-x` tags from tweet text
 4. **Store** - Saves connections to SQLite database
@@ -86,14 +86,14 @@ accounts = db.get_accounts_with_uids("tao", metagraph)
 ## Configuration
 
 ```python
-CONNECTION_SEARCH_TAG = '@bitcast'  # Keyword to search for (env: CONNECTION_SEARCH_TAG)
+CONNECTION_SEARCH_TAG = '@bitcast_network'  # Keyword to search for (env: CONNECTION_SEARCH_TAG)
 SCORING_INTERVAL_MINUTES = 45  # Scoring + connection scan frequency
 ```
 
 ## Data Flow
 
 ```
-Search API ("@bitcast") → Filter by Social Map → Extract Tags → Store in SQLite
+Search API ("@bitcast_network") → Filter by Social Map → Extract Tags → Store in SQLite
 ```
 
 ## Testing
