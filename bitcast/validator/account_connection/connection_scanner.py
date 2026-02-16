@@ -91,7 +91,7 @@ class ConnectionScanner:
             pool_accounts: Set of lowercase usernames in the social map
             
         Returns:
-            List of connection dicts with keys: tweet_id, username, tag_type, tag
+            List of connection dicts with keys: tweet_id, username, tag_type, tag, referral_code, referred_by
         """
         connections = []
         
@@ -111,15 +111,17 @@ class ConnectionScanner:
             if tweet.get('retweeted_user'):
                 continue
             
-            # Extract tags
+            # Extract tags (returns ParsedTag with tag_type, full_tag, referred_by, referral_code)
             tags = self.tag_parser.extract_tags(text)
             
-            for tag_type, full_tag in tags:
+            for parsed in tags:
                 connections.append({
                     'tweet_id': tweet_id,
                     'username': author,
-                    'tag_type': tag_type,
-                    'tag': full_tag,
+                    'tag_type': parsed.tag_type,
+                    'tag': parsed.full_tag,
+                    'referral_code': parsed.referral_code,
+                    'referred_by': parsed.referred_by,
                 })
         
         return connections
@@ -190,10 +192,14 @@ class ConnectionScanner:
                     pool_name=pool_name,
                     tweet_id=conn['tweet_id'],
                     tag=conn['tag'],
-                    account_username=conn['username']
+                    account_username=conn['username'],
+                    referral_code=conn.get('referral_code'),
+                    referred_by=conn.get('referred_by')
                 )
                 if is_new:
                     stats['new_connections'] += 1
+                    if conn.get('referred_by'):
+                        bt.logging.info(f"New connection with referral: {conn['username']} referred by @{conn['referred_by']}")
                 else:
                     stats['duplicates_skipped'] += 1
                 

@@ -87,23 +87,21 @@ API (briefs) → Filter by reward window → Get UID mappings
 ### Automatic (via Validator)
 ```python
 # In validator forward pass
-from bitcast.validator.reward_engine import get_reward_orchestrator
+from bitcast.validator.forward import get_reward_orchestrator
 
 orchestrator = get_reward_orchestrator()
-rewards, metadata = await orchestrator.calculate_rewards(self, miner_uids)
+rewards = await orchestrator.calculate_rewards(self, miner_uids)
 self.update_scores(rewards, miner_uids)
 ```
 
 ### Manual Testing
 ```python
-from bitcast.validator.reward_engine import RewardOrchestrator
-from bitcast.validator.reward_engine.twitter_evaluator import TwitterEvaluator
+from bitcast.validator.forward import get_reward_orchestrator
 
-orchestrator = RewardOrchestrator()
-orchestrator.platforms.register('twitter', TwitterEvaluator())
+orchestrator = get_reward_orchestrator()
 
 # Run reward calculation
-rewards, metadata = await orchestrator.calculate_rewards(validator, uids)
+rewards = await orchestrator.calculate_rewards(validator, uids)
 ```
 
 ## Key Components

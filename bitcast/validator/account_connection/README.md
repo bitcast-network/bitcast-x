@@ -12,9 +12,16 @@ Connection tweets must include:
 - `bitcast-hk:{substrate_hotkey}` - Direct hotkey connection
 - `bitcast-x{identifier}` - No-code mining connection
 
-### Example Connection Tweet
+Both formats support an optional referral code suffix:
+- `bitcast-hk:{substrate_hotkey}-{referral_code}`
+- `bitcast-x{identifier}-{referral_code}`
+
+Referral codes are URL-safe Base64-encoded X handles (no padding).
+
+### Example Connection Tweets
 ```
 @bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq
+@bitcast bitcast-xabc123-ZHJlYWRib25nMA
 ```
 
 ## How It Works
@@ -50,6 +57,7 @@ account_connection/
 ├── connection_scanner.py  # Search-based scanner + CLI
 ├── connection_db.py       # SQLite operations
 ├── tag_parser.py          # Tag extraction/validation
+├── referral_code.py       # Referral code encode/decode
 ├── connection_publisher.py # Data API publishing
 ├── download_connections.py # Bootstrap from reference validator
 └── connections.db         # SQLite database

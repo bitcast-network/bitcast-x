@@ -94,7 +94,7 @@ async def forward(self):
         bt.logging.info(f"Starting reward engine ({mode} discovery)...")
         miner_uids = get_all_uids(self)
         orchestrator = get_reward_orchestrator()
-        rewards, _ = await orchestrator.calculate_rewards(self, miner_uids, thorough=is_thorough)
+        rewards = await orchestrator.calculate_rewards(self, miner_uids, thorough=is_thorough)
         
         bt.logging.info("UID Rewards:")
         for uid, reward in zip(miner_uids, rewards):

@@ -1,18 +1,20 @@
 """Main reward calculation orchestrator - replaces monolithic reward.py functions."""
 
-from typing import List, Tuple, Dict, Any
-import asyncio
+from datetime import date, datetime, timezone
+from typing import List, Dict, Any
 import numpy as np
 import bittensor as bt
 from bitcast.validator.reward_engine.utils import get_briefs
 from ..utils.run_manager import generate_current_run_id
+from ..utils.config import ENABLE_DATA_PUBLISH, TWEETS_SUBMIT_ENDPOINT
 
 from .services.platform_registry import PlatformRegistry
 from .services.score_aggregation_service import ScoreAggregationService
 from .services.emission_calculation_service import EmissionCalculationService
 from .services.reward_distribution_service import RewardDistributionService
 from .services.treasury_allocation import allocate_subnet_treasury
-from .models.evaluation_result import EvaluationResultCollection, EvaluationResult
+from .services.referral_bonus_service import ReferralBonusService
+from .models.evaluation_result import EvaluationResultCollection
 from ..account_connection.connection_db import ConnectionDatabase
 
 
@@ -36,7 +38,7 @@ class RewardOrchestrator:
         validator_self, 
         uids: List[int],
         thorough: bool = False,
-    ) -> Tuple[np.ndarray, List[dict]]:
+    ) -> np.ndarray:
         """Main entry point for reward calculation workflow."""
         try:
             # 1. Get all content briefs (unfiltered)
@@ -70,6 +72,7 @@ class RewardOrchestrator:
             }
             
             valid_mappings = [m for m in all_accounts.values() if m['uid'] is not None]
+            account_to_uid = {m['account_username']: m['uid'] for m in valid_mappings}
             connected_usernames = set(all_accounts.keys())
             bt.logging.info(f"📡 {len(connected_usernames)} connected accounts across {len(all_pools)} pools")
             
@@ -124,26 +127,128 @@ class RewardOrchestrator:
             
             # 9. Distribute final rewards
             bt.logging.debug("Calculating final reward distribution")
-            rewards, stats_list = self.reward_distributor.calculate_distribution(
-                emission_targets, evaluation_results, emission_briefs, uids
+            rewards = self.reward_distributor.calculate_distribution(
+                emission_targets, emission_briefs, uids
             )
+            
+            # 10. Check and activate new referrals, then apply today's bonuses
+            referral_service = ReferralBonusService(connection_db=db)
+            
+            # Collect participating accounts from evaluation results (already computed)
+            participating_accounts = set()
+            for uid, result in evaluation_results.results.items():
+                participating_accounts.update(result.account_results.keys())
+            
+            activated = referral_service.check_and_activate_referrals(
+                participating_accounts=participating_accounts
+            )
+            if activated > 0:
+                bt.logging.info(f"Activated {activated} new referral bonuses")
+            
+            # 11. Apply referral bonuses for today
+            today = date.today()
+            result = referral_service.get_referral_bonuses(
+                payout_date=today,
+                account_to_uid=account_to_uid
+            )
+            
+            if result.bonuses:
+                from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price, get_total_miner_emissions
+                alpha_price = get_bitcast_alpha_price()
+                daily_alpha = get_total_miner_emissions()
+                daily_emission_usd = alpha_price * daily_alpha
+                
+                uid_to_idx = {uid: i for i, uid in enumerate(uids)}
+                bonus_total_usd = 0.0
+                for uid, bonus_usd in result.bonuses.items():
+                    idx = uid_to_idx.get(uid)
+                    if idx is not None:
+                        bonus_weight = bonus_usd / daily_emission_usd
+                        rewards[idx] += bonus_weight
+                        bonus_total_usd += bonus_usd
+                        bt.logging.info(f"Referral bonus: ${bonus_usd:.2f} (weight {bonus_weight:.6f}) to UID {uid}")
+                
+                bt.logging.info(f"Applied ${bonus_total_usd:.2f} in referral bonuses to {len(result.bonuses)} UIDs")
+                
+                # 12. Publish referral bonus data
+                await self._publish_referral_bonuses(
+                    referrals=result.referrals,
+                    account_to_uid=account_to_uid,
+                    activated=activated,
+                    payout_date=today,
+                    run_id=run_id
+                )
             
             total_rewards = float(np.sum(rewards))
             non_zero_uids = np.count_nonzero(rewards)
             bt.logging.info(f"✅ Rewards calculated: {non_zero_uids}/{len(uids)} UIDs rewarded ({total_rewards:.6f} total)")
             
-            return rewards, stats_list
+            return rewards
             
         except Exception as e:
             bt.logging.error(f"Sequential reward calculation failed: {e}")
             return self._fallback_rewards(uids)
     
-    def _fallback_rewards(self, uids: List[int]) -> Tuple[np.ndarray, List[dict]]:
+    async def _publish_referral_bonuses(
+        self,
+        referrals: List[Dict[str, Any]],
+        account_to_uid: Dict[str, int],
+        activated: int,
+        payout_date: date,
+        run_id: str,
+    ) -> None:
+        """Publish referral bonus data. Fire-and-forget -- failures don't break rewards."""
+        if not ENABLE_DATA_PUBLISH:
+            return
+        
+        try:
+            from ..utils.data_publisher import get_global_publisher
+            
+            bonuses = []
+            total_usd = 0.0
+            for ref in referrals:
+                referee = ref['account_username']
+                referrer = ref.get('referred_by')
+                referee_amount = ref.get('referee_amount', 50.0)
+                referrer_amount = ref.get('referrer_amount', 50.0)
+                bonuses.append({
+                    "referee": referee,
+                    "referrer": referrer,
+                    "referee_uid": account_to_uid.get(referee),
+                    "referrer_uid": account_to_uid.get(referrer) if referrer else None,
+                    "referee_amount_usd": referee_amount,
+                    "referrer_amount_usd": referrer_amount,
+                })
+                total_usd += referee_amount + referrer_amount
+            
+            payload = {
+                "payout_date": payout_date.isoformat(),
+                "bonuses": bonuses,
+                "total_usd": total_usd,
+                "activated": activated,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            
+            publisher = get_global_publisher()
+            success = await publisher.publish_unified_payload(
+                payload_type="referral_bonuses",
+                run_id=run_id,
+                payload_data=payload,
+                endpoint=TWEETS_SUBMIT_ENDPOINT
+            )
+            
+            if success:
+                bt.logging.info(f"Published {len(bonuses)} referral bonuses")
+            else:
+                bt.logging.debug("Referral bonus publishing failed (continuing...)")
+                
+        except Exception as e:
+            bt.logging.error(f"Exception publishing referral bonuses: {e}")
+    
+    def _fallback_rewards(self, uids: List[int]) -> np.ndarray:
         """
         Return fallback rewards when normal calculation cannot proceed.
         Allocates all rewards to burn UID, then transfers to treasury via allocation service.
         """
         rewards = np.array([1.0 if uid == 0 else 0.0 for uid in uids])
-        final_rewards = allocate_subnet_treasury(rewards, uids)
-        stats_list = [{"scores": {}, "uid": uid} for uid in uids]
-        return final_rewards, stats_list
+        return allocate_subnet_treasury(rewards, uids)
