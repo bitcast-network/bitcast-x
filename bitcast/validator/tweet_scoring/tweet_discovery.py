@@ -2,19 +2,17 @@
 Tweet discovery module for tweet retrieval with accumulative caching.
 
 Two discovery modes:
-- Lightweight (search-based): Fast API search by tag/QRT, runs every 45 min
-- Thorough (timeline-based): Fetches connected accounts' profiles, runs every 8 hours
+- Lightweight (search-based): Fast API search by tag/QRT, runs every 15 min
+- Thorough (timeline-based): Reads from DiscoveryCache (pre-refreshed), runs every 8 hours
 
-Both modes:
-1. Make fresh API calls
-2. Merge results into TweetStore (accumulative - never loses data)
-3. Query TweetStore for all tweets matching brief criteria
-4. Fetch fresh engagement data (RTs/QRTs) from API
-5. Merge engagements into TweetStore
-6. Query TweetStore for all known engagements
+Thorough mode is split into two phases:
+1. refresh_connected_timelines() - called once per cycle, incrementally fetches
+   new tweets for all connected accounts into DiscoveryCache
+2. discover_tweets_from_timelines() - called per brief, reads from DiscoveryCache
+   with zero API calls
 
-This ensures that once a tweet or engagement is discovered, it is never lost
-even if the search API stops returning it in subsequent calls.
+Both modes store results in TweetStore and query it for final output, ensuring
+that once a tweet or engagement is discovered it is never lost.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -28,10 +26,73 @@ from bitcast.validator.utils.config import (
     ENGAGEMENT_FETCH_INTERVAL_RECENT,
     ENGAGEMENT_FETCH_INTERVAL_OLD,
 )
+from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
 from .tweet_store import TweetStore
 
 # Max concurrent API calls for engagement retrieval
 ENGAGEMENT_MAX_WORKERS = 5
+
+
+def refresh_connected_timelines(
+    connected_accounts: Set[str],
+    max_workers: int = 5,
+) -> Dict[str, int]:
+    """
+    Incrementally refresh timelines for all connected accounts.
+
+    Called once per thorough cycle before brief processing. Uses
+    DiscoveryCache to skip fresh accounts and only fetch tweets
+    newer than the last cache entry.
+
+    Args:
+        connected_accounts: Set of usernames to refresh
+        max_workers: Concurrent timeline fetches
+
+    Returns:
+        Summary stats: accounts_total, cache_hits, refreshed, new_tweets, failed
+    """
+    client = TwitterClient(posts_only=True)
+    accounts = list(connected_accounts)
+    stats = {
+        'accounts_total': len(accounts),
+        'cache_hits': 0,
+        'refreshed': 0,
+        'new_tweets': 0,
+        'failed': 0,
+    }
+
+    bt.logging.info(
+        f"Refreshing timelines for {len(accounts)} connected accounts "
+        f"({max_workers} workers)"
+    )
+
+    def fetch_one(username: str) -> Dict:
+        return client.fetch_user_tweets(username, skip_if_cache_fresh=True)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(fetch_one, u): u for u in accounts
+        }
+        for future in as_completed(futures):
+            username = futures[future]
+            try:
+                result = future.result()
+                info = result.get('cache_info', {})
+                if info.get('cache_fresh'):
+                    stats['cache_hits'] += 1
+                else:
+                    stats['refreshed'] += 1
+                    stats['new_tweets'] += info.get('new_tweets', 0)
+            except Exception as e:
+                stats['failed'] += 1
+                bt.logging.warning(f"Failed to refresh timeline for @{username}: {e}")
+
+    bt.logging.info(
+        f"Timeline refresh complete: {stats['refreshed']} refreshed, "
+        f"{stats['cache_hits']} cache hits, {stats['new_tweets']} new tweets, "
+        f"{stats['failed']} failed"
+    )
+    return stats
 
 
 def build_search_query(
@@ -81,7 +142,7 @@ class TweetDiscovery:
     
     Two discovery modes:
     - discover_tweets(): Lightweight search API queries (fast, may miss tweets)
-    - discover_tweets_from_timelines(): Fetches connected accounts' profiles (thorough)
+    - discover_tweets_from_timelines(): Reads from pre-refreshed DiscoveryCache (thorough, no API calls)
     
     Both store results in TweetStore and query it for final output.
     """
@@ -215,61 +276,42 @@ class TweetDiscovery:
         qrt: Optional[str],
         start_date: datetime,
         end_date: datetime,
-        max_workers: int = 5,
     ) -> List[Dict]:
         """
-        Discover tweets by fetching connected accounts' timelines.
-        
-        Thorough mode: fetches each active account's profile tweets via the
-        timeline API, stores all tweets in TweetStore, then queries for matches.
-        Uses TimelineCache for cross-brief deduplication (cache freshness = 6h,
-        so multiple briefs in the same cycle get cache hits).
-        
+        Discover tweets from pre-refreshed DiscoveryCache (no API calls).
+
+        Reads cached timelines for active accounts, filters by brief date range,
+        stores matches in TweetStore, then queries TweetStore for results.
+
+        Timelines must be refreshed beforehand via refresh_connected_timelines().
+
         Args:
             tag: Optional tag/hashtag to filter for
             qrt: Optional tweet ID that must be quoted
             start_date: Start date for tweet window
             end_date: End date for tweet window
-            max_workers: Concurrent timeline fetches
-        
+
         Returns:
             List of matching tweets from active accounts (from store)
         """
         if not tag and not qrt:
             raise ValueError("At least one of 'tag' or 'qrt' must be provided")
-        
-        # Use a separate client for timeline fetching (posts_only=True for speed)
-        timeline_client = TwitterClient(posts_only=True)
-        
+
         accounts = list(self.active_accounts)
         bt.logging.info(
-            f"Thorough discovery: fetching timelines for {len(accounts)} accounts "
-            f"({max_workers} workers)"
+            f"Thorough discovery: reading cached timelines for {len(accounts)} accounts"
         )
-        
-        # Fetch timelines concurrently
+
         all_tweets = []
-        failed = 0
-        
-        def fetch_timeline(username: str) -> List[Dict]:
-            result = timeline_client.fetch_user_tweets(username)
-            return result.get('tweets', [])
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(fetch_timeline, username): username
-                for username in accounts
-            }
-            for future in as_completed(futures):
-                username = futures[future]
-                try:
-                    tweets = future.result()
-                    all_tweets.extend(tweets)
-                except Exception as e:
-                    failed += 1
-                    bt.logging.warning(f"Failed to fetch timeline for @{username}: {e}")
-        
-        # Filter to brief date range before storing (timelines return all cached tweets)
+        cache_hits = 0
+
+        for username in accounts:
+            cached = get_cached_user_tweets(username)
+            if cached and cached.get('tweets'):
+                cache_hits += 1
+                all_tweets.extend(cached['tweets'])
+
+        # Filter to brief date range before storing
         date_filtered = []
         for tweet in all_tweets:
             created_at = tweet.get('created_at', '')
@@ -281,21 +323,19 @@ class TweetDiscovery:
                 if start_date <= tweet_utc <= end_date:
                     date_filtered.append(tweet)
             except (ValueError, AttributeError):
-                date_filtered.append(tweet)  # Include unparseable dates (permissive)
-        
+                date_filtered.append(tweet)
+
         bt.logging.info(
-            f"Fetched {len(all_tweets)} total tweets from {len(accounts)} accounts "
-            f"({failed} failed), {len(date_filtered)} within brief dates"
+            f"Read {len(all_tweets)} cached tweets from {cache_hits}/{len(accounts)} "
+            f"accounts, {len(date_filtered)} within brief dates"
         )
-        
-        # Store only date-relevant tweets in TweetStore
+
         if date_filtered:
             stats = self.store.store_tweets(date_filtered)
             bt.logging.info(
                 f"Timeline tweets stored: {stats['new']} new, {stats['updated']} updated"
             )
-        
-        # Query store for matching tweets (same as search-based flow)
+
         store_tweets = self.store.query_tweets(
             authors=self.active_accounts,
             quoted_tweet_id=qrt,
@@ -303,11 +343,11 @@ class TweetDiscovery:
             start_date=start_date,
             end_date=end_date,
         )
-        
+
         bt.logging.info(
             f"Store query returned {len(store_tweets)} tweets from active accounts"
         )
-        
+
         return store_tweets
     
     def _fetch_engagements(self, tweet_id: str) -> None:

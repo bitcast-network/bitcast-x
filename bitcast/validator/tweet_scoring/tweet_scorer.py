@@ -253,8 +253,7 @@ def score_tweets_for_pool(
     mode_label = "thorough (timeline)" if thorough else "lightweight (search)"
     bt.logging.info(f"Discovering tweets via {mode_label} mode")
     
-    # Search mode needs a client for API queries; thorough mode creates its own
-    twitter_client = TwitterClient(posts_only=False) if not thorough else TwitterClient()
+    twitter_client = TwitterClient(posts_only=False)
     
     discovery = TweetDiscovery(
         client=twitter_client,

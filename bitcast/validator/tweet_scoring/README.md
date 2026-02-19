@@ -5,8 +5,10 @@ Scores tweets from pool members based on engagement from influential accounts, w
 ## Overview
 
 Two discovery modes feed the same accumulative `TweetStore`:
-- **Lightweight (every 45 min)**: Search API queries by tag/QRT -- fast but may miss tweets
-- **Thorough (every 8 hours)**: Fetches connected accounts' timelines -- slower but comprehensive
+- **Lightweight (every 15 min)**: Search API queries by tag/QRT -- fast but may miss tweets
+- **Thorough (every 8 hours)**: Two-phase process for comprehensive coverage:
+  1. **Phase 1** (`refresh_connected_timelines`): Incrementally fetches new tweets for all connected accounts into `DiscoveryCache`. Uses `cache_timestamp` as cutoff so only tweets newer than the last refresh are fetched. Runs once per cycle, shared across all briefs.
+  2. **Phase 2** (`discover_tweets_from_timelines`): Reads from `DiscoveryCache` per brief with zero API calls, filters by brief date range, and stores matches in `TweetStore`.
 
 Both modes share scoring logic:
 - **Direct Engagement Retrieval**: Gets retweeters and QRTs via dedicated API endpoints
@@ -127,19 +129,18 @@ for tweet in results[:5]:
 ## Data Flow
 
 ```
-Brief (tag/qrt) → TweetDiscovery.discover_tweets()
-                      ↓
-              Search API (by tag or quoted_tweet_id)
-                      ↓
-          Filter to Active Members + Date Range
-                      ↓
-     For each tweet: TweetDiscovery.get_engagements_for_tweet()
-       ├── Get Retweeters API → filter to considered accounts
-       └── Search QRTs → filter to considered accounts
-                      ↓
-    Calculate Weighted Scores (with cabal protection)
-                      ↓
-             Save Results
+Lightweight mode:
+  Brief (tag/qrt) → Search API → Filter to Active Members → TweetStore
+
+Thorough mode:
+  Phase 1 (once per cycle):
+    All connected accounts → fetch_user_tweets(skip_if_cache_fresh=True) → DiscoveryCache
+  
+  Phase 2 (per brief):
+    DiscoveryCache → Filter by brief dates → TweetStore
+
+Both modes then:
+  TweetStore tweets → Get Engagements (Retweeters + QRTs) → Calculate Scores → Save
 ```
 
 ## Output Format
@@ -266,18 +267,24 @@ filtered_tweets = filter_tweets_for_brief(brief_id, brief_text)
 
 ## Performance
 
-With search-based discovery (typical brief with 50-100 matching tweets):
-- Tweet discovery: 5-15 seconds (dual-sort API calls)
+**Lightweight mode** (typical brief with 50-100 matching tweets):
+- Tweet discovery: 5-15 seconds (search API calls)
 - Engagement retrieval: 30-60 seconds (1 RT + 1 QRT call per tweet)
 - Scoring: <5 seconds
 - **Total**: 1-2 minutes
+
+**Thorough mode** (incremental, per cycle):
+- Phase 1 timeline refresh: Typically 1 API page per account (most accounts post <20 tweets between cycles)
+- Phase 2 per-brief processing: Cache reads only, no API calls
+- Cost scales with number of accounts, not number of briefs
 
 ### Accumulative TweetStore
 
 Data accumulates permanently in TweetStore:
 - Tweets found once are scored in all future runs (even if API stops returning them)
 - Engagements (RTs/QRTs) accumulate across runs
-- Each run makes fresh API calls to discover new data
+- Lightweight mode makes fresh search API calls each run
+- Thorough mode reads from pre-refreshed DiscoveryCache
 
 ## Troubleshooting
 

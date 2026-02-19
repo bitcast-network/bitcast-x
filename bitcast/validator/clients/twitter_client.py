@@ -16,12 +16,11 @@ from bitcast.validator.utils.config import (
     RAPID_API_KEY,
     SOCIAL_DISCOVERY_FETCH_DAYS,
     MAX_TWEETS_PER_FETCH,
+    CACHE_FRESHNESS_SECONDS,
 )
 from bitcast.validator.utils.twitter_cache import (
     get_cached_user_tweets,
     cache_user_tweets,
-    get_cached_user_info,
-    cache_user_info
 )
 from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
 
@@ -274,7 +273,7 @@ class TwitterClient:
 
         # Check if cache is fresh and we should skip API call
         if skip_if_cache_fresh and cached_data:
-            freshness_seconds = 48 * 3600
+            freshness_seconds = CACHE_FRESHNESS_SECONDS
             cache_timestamp = cached_data.get('cache_timestamp')
 
             if cache_timestamp:
@@ -304,10 +303,24 @@ class TwitterClient:
                 except (ValueError, TypeError):
                     pass  # Fall through to API fetch if timestamp parsing fails
 
-        bt.logging.info(f"Fetching tweets for @{username} (last {fetch_days} days)")
-        
-        # Calculate cutoff for API pagination stopping point
-        incremental_cutoff = datetime.now() - timedelta(days=fetch_days)
+        # Use cache timestamp as cutoff when available (fetch only newer tweets)
+        incremental_cutoff = None
+        if cached_data:
+            cache_timestamp = cached_data.get('cache_timestamp')
+            if cache_timestamp:
+                try:
+                    cache_time = datetime.fromisoformat(cache_timestamp)
+                    incremental_cutoff = cache_time - timedelta(hours=1)
+                    bt.logging.info(
+                        f"Fetching tweets for @{username} since cache "
+                        f"({(datetime.now() - cache_time).total_seconds() / 3600:.1f}h ago)"
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+        if incremental_cutoff is None:
+            incremental_cutoff = datetime.now() - timedelta(days=fetch_days)
+            bt.logging.info(f"Fetching tweets for @{username} (last {fetch_days} days)")
         
         # API fetch limit (used for pagination)
         if self.posts_only:

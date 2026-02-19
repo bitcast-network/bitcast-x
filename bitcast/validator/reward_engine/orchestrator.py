@@ -76,6 +76,11 @@ class RewardOrchestrator:
             connected_usernames = set(all_accounts.keys())
             bt.logging.info(f"📡 {len(connected_usernames)} connected accounts across {len(all_pools)} pools")
             
+            # 3b. On thorough cycles, refresh all connected account timelines once
+            if thorough and connected_usernames:
+                from bitcast.validator.tweet_scoring import refresh_connected_timelines
+                refresh_connected_timelines(connected_usernames)
+            
             # 4. Generate run ID for brief tweet publishing
             run_id = generate_current_run_id(validator_self.wallet)
             bt.logging.debug(f"Run ID: {run_id}")

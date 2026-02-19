@@ -385,7 +385,7 @@ class DesearchProvider(TwitterProvider):
         api_fetch_succeeded = False
         
         # Pagination parameters
-        count_per_page = 100
+        count_per_page = 20
         start = 0
         # Calculate max pages needed: ceil(tweet_limit / count_per_page)
         max_pages = (tweet_limit + count_per_page - 1) // count_per_page

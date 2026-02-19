@@ -119,6 +119,53 @@ class TestTwitterClientCaching:
         assert result['cache_info']['cache_hit'] is True
         assert result['cache_info']['provider_used'] == 'desearch'
         assert len(result['tweets']) == 2  # 1 new + 1 cached
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.TWITTER_API_PROVIDER', 'desearch')
+    @mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    def test_uses_cache_timestamp_as_cutoff(self, mock_cache_set, mock_cache_get):
+        """When cache exists, incremental_cutoff is derived from cache_timestamp."""
+        cache_time = datetime.now() - timedelta(hours=6)
+        mock_cache_get.return_value = {
+            'tweets': [{'tweet_id': '123', 'text': 'Cached', 'author': 'testuser',
+                        'created_at': 'Mon Jan 15 12:00:00 +0000 2024'}],
+            'user_info': {'username': 'testuser', 'followers_count': 1000},
+            'cache_timestamp': cache_time.isoformat(),
+        }
+        
+        client = TwitterClient()
+        client.provider.fetch_user_tweets = mock.Mock(return_value=(
+            [], {'username': 'testuser', 'followers_count': 1000}, True
+        ))
+        
+        client.fetch_user_tweets('testuser')
+        
+        # Provider should have been called with cutoff ~1h before cache_timestamp
+        call_args = client.provider.fetch_user_tweets.call_args
+        cutoff = call_args[1]['incremental_cutoff']
+        expected = cache_time - timedelta(hours=1)
+        assert abs((cutoff - expected).total_seconds()) < 2
+    
+    @mock.patch('bitcast.validator.clients.twitter_client.TWITTER_API_PROVIDER', 'desearch')
+    @mock.patch('bitcast.validator.clients.twitter_client.DESEARCH_API_KEY', 'dt_$test')
+    @mock.patch('bitcast.validator.clients.twitter_client.get_cached_user_tweets')
+    @mock.patch('bitcast.validator.clients.twitter_client.cache_user_tweets')
+    def test_falls_back_to_fetch_days_without_cache(self, mock_cache_set, mock_cache_get):
+        """Without cache, falls back to fetch_days for cutoff."""
+        mock_cache_get.return_value = None
+        
+        client = TwitterClient()
+        client.provider.fetch_user_tweets = mock.Mock(return_value=(
+            [], {'username': 'testuser', 'followers_count': 0}, True
+        ))
+        
+        client.fetch_user_tweets('testuser', fetch_days=7)
+        
+        call_args = client.provider.fetch_user_tweets.call_args
+        cutoff = call_args[1]['incremental_cutoff']
+        expected = datetime.now() - timedelta(days=7)
+        assert abs((cutoff - expected).total_seconds()) < 5
 
 
 class TestTwitterClientUsernameValidation:

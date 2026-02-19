@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch, MagicMock
 
 from bitcast.validator.tweet_scoring.tweet_discovery import (
     TweetDiscovery,
-    build_search_query
+    build_search_query,
+    refresh_connected_timelines,
 )
 
 
@@ -174,133 +175,174 @@ class TestTweetDiscoveryDiscover:
 
 
 class TestTimelineDiscovery:
-    """Test TweetDiscovery.discover_tweets_from_timelines()."""
-    
+    """Test TweetDiscovery.discover_tweets_from_timelines() (cache-read mode)."""
+
     def setup_method(self):
         self.mock_client = Mock()
         self.mock_store = MagicMock()
         self.active_accounts = {"alice", "bob"}
-        
+
         with patch('bitcast.validator.tweet_scoring.tweet_discovery.TweetStore') as mock_store_cls:
             mock_store_cls.get_instance.return_value = self.mock_store
             self.discovery = TweetDiscovery(
                 client=self.mock_client,
                 active_accounts=self.active_accounts
             )
-    
-    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
-    def test_fetches_timelines_for_all_accounts(self, MockTwitterClient):
-        """Timeline discovery fetches each active account's timeline."""
-        mock_timeline_client = Mock()
-        MockTwitterClient.return_value = mock_timeline_client
-        
-        mock_timeline_client.fetch_user_tweets.side_effect = [
-            {'tweets': [
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.get_cached_user_tweets')
+    def test_reads_from_cache_not_api(self, mock_get_cached):
+        """Timeline discovery reads from DiscoveryCache, makes zero API calls."""
+        mock_get_cached.side_effect = lambda u: {
+            'alice': {'tweets': [
                 {'tweet_id': '1', 'author': 'alice', 'text': 'Hello #test',
-                 'tagged_accounts': ['test'], 'created_at': 'Mon Jan 01 12:00:00 +0000 2024'},
+                 'created_at': 'Mon Jan 01 12:00:00 +0000 2024'},
             ]},
-            {'tweets': [
+            'bob': {'tweets': [
                 {'tweet_id': '2', 'author': 'bob', 'text': 'World #test',
-                 'tagged_accounts': ['test'], 'created_at': 'Mon Jan 01 13:00:00 +0000 2024'},
+                 'created_at': 'Mon Jan 01 13:00:00 +0000 2024'},
             ]},
-        ]
-        
+        }.get(u)
+
         self.mock_store.store_tweets.return_value = {'new': 2, 'updated': 0}
         self.mock_store.query_tweets.return_value = [
             {'tweet_id': '1', 'author': 'alice'},
             {'tweet_id': '2', 'author': 'bob'},
         ]
-        
+
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 1, 15, tzinfo=timezone.utc)
-        
+
         result = self.discovery.discover_tweets_from_timelines(
             tag='#test', qrt=None, start_date=start, end_date=end
         )
-        
-        # Should create a timeline client with posts_only=True
-        MockTwitterClient.assert_called_once_with(posts_only=True)
-        
-        # Should fetch timeline for each active account
-        assert mock_timeline_client.fetch_user_tweets.call_count == 2
-        called_usernames = {
-            call[0][0] for call in mock_timeline_client.fetch_user_tweets.call_args_list
-        }
-        assert called_usernames == {"alice", "bob"}
-        
-        # Should store all fetched tweets
+
+        assert mock_get_cached.call_count == 2
         self.mock_store.store_tweets.assert_called_once()
-        stored = self.mock_store.store_tweets.call_args[0][0]
-        assert len(stored) == 2
-        
-        # Should query store for results
         self.mock_store.query_tweets.assert_called_once()
         assert len(result) == 2
-    
-    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
-    def test_handles_failed_timeline_fetch(self, MockTwitterClient):
-        """Timeline discovery handles individual account failures gracefully."""
-        mock_timeline_client = Mock()
-        MockTwitterClient.return_value = mock_timeline_client
-        
-        mock_timeline_client.fetch_user_tweets.side_effect = [
-            {'tweets': [{'tweet_id': '1', 'author': 'alice', 'text': 'ok'}]},
-            Exception("API error"),
-        ]
-        
-        self.mock_store.store_tweets.return_value = {'new': 1, 'updated': 0}
-        self.mock_store.query_tweets.return_value = [
-            {'tweet_id': '1', 'author': 'alice'},
-        ]
-        
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.get_cached_user_tweets')
+    def test_handles_empty_cache(self, mock_get_cached):
+        """Timeline discovery handles accounts with no cached data."""
+        mock_get_cached.return_value = None
+
+        self.mock_store.query_tweets.return_value = []
+
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 1, 15, tzinfo=timezone.utc)
-        
-        # Should not raise despite one failure
+
         result = self.discovery.discover_tweets_from_timelines(
             tag='#test', qrt=None, start_date=start, end_date=end
         )
-        
-        assert len(result) == 1
-    
-    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
-    def test_requires_tag_or_qrt(self, MockTwitterClient):
+
+        self.mock_store.store_tweets.assert_not_called()
+        assert len(result) == 0
+
+    def test_requires_tag_or_qrt(self):
         """Timeline discovery requires at least one of tag or qrt."""
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 1, 15, tzinfo=timezone.utc)
-        
+
         with pytest.raises(ValueError, match="At least one of 'tag' or 'qrt'"):
             self.discovery.discover_tweets_from_timelines(
                 tag=None, qrt=None, start_date=start, end_date=end
             )
-    
-    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
-    def test_accumulates_with_search_results(self, MockTwitterClient):
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.get_cached_user_tweets')
+    def test_accumulates_with_search_results(self, mock_get_cached):
         """Timeline discovery results accumulate in TweetStore alongside search results."""
-        mock_timeline_client = Mock()
-        MockTwitterClient.return_value = mock_timeline_client
-        
-        mock_timeline_client.fetch_user_tweets.side_effect = [
-            {'tweets': [{'tweet_id': '1', 'author': 'alice', 'text': 'timeline tweet'}]},
-            {'tweets': []},
-        ]
-        
+        mock_get_cached.side_effect = lambda u: {
+            'alice': {'tweets': [
+                {'tweet_id': '1', 'author': 'alice', 'text': 'timeline tweet',
+                 'created_at': 'Mon Jan 01 12:00:00 +0000 2024'},
+            ]},
+            'bob': {'tweets': []},
+        }.get(u)
+
         self.mock_store.store_tweets.return_value = {'new': 1, 'updated': 0}
-        # Store returns both timeline and previously search-discovered tweets
         self.mock_store.query_tweets.return_value = [
-            {'tweet_id': '1', 'author': 'alice'},  # From timeline
-            {'tweet_id': '2', 'author': 'bob'},     # From previous search run
+            {'tweet_id': '1', 'author': 'alice'},
+            {'tweet_id': '2', 'author': 'bob'},
         ]
-        
+
         start = datetime(2024, 1, 1, tzinfo=timezone.utc)
         end = datetime(2024, 1, 15, tzinfo=timezone.utc)
-        
+
         result = self.discovery.discover_tweets_from_timelines(
             tag='#test', qrt=None, start_date=start, end_date=end
         )
-        
-        # Should return all tweets from store (both sources)
+
         assert len(result) == 2
+
+
+class TestRefreshConnectedTimelines:
+    """Test refresh_connected_timelines() standalone function."""
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
+    def test_refreshes_all_accounts(self, MockClient):
+        """Refreshes timelines for all connected accounts."""
+        mock_client = Mock()
+        MockClient.return_value = mock_client
+
+        mock_client.fetch_user_tweets.side_effect = [
+            {'tweets': [{'tweet_id': '1'}], 'cache_info': {'cache_fresh': False, 'new_tweets': 3}},
+            {'tweets': [{'tweet_id': '2'}], 'cache_info': {'cache_fresh': False, 'new_tweets': 1}},
+        ]
+
+        stats = refresh_connected_timelines({"alice", "bob"}, max_workers=1)
+
+        MockClient.assert_called_once_with(posts_only=True)
+        assert mock_client.fetch_user_tweets.call_count == 2
+        # Check skip_if_cache_fresh=True was passed
+        for call in mock_client.fetch_user_tweets.call_args_list:
+            assert call[1].get('skip_if_cache_fresh') is True
+        assert stats['accounts_total'] == 2
+        assert stats['refreshed'] == 2
+        assert stats['new_tweets'] == 4
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
+    def test_counts_cache_hits(self, MockClient):
+        """Tracks cache hits separately from refreshes."""
+        mock_client = Mock()
+        MockClient.return_value = mock_client
+
+        mock_client.fetch_user_tweets.side_effect = [
+            {'tweets': [], 'cache_info': {'cache_fresh': True, 'new_tweets': 0}},
+            {'tweets': [{'tweet_id': '1'}], 'cache_info': {'cache_fresh': False, 'new_tweets': 5}},
+        ]
+
+        stats = refresh_connected_timelines({"alice", "bob"}, max_workers=1)
+
+        assert stats['cache_hits'] == 1
+        assert stats['refreshed'] == 1
+        assert stats['new_tweets'] == 5
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
+    def test_handles_failures_gracefully(self, MockClient):
+        """Individual account failures are counted but don't stop processing."""
+        mock_client = Mock()
+        MockClient.return_value = mock_client
+
+        mock_client.fetch_user_tweets.side_effect = [
+            {'tweets': [], 'cache_info': {'cache_fresh': False, 'new_tweets': 0}},
+            Exception("API error"),
+        ]
+
+        stats = refresh_connected_timelines({"alice", "bob"}, max_workers=1)
+
+        assert stats['refreshed'] == 1
+        assert stats['failed'] == 1
+
+    @patch('bitcast.validator.tweet_scoring.tweet_discovery.TwitterClient')
+    def test_empty_accounts_set(self, MockClient):
+        """Handles empty set of accounts."""
+        mock_client = Mock()
+        MockClient.return_value = mock_client
+
+        stats = refresh_connected_timelines(set(), max_workers=1)
+
+        assert stats['accounts_total'] == 0
+        mock_client.fetch_user_tweets.assert_not_called()
 
 
 class TestTweetDiscoveryEngagements:

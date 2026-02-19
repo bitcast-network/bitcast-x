@@ -357,39 +357,30 @@ class TestDesearchProvider:
     
     @mock.patch.object(DesearchProvider, '_make_api_request')
     def test_fetch_from_endpoint_pagination(self, mock_api_request):
-        """Test endpoint pagination."""
+        """Test endpoint pagination with count_per_page=20."""
         provider = DesearchProvider(api_key="dt_$test", rate_limit_delay=0.01)
         
-        # Use recent dates that won't be filtered by cutoff
         recent_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
         
-        # Mock paginated responses with complete tweet data
-        page1_tweets = [
-            {
-                'id': i,  # Desearch returns int
-                'text': f'Tweet {i}',
-                'created_at': recent_date,
-                'like_count': 1,
-                'retweet_count': 0,
-                'reply_count': 0
-            }
-            for i in range(100)
-        ]
-        page2_tweets = [
-            {
-                'id': i,
-                'text': f'Tweet {i}',
-                'created_at': recent_date,
-                'like_count': 1,
-                'retweet_count': 0,
-                'reply_count': 0
-            }
-            for i in range(100, 150)
-        ]
+        def make_page(start, count):
+            return [
+                {
+                    'id': i,
+                    'text': f'Tweet {i}',
+                    'created_at': recent_date,
+                    'like_count': 1,
+                    'retweet_count': 0,
+                    'reply_count': 0
+                }
+                for i in range(start, start + count)
+            ]
         
+        # 3 full pages of 20 + 1 empty page = 60 tweets
         mock_api_request.side_effect = [
-            ({'tweets': page1_tweets, 'user': {'followers_count': 1000}}, None),
-            ({'tweets': page2_tweets, 'user': {}}, None)
+            ({'tweets': make_page(0, 20), 'user': {'followers_count': 1000}}, None),
+            ({'tweets': make_page(20, 20), 'user': {}}, None),
+            ({'tweets': make_page(40, 20), 'user': {}}, None),
+            ({'tweets': [], 'user': {}}, None),
         ]
         
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
@@ -402,8 +393,8 @@ class TestDesearchProvider:
         )
         
         assert success is True
-        assert len(tweets) == 150
-        assert mock_api_request.call_count == 2
+        assert len(tweets) == 60
+        assert mock_api_request.call_count == 4
     
     @mock.patch.object(DesearchProvider, '_make_api_request')
     def test_fetch_from_endpoint_date_cutoff(self, mock_api_request):

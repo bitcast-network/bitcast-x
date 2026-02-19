@@ -78,7 +78,6 @@ WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 # Fetching Strategy
 SOCIAL_DISCOVERY_FETCH_DAYS = 30  # Days of tweet history for social network discovery
 SOCIAL_DISCOVERY_LOOKBACK = 60  # Maximum age of cached tweets to use in analysis (in days, None = use all)
-TWEET_SCORING_FETCH_DAYS = 1     # Days of tweet history for thorough scoring timeline pulls
 MAX_TWEETS_PER_FETCH = 400       # Supports pagination to fetch up to 400 tweets via Desearch.ai
 
 # Twitter API Configuration - PageRank Weights
@@ -165,7 +164,6 @@ bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOIN
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
 bt.logging.info(f"TWITTER_API_PROVIDER: {TWITTER_API_PROVIDER}")
 bt.logging.info(f"SOCIAL_DISCOVERY_FETCH_DAYS: {SOCIAL_DISCOVERY_FETCH_DAYS}")
-bt.logging.info(f"TWEET_SCORING_FETCH_DAYS: {TWEET_SCORING_FETCH_DAYS}")
 bt.logging.info(f"MAX_TWEETS_PER_FETCH: {MAX_TWEETS_PER_FETCH}")
 bt.logging.info(f"EMISSIONS_PERIOD: {EMISSIONS_PERIOD}")
 bt.logging.info(f"REWARDS_DELAY_DAYS: {REWARDS_DELAY_DAYS}")
