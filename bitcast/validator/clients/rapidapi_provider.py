@@ -664,9 +664,9 @@ class RapidAPIProvider(TwitterProvider):
                         content_typename = content.get('__typename')
                         
                         if content_typename == 'TimelineTimelineItem':
-                            # Search results use: content.content.tweet_results
-                            inner_content = content.get('content', {})
-                            if inner_content.get('__typename') == 'TimelineTweet':
+                            # Search results use: content.itemContent.tweet_results
+                            inner_content = content.get('itemContent', {})
+                            if inner_content.get('__typename') == 'TimelineTweet' or inner_content.get('itemType') == 'TimelineTweet':
                                 tweet_results = inner_content.get('tweet_results', {})
                                 tweet_result = tweet_results.get('result')
                                 
