@@ -66,12 +66,22 @@ async def publish_social_map(
             usernames=usernames
         )
         
-        # Create payload structure - use adjacency_matrix key for API compatibility
+        # Remap local storage keys to API schema keys
+        api_matrix_data = {
+            "edges": matrix_data["adjacency_edges"],
+            "shape": matrix_data["adjacency_shape"],
+            "usernames": matrix_data.get("usernames"),
+            "format_version": matrix_data.get("format_version"),
+        }
+        if "relationship_edges" in matrix_data:
+            api_matrix_data["relationship_edges"] = matrix_data["relationship_edges"]
+            api_matrix_data["relationship_shape"] = matrix_data["relationship_shape"]
+
         payload_data = {
             "pool_name": pool_name,
             "metadata": social_map_data['metadata'],
             "accounts": social_map_data['accounts'],
-            "adjacency_matrix": matrix_data,
+            "adjacency_matrix": api_matrix_data,
             "timestamp": datetime.now().isoformat()
         }
         
