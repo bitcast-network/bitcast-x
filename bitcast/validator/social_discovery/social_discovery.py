@@ -642,3 +642,8 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
         bt.logging.debug("No pools scheduled for discovery today")
     
     return results
+
+
+# NOTE: CLI entry point moved to __main__.py
+# Use: python -m bitcast.validator.social_discovery --pool-name tao
+# (Running this file directly causes a RuntimeWarning due to module naming conflict)

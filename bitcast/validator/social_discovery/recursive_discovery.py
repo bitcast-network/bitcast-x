@@ -672,8 +672,8 @@ async def two_stage_discovery(
     return str(social_map_file), metrics
 
 
-# CLI interface for standalone execution
-if __name__ == "__main__":
+def main():
+    """CLI entry point for two-stage social discovery."""
     import argparse
     import sys
     from bitcast.validator.utils.config import WALLET_NAME, HOTKEY_NAME
@@ -798,3 +798,7 @@ if __name__ == "__main__":
         bt.logging.error(f"Two-stage discovery failed: {e}", exc_info=True)
         print(f"Error: {e}")
         exit(1)
+
+
+if __name__ == "__main__":
+    main()
