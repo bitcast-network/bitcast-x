@@ -51,7 +51,7 @@ def refresh_connected_timelines(
     Returns:
         Summary stats: accounts_total, cache_hits, refreshed, new_tweets, failed
     """
-    client = TwitterClient(posts_only=True)
+    client = TwitterClient(posts_only=False)
     accounts = list(connected_accounts)
     stats = {
         'accounts_total': len(accounts),

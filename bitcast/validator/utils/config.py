@@ -138,7 +138,7 @@ NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
 # Account connection scanning
-CONNECTION_SEARCH_TAG = os.getenv('CONNECTION_SEARCH_TAG', '@bitcast')
+CONNECTION_SEARCH_TAG = os.getenv('CONNECTION_SEARCH_TAG', '@Bitcast_network')
 
 # Validator mode: 'weight_copy' (default), 'standard', or 'discovery'
 # - weight_copy: Fetches weights from reference validator
