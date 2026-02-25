@@ -405,15 +405,20 @@ class TwitterClient:
                 'followers_count': cached_user_info.get('followers_count', 0)
             }
         
-        # Only update cache timestamp if API fetch succeeded
-        # If API failed, preserve original timestamp so cache appears stale for retry
-        if api_fetch_succeeded:
+        # Only update cache timestamp if API fetch succeeded AND we have tweets to cache.
+        # If the API returned 0 tweets with no prior cached tweets, the result is likely
+        # a rate-limit artifact (empty timeline response after 429 retry) - skip the
+        # timestamp update so the next run retries rather than treating it as fresh.
+        if api_fetch_succeeded and tweets_to_cache:
             cache_data = {
                 'user_info': final_user_info,
                 'tweets': tweets_to_cache,
                 'last_updated': datetime.now()
             }
             cache_user_tweets(username, cache_data)
+        elif api_fetch_succeeded and not tweets_to_cache:
+            bt.logging.debug(f"API succeeded but 0 tweets for @{username}, skipping cache timestamp update to allow retry")
+            cache_data = cached_data or {}
         elif not cached_data:
             # No cached data and API failed - store with current timestamp (no other option)
             cache_data = {
@@ -426,8 +431,6 @@ class TwitterClient:
             # API failed but we have cached data - preserve original timestamps
             # so next run will retry the API call
             bt.logging.debug(f"API failed for @{username}, preserving original cache timestamp for retry")
-            # Do not update cache - keep existing entry with original timestamp
-            # Use cached data for return values
             cache_data = cached_data
         
         return {
