@@ -357,11 +357,11 @@ class TestDesearchProvider:
     
     @mock.patch.object(DesearchProvider, '_make_api_request')
     def test_fetch_from_endpoint_pagination(self, mock_api_request):
-        """Test endpoint pagination with count_per_page=20."""
+        """Test cursor-based pagination across multiple pages."""
         provider = DesearchProvider(api_key="dt_$test", rate_limit_delay=0.01)
-        
+
         recent_date = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
-        
+
         def make_page(start, count):
             return [
                 {
@@ -374,15 +374,14 @@ class TestDesearchProvider:
                 }
                 for i in range(start, start + count)
             ]
-        
-        # 3 full pages of 20 + 1 empty page = 60 tweets
+
+        # 3 pages connected by next_cursor; final page has no cursor
         mock_api_request.side_effect = [
-            ({'tweets': make_page(0, 20), 'user': {'followers_count': 1000}}, None),
-            ({'tweets': make_page(20, 20), 'user': {}}, None),
+            ({'tweets': make_page(0, 20), 'user': {'followers_count': 1000}, 'next_cursor': 'cursor_1'}, None),
+            ({'tweets': make_page(20, 20), 'user': {}, 'next_cursor': 'cursor_2'}, None),
             ({'tweets': make_page(40, 20), 'user': {}}, None),
-            ({'tweets': [], 'user': {}}, None),
         ]
-        
+
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
         tweets, user_info, success = provider._fetch_from_endpoint(
             "/twitter/user/posts",
@@ -391,10 +390,10 @@ class TestDesearchProvider:
             cutoff,
             "username"
         )
-        
+
         assert success is True
         assert len(tweets) == 60
-        assert mock_api_request.call_count == 4
+        assert mock_api_request.call_count == 3
     
     @mock.patch.object(DesearchProvider, '_make_api_request')
     def test_fetch_from_endpoint_date_cutoff(self, mock_api_request):
@@ -592,178 +591,167 @@ class TestDesearchProviderIntegration:
 
 class TestDesearchProviderSearchTweets:
     """Tests for search_tweets method."""
-    
-    @mock.patch('requests.get')
-    def test_search_tweets_success(self, mock_get):
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_search_tweets_success(self, mock_api_request):
         """Test successful tweet search."""
         provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'tweets': [
-                {
-                    'id': 123456,
-                    'text': 'Found tweet about #bitcoin',
-                    'created_at': '2024-01-15T12:00:00Z',
-                    'user': {'username': 'testuser'},
-                    'like_count': 10,
-                    'retweet_count': 5
-                },
-                {
-                    'id': 789012,
-                    'text': 'Another #bitcoin tweet',
-                    'created_at': '2024-01-14T10:00:00Z',
-                    'user': {'username': 'otheruser'},
-                    'like_count': 20,
-                    'retweet_count': 8
-                }
-            ]
-        }
-        mock_get.return_value = mock_response
-        
+
+        mock_api_request.return_value = (
+            {'tweets': [
+                {'id': 123456, 'text': 'Found tweet about #bitcoin',
+                 'created_at': '2024-01-15T12:00:00Z', 'user': {'username': 'testuser'},
+                 'like_count': 10, 'retweet_count': 5},
+                {'id': 789012, 'text': 'Another #bitcoin tweet',
+                 'created_at': '2024-01-14T10:00:00Z', 'user': {'username': 'otheruser'},
+                 'like_count': 20, 'retweet_count': 8},
+            ]},
+            None
+        )
+
         tweets, success = provider.search_tweets("#bitcoin", max_results=100)
-        
+
         assert success is True
         assert len(tweets) == 2
         assert tweets[0]['tweet_id'] == '123456'
         assert tweets[0]['author'] == 'testuser'
         assert tweets[1]['tweet_id'] == '789012'
         assert tweets[1]['author'] == 'otheruser'
-    
-    @mock.patch('requests.get')
-    def test_search_tweets_empty_results(self, mock_get):
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_search_tweets_empty_results(self, mock_api_request):
         """Test search with no results."""
         provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'tweets': []}
-        mock_get.return_value = mock_response
-        
+
+        mock_api_request.return_value = ({'tweets': []}, None)
+
         tweets, success = provider.search_tweets("#nonexistent", max_results=100)
-        
+
         assert success is True
         assert len(tweets) == 0
-    
-    @mock.patch('requests.get')
-    def test_search_tweets_api_error(self, mock_get):
-        """Test search with API error."""
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_search_tweets_api_error(self, mock_api_request):
+        """Test search with API error - retries handled by _make_api_request."""
         provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 500
-        mock_get.return_value = mock_response
-        
+
+        mock_api_request.return_value = (None, "Internal server error")
+
         tweets, success = provider.search_tweets("#bitcoin", max_results=100)
-        
+
         assert success is False
         assert len(tweets) == 0
+
 
 
 class TestDesearchProviderGetRetweeters:
     """Tests for get_retweeters method."""
-    
-    @mock.patch('requests.get')
-    def test_get_retweeters_success(self, mock_get):
-        """Test successful retweeters retrieval."""
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_get_retweeters_success(self, mock_api_request):
+        """Test successful retweeters retrieval with correct API format."""
         provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'retweeters': [
-                {'username': 'User1'},
-                {'username': 'User2'},
-                {'username': 'User3'}
-            ]
-        }
-        mock_get.return_value = mock_response
-        
+
+        mock_api_request.return_value = (
+            {'users': [{'username': 'User1'}, {'username': 'User2'}, {'username': 'User3'}]},
+            None
+        )
+
         usernames, success = provider.get_retweeters("123456789")
-        
+
         assert success is True
         assert len(usernames) == 3
-        assert 'user1' in usernames  # Should be lowercased
-        assert 'user2' in usernames
-        assert 'user3' in usernames
-    
-    @mock.patch('requests.get')
-    def test_get_retweeters_empty(self, mock_get):
-        """Test retweeters with no results."""
-        provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'retweeters': []}
-        mock_get.return_value = mock_response
-        
-        usernames, success = provider.get_retweeters("123456789")
-        
-        assert success is True
-        assert len(usernames) == 0
-    
-    @mock.patch('requests.get')
-    def test_get_retweeters_api_error(self, mock_get):
-        """Test retweeters with API error."""
-        provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 429  # Rate limit
-        mock_get.return_value = mock_response
-        
-        usernames, success = provider.get_retweeters("123456789")
-        
-        assert success is False
-        assert len(usernames) == 0
-    
-    @mock.patch('requests.get')
-    def test_get_retweeters_list_format(self, mock_get):
-        """Test retweeters when API returns list of strings."""
-        provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = ['User1', 'User2']
-        mock_get.return_value = mock_response
-        
-        usernames, success = provider.get_retweeters("123456789")
-        
-        assert success is True
-        assert len(usernames) == 2
         assert 'user1' in usernames
         assert 'user2' in usernames
+        assert 'user3' in usernames
 
-    @mock.patch('requests.get')
-    def test_get_retweeters_filters_numeric_ids(self, mock_get):
-        """Test that numeric user IDs are filtered from retweeters."""
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_get_retweeters_empty(self, mock_api_request):
+        """Test retweeters with no results."""
         provider = DesearchProvider(api_key="dt_$test")
-        
-        mock_response = mock.Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "retweeters": [
-                {"username": "validuser1"},
-                {"username": "911245230426525697"},  # Numeric ID - should be filtered
-                {"screen_name": "validuser2"},
-                {"screen_name": "1098881129057112064"},  # Numeric ID - should be filtered
-                "stringuser",  # Valid string
-                "999999999",  # Numeric ID as string - should be filtered
-            ]
-        }
-        mock_get.return_value = mock_response
-        
+
+        mock_api_request.return_value = ({'users': []}, None)
+
         usernames, success = provider.get_retweeters("123456789")
-        
+
         assert success is True
-        # Should only have 3 valid usernames (numeric IDs filtered out)
-        assert len(usernames) == 3
-        assert "validuser1" in usernames
-        assert "validuser2" in usernames
-        assert "stringuser" in usernames
-        assert "911245230426525697" not in usernames
-        assert "1098881129057112064" not in usernames
-        assert "999999999" not in usernames
+        assert len(usernames) == 0
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_get_retweeters_api_error(self, mock_api_request):
+        """Test retweeters with API error on first page returns failure."""
+        provider = DesearchProvider(api_key="dt_$test")
+
+        mock_api_request.return_value = (None, "Rate limit exceeded")
+
+        usernames, success = provider.get_retweeters("123456789")
+
+        assert success is False
+        assert len(usernames) == 0
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_get_retweeters_pagination(self, mock_api_request):
+        """Test cursor-based pagination fetches multiple pages without duplicates."""
+        provider = DesearchProvider(api_key="dt_$test", rate_limit_delay=0.0)
+
+        mock_api_request.side_effect = [
+            ({'users': [{'username': 'user1'}, {'username': 'user2'}], 'next_cursor': 'cursor_1'}, None),
+            ({'users': [{'username': 'user3'}, {'username': 'user4'}], 'next_cursor': 'cursor_2'}, None),
+            ({'users': [{'username': 'user5'}]}, None),
+        ]
+
+        usernames, success = provider.get_retweeters("123456789", max_results=100)
+
+        assert success is True
+        assert len(usernames) == 5
+        assert usernames == ['user1', 'user2', 'user3', 'user4', 'user5']
+        assert mock_api_request.call_count == 3
+
+        # Verify cursor was passed correctly on pages 2 and 3
+        calls = mock_api_request.call_args_list
+        assert 'cursor' not in calls[0][0][1]
+        assert calls[1][0][1]['cursor'] == 'cursor_1'
+        assert calls[2][0][1]['cursor'] == 'cursor_2'
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_get_retweeters_max_results(self, mock_api_request):
+        """Test that max_results caps results mid-page."""
+        provider = DesearchProvider(api_key="dt_$test", rate_limit_delay=0.0)
+
+        mock_api_request.return_value = (
+            {'users': [{'username': f'user{i}'} for i in range(20)], 'next_cursor': 'cursor_1'},
+            None
+        )
+
+        usernames, success = provider.get_retweeters("123456789", max_results=5)
+
+        assert success is True
+        assert len(usernames) == 5
+        assert mock_api_request.call_count == 1
+
+    @mock.patch.object(DesearchProvider, '_make_api_request')
+    def test_get_retweeters_filters_numeric_ids(self, mock_api_request):
+        """Test that numeric user IDs are filtered out."""
+        provider = DesearchProvider(api_key="dt_$test")
+
+        mock_api_request.return_value = (
+            {'users': [
+                {'username': 'validuser1'},
+                {'username': '911245230426525697'},   # numeric ID - filtered
+                {'screen_name': 'validuser2'},
+                {'screen_name': '1098881129057112064'},  # numeric ID - filtered
+            ]},
+            None
+        )
+
+        usernames, success = provider.get_retweeters("123456789")
+
+        assert success is True
+        assert len(usernames) == 2
+        assert 'validuser1' in usernames
+        assert 'validuser2' in usernames
+        assert '911245230426525697' not in usernames
+        assert '1098881129057112064' not in usernames
 
 
 class TestDesearchProviderNumericIDFiltering:
@@ -803,11 +791,10 @@ class TestDesearchProviderNumericIDFiltering:
         # in_reply_to_user should be None (numeric ID filtered)
         assert tweet['in_reply_to_user'] is None
     
-    def test_parse_search_tweet_filters_numeric_author(self):
-        """Test that numeric user IDs are filtered from author field in search tweets."""
+    def test_parse_tweet_search_filters_numeric_author(self):
+        """Test that numeric user IDs are filtered from author when parsing search tweets."""
         provider = DesearchProvider(api_key="dt_$test")
-        
-        # Test with numeric ID in username field
+
         tweet_data = {
             'id': 1234567890,
             'text': 'Test tweet',
@@ -815,34 +802,32 @@ class TestDesearchProviderNumericIDFiltering:
             'like_count': 10,
             'user': {
                 'username': '987654321098765',  # Numeric ID
-                'screen_name': 'validusername'  # Valid fallback
+                'screen_name': 'validusername'   # Valid fallback
             },
             'entities': {}
         }
-        
-        tweet = provider._parse_search_tweet(tweet_data)
-        
+
+        tweet = provider._parse_tweet(tweet_data)
+
         assert tweet is not None
-        # Should fall back to screen_name since username is numeric
         assert tweet['author'] == 'validusername'
-    
-    def test_parse_search_tweet_rejects_all_numeric_ids(self):
-        """Test that tweets with only numeric IDs are rejected."""
+
+    def test_parse_tweet_search_rejects_all_numeric_ids(self):
+        """Test that search tweets with only numeric IDs are rejected."""
         provider = DesearchProvider(api_key="dt_$test")
-        
+
         tweet_data = {
             'id': 1234567890,
             'text': 'Test tweet',
             'created_at': '2024-01-15T12:00:00.000Z',
             'like_count': 10,
             'user': {
-                'username': '987654321098765',  # Numeric ID
+                'username': '987654321098765',   # Numeric ID
                 'screen_name': '123456789012345'  # Also numeric ID
             },
             'entities': {}
         }
-        
-        tweet = provider._parse_search_tweet(tweet_data)
-        
-        # Should return None since no valid username found
+
+        tweet = provider._parse_tweet(tweet_data)
+
         assert tweet is None

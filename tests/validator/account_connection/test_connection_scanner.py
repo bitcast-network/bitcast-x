@@ -13,6 +13,7 @@ from bitcast.validator.account_connection.connection_scanner import (
     ConnectionScanner,
     get_social_map_accounts
 )
+from bitcast.validator.utils.config import CONNECTION_SEARCH_TAG
 
 
 class TestGetSocialMapAccounts:
@@ -69,7 +70,7 @@ class TestConnectionScanner:
         assert scanner.twitter_client is not None
         assert scanner.database is not None
         assert scanner.tag_parser is not None
-        assert scanner.search_tag == '@bitcast'
+        assert scanner.search_tag == CONNECTION_SEARCH_TAG
     
     def test_build_query(self, temp_db_path, mock_twitter_client):
         scanner = ConnectionScanner(
@@ -79,7 +80,7 @@ class TestConnectionScanner:
         )
         query = scanner._build_query()
         
-        assert '@bitcast' in query
+        assert CONNECTION_SEARCH_TAG in query
         assert 'since:' in query
     
     def test_extract_connections_from_tweets(self, temp_db_path, mock_twitter_client):

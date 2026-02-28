@@ -291,7 +291,7 @@ class TestRefreshConnectedTimelines:
 
         stats = refresh_connected_timelines({"alice", "bob"}, max_workers=1)
 
-        MockClient.assert_called_once_with(posts_only=True)
+        MockClient.assert_called_once_with(posts_only=False)
         assert mock_client.fetch_user_tweets.call_count == 2
         # Check skip_if_cache_fresh=True was passed
         for call in mock_client.fetch_user_tweets.call_args_list:

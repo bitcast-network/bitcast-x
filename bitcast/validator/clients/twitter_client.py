@@ -38,7 +38,7 @@ class TwitterClient:
     """
     
     def __init__(self, api_key: Optional[str] = None, 
-                 max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
+                 max_retries: int = 3, retry_delay: float = 1.0, rate_limit_delay: float = 0.1,
                  posts_only: bool = True, provider: Optional[str] = None):
         """
         Initialize client with API provider selection.

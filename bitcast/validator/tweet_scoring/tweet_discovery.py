@@ -25,6 +25,7 @@ from bitcast.validator.utils.config import (
     ENGAGEMENT_FETCH_INTERVAL_NEW,
     ENGAGEMENT_FETCH_INTERVAL_RECENT,
     ENGAGEMENT_FETCH_INTERVAL_OLD,
+    SOCIAL_DISCOVERY_MAX_WORKERS,
 )
 from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
 from .tweet_store import TweetStore
@@ -35,7 +36,7 @@ ENGAGEMENT_MAX_WORKERS = 5
 
 def refresh_connected_timelines(
     connected_accounts: Set[str],
-    max_workers: int = 5,
+    max_workers: int = SOCIAL_DISCOVERY_MAX_WORKERS,
 ) -> Dict[str, int]:
     """
     Incrementally refresh timelines for all connected accounts.
