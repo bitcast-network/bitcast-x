@@ -68,7 +68,7 @@ def refresh_connected_timelines(
     )
 
     def fetch_one(username: str) -> Dict:
-        return client.fetch_user_tweets(username, skip_if_cache_fresh=True)
+        return client.fetch_user_tweets(username)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {

@@ -92,7 +92,7 @@ PAGERANK_ALPHA = 0.85
 # =============================================================================
 
 # Cache freshness for social discovery
-SOCIAL_DISCOVERY_CACHE_HOURS = 48
+SOCIAL_DISCOVERY_CACHE_HOURS = 36
 CACHE_FRESHNESS_SECONDS = SOCIAL_DISCOVERY_CACHE_HOURS * 3600
 
 # Concurrency (1 = sequential, 2+ = concurrent)
