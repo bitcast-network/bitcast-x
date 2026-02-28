@@ -126,6 +126,49 @@ class ConnectionScanner:
         
         return connections
     
+    def process_tweet(self, tweet: Dict, pool_name: str, pool_accounts: Set[str]) -> Dict[str, Any]:
+        """
+        Process a single tweet for connection tags in a specific pool.
+        
+        Extracts tags, checks author against pool_accounts, and upserts
+        any connections found.  Idempotent -- safe to call repeatedly.
+        
+        Args:
+            tweet: Normalised tweet dict (must have tweet_id, author, text)
+            pool_name: Pool to store connections under
+            pool_accounts: Set of lowercase usernames in the pool's social map
+            
+        Returns:
+            Dict with tags_found, new_connections, duplicates, errors
+        """
+        stats: Dict[str, Any] = {'tags_found': 0, 'new_connections': 0, 'duplicates': 0, 'errors': 0}
+        
+        found_connections = self._extract_connections_from_tweets([tweet], pool_accounts)
+        stats['tags_found'] = len(found_connections)
+        
+        for conn in found_connections:
+            try:
+                is_new = self.database.upsert_connection(
+                    pool_name=pool_name,
+                    tweet_id=conn['tweet_id'],
+                    tag=conn['tag'],
+                    account_username=conn['username'],
+                    referral_code=conn.get('referral_code'),
+                    referred_by=conn.get('referred_by'),
+                )
+                if is_new:
+                    stats['new_connections'] += 1
+                    bt.logging.info(
+                        f"New connection: @{conn['username']} -> {conn['tag']} (pool: {pool_name})"
+                    )
+                else:
+                    stats['duplicates'] += 1
+            except Exception as e:
+                bt.logging.error(f"Error storing connection for @{conn['username']}: {e}")
+                stats['errors'] += 1
+        
+        return stats
+    
     async def scan_pool(self, pool_name: str, publish: bool = True) -> Dict[str, Any]:
         """
         Scan for connection tags in a pool using search API.

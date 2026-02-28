@@ -570,3 +570,30 @@ class TwitterClient:
                 'api_succeeded': False,
                 'provider_used': self.provider_name
             }
+    
+    def fetch_tweet_by_id(self, tweet_id: str) -> Dict[str, Any]:
+        """
+        Fetch a single tweet by its ID.
+        
+        Args:
+            tweet_id: The tweet ID to fetch
+        
+        Returns:
+            Dict with 'tweet' (normalized dict or None) and 'api_succeeded' boolean
+        """
+        try:
+            tweet, api_succeeded = self.provider.fetch_tweet_by_id(tweet_id=tweet_id)
+            
+            return {
+                'tweet': tweet,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Fetch tweet by ID failed for {tweet_id}: {e}")
+            return {
+                'tweet': None,
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }
