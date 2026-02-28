@@ -154,3 +154,21 @@ class TwitterProvider(ABC):
             - api_succeeded: True if API call succeeded, False otherwise
         """
         pass
+    
+    @abstractmethod
+    def fetch_tweet_by_id(
+        self,
+        tweet_id: str
+    ) -> Tuple[Optional[Dict], bool]:
+        """
+        Fetch a single tweet by its ID.
+        
+        Args:
+            tweet_id: The tweet ID to fetch
+        
+        Returns:
+            Tuple of (normalized_tweet, api_succeeded):
+            - normalized_tweet: Normalized tweet dict, or None if not found/failed
+            - api_succeeded: True if API call succeeded, False otherwise
+        """
+        pass

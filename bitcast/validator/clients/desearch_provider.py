@@ -592,3 +592,60 @@ class DesearchProvider(TwitterProvider):
 
         bt.logging.debug(f"Found {len(usernames)} retweeters for tweet {tweet_id}")
         return usernames, api_succeeded
+    
+    def fetch_tweet_by_id(
+        self,
+        tweet_id: str
+    ) -> Tuple[Optional[Dict], bool]:
+        """
+        Fetch a single tweet by ID via Desearch.ai /twitter/post endpoint.
+        
+        Args:
+            tweet_id: The tweet ID to fetch
+        
+        Returns:
+            Tuple of (normalized_tweet, api_succeeded)
+        """
+        url = f"{self.base_url}/twitter/post"
+        params = {"id": tweet_id}
+        
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    bt.logging.warning(
+                        f"Desearch post API error {response.status_code} for tweet {tweet_id} "
+                        f"(attempt {attempt + 1}/{self.max_retries})"
+                    )
+                    if attempt < self.max_retries - 1:
+                        time.sleep(self.retry_delay)
+                    continue
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                if not data:
+                    bt.logging.warning(f"Empty response for tweet {tweet_id}")
+                    return None, True
+                
+                tweet_data = data
+                if isinstance(data, list):
+                    tweet_data = data[0] if data else None
+                if not tweet_data:
+                    return None, True
+                
+                parsed = self._parse_search_tweet(tweet_data)
+                if parsed:
+                    bt.logging.info(f"Fetched tweet {tweet_id} by @{parsed.get('author', '?')}")
+                else:
+                    bt.logging.warning(f"Failed to parse tweet {tweet_id}")
+                
+                return parsed, True
+                
+            except Exception as e:
+                bt.logging.error(f"Desearch post API error for tweet {tweet_id}: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+        
+        return None, False

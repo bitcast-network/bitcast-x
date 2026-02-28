@@ -804,3 +804,16 @@ class RapidAPIProvider(TwitterProvider):
         
         bt.logging.debug(f"Found {len(usernames)} retweeters for tweet {tweet_id}")
         return usernames, api_succeeded
+    
+    def fetch_tweet_by_id(
+        self,
+        tweet_id: str
+    ) -> Tuple[Optional[Dict], bool]:
+        """
+        Fetch a single tweet by ID. Not yet implemented for RapidAPI.
+        
+        Returns:
+            Tuple of (None, False)
+        """
+        bt.logging.warning("fetch_tweet_by_id is not implemented for RapidAPI provider")
+        return None, False
