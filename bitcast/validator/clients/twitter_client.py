@@ -324,7 +324,7 @@ class TwitterClient:
         
         # API fetch limit (used for pagination)
         if self.posts_only:
-            tweet_limit = MAX_TWEETS_PER_FETCH  # 400 for single endpoint
+            tweet_limit = MAX_TWEETS_PER_FETCH
         else:
             tweet_limit = 200  # 200 per endpoint in dual-endpoint mode
         

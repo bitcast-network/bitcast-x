@@ -125,11 +125,11 @@ class TestDesearchProvider:
         assert error is None
         assert isinstance(data, list)
         
-        # Format 3: {"data": [...]}
+        # Format 3: {"data": [...]} — returned as-is, callers handle format
         mock_response.json.return_value = {'data': []}
         data, error = provider._make_api_request("http://test", {})
         assert error is None
-        assert isinstance(data, list)
+        assert isinstance(data, dict)
     
     def test_parse_tweet_basic(self):
         """Test basic Desearch.ai tweet parsing."""
@@ -641,7 +641,6 @@ class TestDesearchProviderSearchTweets:
 
         assert success is False
         assert len(tweets) == 0
-
 
 
 class TestDesearchProviderGetRetweeters:

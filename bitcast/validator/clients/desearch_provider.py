@@ -178,31 +178,13 @@ class DesearchProvider(TwitterProvider):
                 response.raise_for_status()
                 data = response.json()
                 
-                # Handle Desearch.ai response format: {"user": {...}, "tweets": [...]}
-                if isinstance(data, dict) and 'tweets' in data:
+                if isinstance(data, (dict, list)):
                     return data, None
                 
-                # Handle Desearch.ai response format (list of tweets) - legacy
-                if isinstance(data, list):
-                    return data, None
-                
-                # Handle Desearch.ai response wrapped in 'data' key
-                if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list):
-                    return data['data'], None
-                
-                # Handle alternative response formats from Desearch.ai API
-                if 'data' in data and 'user' in data['data']:
-                    return data, None
-                elif 'user' in data:
-                    # Normalize response structure for consistency
-                    return {'data': data}, None
-                elif 'errors' in data:
-                    return None, f"API error: {data.get('errors')}"
-                else:
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay)
-                        continue
-                    return None, "Invalid response structure"
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                    continue
+                return None, "Invalid response structure"
                 
             except requests.exceptions.Timeout:
                 if attempt < self.max_retries - 1:
@@ -428,6 +410,7 @@ class DesearchProvider(TwitterProvider):
                     break
 
                 api_fetch_succeeded = True
+                next_cursor = None
 
                 # /twitter/user/posts → {"user": {...}, "tweets": [...], "next_cursor": "..."}
                 # /twitter/replies   → plain list, no cursor

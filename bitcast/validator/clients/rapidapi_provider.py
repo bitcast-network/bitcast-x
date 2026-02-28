@@ -280,10 +280,9 @@ class RapidAPIProvider(TwitterProvider):
             if is_retweet:
                 rt_match = re.match(r'RT @(\w+):', text)
                 if rt_match:
-                    username = rt_match.group(1).lower()
-                    # Filter out numeric user IDs (suspended/deleted accounts)
-                    if is_valid_twitter_username(username):
-                        retweeted_user = username
+                    rt_username = rt_match.group(1).lower()
+                    if is_valid_twitter_username(rt_username):
+                        retweeted_user = rt_username
                 tagged_accounts = []
                 retweeted_status = legacy.get('retweeted_status_result', {}).get('result', {})
                 retweeted_tweet_id = retweeted_status.get('rest_id')
@@ -305,31 +304,27 @@ class RapidAPIProvider(TwitterProvider):
                     url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
                     match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
                     if match:
-                        username = match.group(1).lower()
-                        # Filter out numeric user IDs (suspended/deleted accounts)
-                        if is_valid_twitter_username(username):
-                            quoted_user = username
+                        qt_username = match.group(1).lower()
+                        if is_valid_twitter_username(qt_username):
+                            quoted_user = qt_username
                         quoted_tweet_id = match.group(2)
                 
-                # Extract quoted user if not already found
                 if quoted_tweet_id and not quoted_user:
                     try:
                         quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
-                        username = (
+                        qt_username = (
                             quoted_status_result['core']['user_results']['result']['legacy']['screen_name']
                             .lower()
                         )
-                        # Filter out numeric user IDs (suspended/deleted accounts)
-                        if is_valid_twitter_username(username):
-                            quoted_user = username
+                        if is_valid_twitter_username(qt_username):
+                            quoted_user = qt_username
                     except (KeyError, AttributeError, TypeError):
                         url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
                         match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
                         if match:
-                            username = match.group(1).lower()
-                            # Filter out numeric user IDs (suspended/deleted accounts)
-                            if is_valid_twitter_username(username):
-                                quoted_user = username
+                            qt_username = match.group(1).lower()
+                            if is_valid_twitter_username(qt_username):
+                                quoted_user = qt_username
             
             # Extract actual author from core.user_results
             # Different structure for search results vs user timeline
@@ -356,10 +351,9 @@ class RapidAPIProvider(TwitterProvider):
             in_reply_to_status_id = legacy.get('in_reply_to_status_id_str')
             in_reply_to_user = legacy.get('in_reply_to_screen_name')
             if in_reply_to_user:
-                username = in_reply_to_user.lower()
-                # Filter out numeric user IDs (suspended/deleted accounts)
-                if is_valid_twitter_username(username):
-                    in_reply_to_user = username
+                reply_username = in_reply_to_user.lower()
+                if is_valid_twitter_username(reply_username):
+                    in_reply_to_user = reply_username
                 else:
                     in_reply_to_user = None
             

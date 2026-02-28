@@ -78,7 +78,7 @@ WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 # Fetching Strategy
 SOCIAL_DISCOVERY_FETCH_DAYS = 30  # Days of tweet history for social network discovery
 SOCIAL_DISCOVERY_LOOKBACK = 60  # Maximum age of cached tweets to use in analysis (in days, None = use all)
-MAX_TWEETS_PER_FETCH = 200       # Supports pagination to fetch up to 400 tweets via Desearch.ai
+MAX_TWEETS_PER_FETCH = 200       # Max tweets per user per fetch cycle (cursor-based pagination)
 
 # Twitter API Configuration - PageRank Weights
 PAGERANK_RETWEET_WEIGHT = 1.0
