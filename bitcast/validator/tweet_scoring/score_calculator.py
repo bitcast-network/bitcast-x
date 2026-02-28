@@ -5,7 +5,7 @@ Calculates tweet scores by multiplying influence scores with engagement weights.
 Includes cabal protection to reduce scores for accounts with high relationship scores.
 """
 
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import bittensor as bt
 
@@ -14,7 +14,6 @@ from bitcast.validator.utils.config import (
     PAGERANK_QUOTE_WEIGHT,
     BASELINE_TWEET_SCORE_FACTOR
 )
-from .engagement_analyzer import EngagementAnalyzer
 
 
 class ScoreCalculator:
@@ -152,85 +151,3 @@ class ScoreCalculator:
         total_score = round(total_score, 6)
         
         return total_score, details
-    
-    def score_tweets_batch(
-        self,
-        tweets: List[Dict],
-        all_tweets: List[Dict],
-        engagement_analyzer: EngagementAnalyzer,
-        excluded_engagers: Optional[Set[str]] = None
-    ) -> List[Dict]:
-        """
-        Score a batch of tweets.
-        
-        Args:
-            tweets: List of tweets to score (must have 'author' and 'tweet_id')
-            all_tweets: All tweets to search for engagements
-            engagement_analyzer: Analyzer to detect engagements
-            excluded_engagers: Optional set of usernames (lowercase) whose engagements
-                              should be excluded (e.g., brief participants)
-            
-        Returns:
-            List of scored tweet dicts with complete metadata
-        """
-        scored_tweets = []
-        
-        for tweet in tweets:
-            # Get engagements for this tweet (excluding specified accounts)
-            engagements = engagement_analyzer.get_engagements_for_tweet(
-                tweet,
-                all_tweets,
-                self.considered_accounts,
-                excluded_engagers
-            )
-            
-            # Get author's influence score
-            # Use minimum influence score from considered accounts as fallback
-            author = tweet.get('author', '')
-            author_influence_score = self.considered_accounts.get(author, self.min_influence_score)
-            
-            # Calculate score with cabal protection
-            score, details = self.calculate_tweet_score(engagements, author_influence_score, author)
-            
-            # Separate retweets and quotes
-            retweets = [d['username'] for d in details if d['engagement_type'] == 'retweet']
-            quotes = [d['username'] for d in details if d['engagement_type'] == 'quote']
-            
-            # Build scored tweet object with engagement metrics
-            tweet_id = tweet.get('tweet_id', '')
-            
-            scored_tweet = {
-                'tweet_id': tweet_id,
-                'author': author,
-                'text': tweet.get('text', ''),
-                'url': f"https://twitter.com/{author}/status/{tweet_id}",
-                'created_at': tweet.get('created_at', ''),
-                'lang': tweet.get('lang', 'und'),
-                'score': score,
-                'retweets': retweets,
-                'quotes': quotes,
-                # Preserve engagement metrics from Twitter API
-                'favorite_count': tweet.get('favorite_count', 0),
-                'retweet_count': tweet.get('retweet_count', 0),
-                'reply_count': tweet.get('reply_count', 0),
-                'quote_count': tweet.get('quote_count', 0),
-                'bookmark_count': tweet.get('bookmark_count', 0),
-                'views_count': tweet.get('views_count', 0)
-            }
-            
-            # Include quoted_tweet_id if present (for QRT filtering transparency)
-            if tweet.get('quoted_tweet_id'):
-                scored_tweet['quoted_tweet_id'] = tweet['quoted_tweet_id']
-            
-            scored_tweets.append(scored_tweet)
-        
-        # Sort by score descending
-        scored_tweets.sort(key=lambda t: t['score'], reverse=True)
-        
-        bt.logging.info(
-            f"Scored {len(scored_tweets)} tweets, "
-            f"average score: {sum(t['score'] for t in scored_tweets) / len(scored_tweets):.6f}"
-            if scored_tweets else "Scored 0 tweets"
-        )
-        
-        return scored_tweets

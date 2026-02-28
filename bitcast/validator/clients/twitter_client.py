@@ -1,125 +1,139 @@
 """
-Simplified Twitter client with API access and caching for PageRank scoring.
+Twitter client with switchable API provider support and caching.
 
-Combines API communication, caching, and basic tweet processing in one module.
+Coordinates between multiple Twitter API providers (Desearch.ai, RapidAPI)
+with manual provider selection via configuration.
 """
 
-import requests
-import time
 import re
-import json
-import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import bittensor as bt
 
 from bitcast.validator.utils.config import (
+    TWITTER_API_PROVIDER,
+    DESEARCH_API_KEY,
     RAPID_API_KEY,
-    INITIAL_FETCH_DAYS,
-    INCREMENTAL_FETCH_DAYS,
+    SOCIAL_DISCOVERY_FETCH_DAYS,
     MAX_TWEETS_PER_FETCH,
-    TWITTER_CACHE_FRESHNESS
+    CACHE_FRESHNESS_SECONDS,
 )
 from bitcast.validator.utils.twitter_cache import (
     get_cached_user_tweets,
     cache_user_tweets,
-    get_cached_user_info,
-    cache_user_info
 )
+from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
+
+from .twitter_provider import TwitterProvider
+from .desearch_provider import DesearchProvider
+from .rapidapi_provider import RapidAPIProvider
 
 
 class TwitterClient:
     """
-    Twitter API client with intelligent caching and tweet processing.
+    Twitter API client with intelligent caching and pluggable API providers.
     
-    Handles API communication, caching, and basic tweet processing for
-    PageRank-based network analysis.
+    Supports manual switching between Desearch.ai and RapidAPI via TWITTER_API_PROVIDER config.
+    Handles caching, tweet processing, and delegates API access to configured provider.
     """
     
     def __init__(self, api_key: Optional[str] = None, 
-                 max_retries: int = 3, retry_delay: float = 2.0, rate_limit_delay: float = 1.0,
-                 posts_only: bool = True):
-        """Initialize client with API key and configuration options.
+                 max_retries: int = 3, retry_delay: float = 1.0, rate_limit_delay: float = 0.1,
+                 posts_only: bool = True, provider: Optional[str] = None):
+        """
+        Initialize client with API provider selection.
         
         Args:
-            api_key: RapidAPI key for Twitter API access
-            max_retries: Maximum number of API request retries (default: 3)
-            retry_delay: Delay in seconds between retries (default: 2.0)
-            rate_limit_delay: Delay in seconds between API calls (default: 1.0)
-            posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
-                       If False, use both /user/tweets and /user/tweetsandreplies
+            api_key: Optional API key (uses env vars if not provided)
+            max_retries: Maximum number of API request retries
+            retry_delay: Delay in seconds between retries
+            rate_limit_delay: Delay in seconds between API calls
+            posts_only: If True, use only /posts endpoint (faster)
+            provider: Override provider ('desearch' or 'rapidapi')
         """
-        self.api_key = api_key or RAPID_API_KEY
-        if not self.api_key:
-            raise ValueError("RAPID_API_KEY environment variable must be set")
-        
-        # Configuration
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limit_delay = rate_limit_delay
         self.posts_only = posts_only
         
-        self.headers = {
-            "x-rapidapi-key": self.api_key,
-            "x-rapidapi-host": "twitter-v24.p.rapidapi.com"
-        }
+        # Determine which provider to use
+        self.provider_name = provider or TWITTER_API_PROVIDER
         
-        endpoint_mode = "posts-only mode" if self.posts_only else "dual-endpoint mode"
-        bt.logging.info(f"TwitterClient initialized with centralized cache ({TWITTER_CACHE_FRESHNESS/3600:.1f}h freshness, {endpoint_mode})")
+        # Initialize selected provider
+        self.provider = self._create_provider(
+            self.provider_name, api_key
+        )
+        
+        endpoint_mode = "posts-only" if self.posts_only else "dual-endpoint"
+        bt.logging.info(
+            f"TwitterClient initialized with {self.provider_name} provider "
+            f"({endpoint_mode} mode)"
+        )
     
-    def _make_api_request(self, url: str, params: Dict) -> Tuple[Optional[Dict], Optional[str]]:
-        """Make API request with retry logic for rate limits."""
-        for attempt in range(self.max_retries):
-            try:
-                response = requests.get(url, headers=self.headers, params=params, timeout=30)
-                
-                if response.status_code in [429, 500, 502, 503, 504]:
-                    if attempt < self.max_retries - 1:
-                        bt.logging.warning(f"API error {response.status_code}, retrying in {self.retry_delay}s...")
-                        time.sleep(self.retry_delay)
-                        continue
-                    return None, f"Max retries on status {response.status_code}"
-                
-                response.raise_for_status()
-                data = response.json()
-                
-                # Normalize response structure - Twitter API returns different formats:
-                # - Standard: {"data": {"user": {...}}}
-                # - Paginated: {"user": {...}}
-                if 'data' in data and 'user' in data['data']:
-                    return data, None
-                elif 'user' in data:
-                    # Wrap paginated response to match standard structure
-                    return {'data': data}, None
-                elif 'errors' in data:
-                    return None, f"API error: {data.get('errors')}"
-                else:
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self.retry_delay)
-                        continue
-                    return None, "Invalid response structure"
-                
-            except requests.exceptions.Timeout:
-                if attempt < self.max_retries - 1:
-                    bt.logging.warning(f"Request timeout, retrying...")
-                    time.sleep(self.retry_delay)
-                    continue
-                return None, "Request timeout"
-            except Exception as e:
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
-                    continue
-                return None, str(e)
+    def _create_provider(self, provider_name: str, 
+                        api_key: Optional[str]) -> TwitterProvider:
+        """
+        Create and validate a provider instance.
         
-        return None, "Max retries exceeded"
+        Args:
+            provider_name: Provider to create ('desearch' or 'rapidapi')
+            api_key: Optional API key (uses env vars if not provided)
+            
+        Returns:
+            Initialized provider instance
+            
+        Raises:
+            ValueError: If provider name unknown or API key invalid
+        """
+        if provider_name == 'desearch':
+            key = api_key or DESEARCH_API_KEY
+            if not key:
+                raise ValueError("DESEARCH_API_KEY not configured")
+            provider = DesearchProvider(
+                api_key=key,
+                max_retries=self.max_retries,
+                retry_delay=self.retry_delay,
+                rate_limit_delay=self.rate_limit_delay
+            )
+            if not provider.validate_api_key():
+                raise ValueError(
+                    "Invalid DESEARCH_API_KEY format. "
+                    "Expected: dt_$YOUR_KEY"
+                )
+            return provider
+            
+        elif provider_name == 'rapidapi':
+            key = api_key or RAPID_API_KEY
+            if not key:
+                raise ValueError("RAPID_API_KEY not configured")
+            provider = RapidAPIProvider(
+                api_key=key,
+                max_retries=self.max_retries,
+                retry_delay=self.retry_delay,
+                rate_limit_delay=self.rate_limit_delay
+            )
+            if not provider.validate_api_key():
+                raise ValueError("Invalid RAPID_API_KEY")
+            
+            # Log multi-key setup
+            key_count = provider.get_key_count()
+            if key_count > 1:
+                bt.logging.info(f"RapidAPI configured with {key_count} API keys for load balancing")
+            
+            return provider
+            
+        else:
+            raise ValueError(
+                f"Unknown provider: {provider_name}. "
+                f"Options: 'desearch', 'rapidapi'"
+            )
     
     def _validate_tweet_authors(self, tweets: List[Dict], username: str) -> List[Dict]:
         """
         Filter tweets to only those authored by the specified username.
         
-        Handles backward compatibility by setting author field for old cache entries.
+        Strict validation: Rejects tweets with missing or mismatched author.
+        Providers should always set the author field during parsing.
         
         Args:
             tweets: List of tweet dictionaries
@@ -137,10 +151,18 @@ class TwitterClient:
                 # Tweet is from the expected author
                 validated_tweets.append(tweet)
             elif not author:
-                # Backward compatibility: assume timeline owner for old cache entries
-                tweet['author'] = username
-                validated_tweets.append(tweet)
-            # else: skip - tweet from someone else (e.g., reply TO user FROM someone else)
+                # Strict validation: reject tweets with missing author
+                # This indicates incomplete data from provider
+                bt.logging.warning(
+                    f"Rejecting tweet {tweet.get('tweet_id')} with missing author field "
+                    f"(expected @{username})"
+                )
+            else:
+                # Tweet from someone else (e.g., reply TO user FROM someone else)
+                bt.logging.debug(
+                    f"Filtering tweet {tweet.get('tweet_id')} from @{author} "
+                    f"(expected @{username})"
+                )
         
         return validated_tweets
     
@@ -205,290 +227,136 @@ class TwitterClient:
         
         return visible_tweets, tweets_to_cache
     
-    def _fetch_from_single_endpoint(
+    def fetch_user_tweets(
         self,
-        url: str,
         username: str,
-        tweet_limit: int,
-        incremental_cutoff: datetime
-    ) -> Tuple[List[Dict], Optional[Dict], bool]:
+        fetch_days: int = SOCIAL_DISCOVERY_FETCH_DAYS,
+        skip_if_cache_fresh: bool = False,
+    ) -> Dict[str, Any]:
         """
-        Fetch tweets from a single Twitter API endpoint with pagination.
-        
-        Args:
-            url: API endpoint URL
-            username: Twitter username to fetch for
-            tweet_limit: Maximum tweets to fetch
-            incremental_cutoff: Date cutoff for pagination stopping
-            
-        Returns:
-            Tuple of (tweets_list, user_info, api_succeeded)
-        """
-        params = {"username": username, "limit": "40"}
-        
-        tweets = []
-        # Initialize user_info with requested username (guaranteed correct)
-        # Followers count will be extracted from timeline owner's tweets if available
-        user_info = {
-            'username': username.lower(),
-            'followers_count': 0
-        }
-        cursor = None
-        api_fetch_succeeded = False
-        max_pages = 10  # Limit pagination to prevent excessive API calls
-        page_count = 0
-        
-        while len(tweets) < tweet_limit and page_count < max_pages:
-            page_count += 1
-            if cursor:
-                params["cursor"] = cursor
-            
-            data, error = self._make_api_request(url, params)
-            if error:
-                bt.logging.error(f"API failed for @{username} at {url.split('/')[-1]}: {error}")
-                break
-            
-            api_fetch_succeeded = True
-            
-            # Extract timeline data
-            try:
-                # Response is normalized by _make_api_request to {'data': {'user': ...}}
-                timeline = data['data']['user']['result']['timeline']['timeline']
-                instructions = timeline.get('instructions', [])
-                
-                # Collect entries and track pinned tweet IDs
-                entries = []
-                pinned_entry_ids = set()
-                for instruction in instructions:
-                    inst_type = instruction.get('type')
-                    if inst_type == 'TimelinePinEntry':
-                        entry = instruction.get('entry')
-                        if entry:
-                            entries.append(entry)
-                            pinned_entry_ids.add(entry.get('entryId', ''))
-                    elif inst_type == 'TimelineAddEntries':
-                        entries.extend(instruction.get('entries', []))
-                
-            except KeyError:
-                break
-            
-            cursor = None
-            tweets_found = 0
-            
-            for entry in entries:
-                entry_id = entry.get('entryId', '')
-                
-                # Handle cursor entries
-                if entry_id.startswith('cursor-'):
-                    if entry.get('content', {}).get('cursorType') == 'Bottom':
-                        cursor = entry.get('content', {}).get('value')
-                    continue
-                
-                # Handle regular tweet entries
-                if entry_id.startswith('tweet-'):
-                    tweet_data = self._parse_tweet(entry, username)
-                    if tweet_data:
-                        # Default author for /tweets endpoint (only returns user's tweets)
-                        if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
-                            tweet_data['author'] = username
-                        
-                        # Filter by author during pagination
-                        if (tweet_data.get('author') or '').lower() == username:
-                            tweets.append(tweet_data)
-                            tweets_found += 1
-                        
-                        # Check cutoff only for non-pinned tweets
-                        is_pinned = entry_id in pinned_entry_ids
-                        if not is_pinned and tweet_data.get('created_at'):
-                            try:
-                                tweet_date = datetime.strptime(tweet_data['created_at'], '%a %b %d %H:%M:%S %z %Y')
-                                cutoff_with_tz = incremental_cutoff.replace(tzinfo=tweet_date.tzinfo)
-                                if tweet_date < cutoff_with_tz:
-                                    bt.logging.debug(f"Reached incremental cutoff for @{username}")
-                                    cursor = None
-                                    break
-                            except ValueError:
-                                pass
-                    
-                    # Extract followers count if not yet collected and tweet is from timeline owner
-                    if user_info['followers_count'] == 0 and tweet_data.get('author', '').lower() == username:
-                        followers = self._extract_followers_count(entry)
-                        if followers:
-                            user_info['followers_count'] = followers
-                
-                # Handle profile-conversation entries (contains multiple tweets)
-                elif entry_id.startswith('profile-conversation-'):
-                    conversation_tweets = self._parse_profile_conversation(entry, username)
-                    
-                    for tweet_data in conversation_tweets:
-                        if tweet_data:
-                            # Default author for /tweets endpoint (only returns user's tweets)
-                            if not tweet_data.get('author') and '/user/tweets' in url and '/tweetsandreplies' not in url:
-                                tweet_data['author'] = username
-                            
-                            # Filter by author during pagination
-                            if (tweet_data.get('author') or '').lower() == username:
-                                tweets.append(tweet_data)
-                                tweets_found += 1
-                
-                # Check tweet limit
-                if len(tweets) >= tweet_limit:
-                    bt.logging.debug(f"Reached tweet limit ({tweet_limit}) for @{username}")
-                    cursor = None
-                    break
-            
-            if not cursor:
-                break
-            
-            time.sleep(self.rate_limit_delay)  # Rate limiting
-        
-        return tweets, user_info, api_fetch_succeeded
-    
-    def fetch_user_tweets(self, username: str, force_refresh: bool = False) -> Dict[str, Any]:
-        """
-        Fetch tweets for a user with intelligent caching and incremental updates.
-        
-        Three fetch strategies:
-        - Initial (no cache): Bootstrap with 30 days of history
-        - Incremental (stale cache): Refresh last 4 days only
-        - Force refresh: Thorough 30-day update (merges with cache)
-        
+        Fetch tweets for a user, pulling fresh data and merging with cache.
+
+        By default, always fetches from the API. When skip_if_cache_fresh=True,
+        checks if cache was updated within 24 hours and skips API call if so.
+
         Args:
             username: Twitter username to fetch tweets for
-            force_refresh: If True, fetch 30 days (thorough refresh, merges with cache)
-        
-        Filters to only tweets authored by the user (the tweetsandreplies API returns
-        both user's tweets AND replies from others).
-        
-        Fetches up to MAX_TWEETS_PER_FETCH tweets from API when cache is stale.
-        Returns ALL cached tweets regardless of age - callers apply their own date filtering.
-        Uses smart cache merging to preserve historical tweets while fetching recent updates.
-        
-        Returns dict with 'user_info', 'tweets', and 'cache_info'
+            fetch_days: Number of days of tweet history to fetch from API
+            skip_if_cache_fresh: If True, skip API call if cache was updated within freshness window
+
+        Returns:
+            Dict with 'user_info', 'tweets', and 'cache_info'
         """
         username = username.lower()
         
-        # Check cache and determine fetch strategy
-        cached_data = get_cached_user_tweets(username)
-        last_updated = cached_data.get('last_updated') if cached_data else None
-        
-        # Determine fetch strategy: initial / incremental / force / fresh
-        if not cached_data:
-            # INITIAL FETCH: No cache exists - bootstrap with 30 days
-            fetch_days = INITIAL_FETCH_DAYS
-            base_time = datetime.now()
-            bt.logging.info(f"Initial fetch for @{username} (last {fetch_days} days)")
-            
-        elif force_refresh:
-            # FORCE REFRESH: Thorough update - fetch 30 days (merges with cache)
-            fetch_days = INITIAL_FETCH_DAYS
-            base_time = last_updated
-            bt.logging.info(f"Force refresh for @{username} (fetching last {fetch_days} days)")
-            
-        elif last_updated and (datetime.now() - last_updated).total_seconds() < TWITTER_CACHE_FRESHNESS:
-            # FRESH CACHE: Use cached data without fetching
-            bt.logging.debug(f"Using cached tweets for @{username} ({len(cached_data['tweets'])} tweets)")
-            
-            # Apply post-processing: sorting, validation, and deletion removal
-            visible_tweets, tweets_to_cache = self._post_process_tweets(
-                tweets=cached_data['tweets'],
-                username=username
+        # Validate username format - reject numeric IDs from suspended/deleted accounts
+        if not is_valid_twitter_username(username):
+            bt.logging.debug(
+                f"Skipping invalid username: @{username} "
+                f"(likely a numeric user ID from suspended/deleted account)"
             )
-            
-            # Update cache with post-processed tweets while preserving original timestamp
-            cache_data = {
-                'user_info': cached_data['user_info'],
-                'tweets': tweets_to_cache,
-                'last_updated': last_updated  # Keep original to maintain freshness window
-            }
-            cache_user_tweets(username, cache_data)
-            
             return {
-                'user_info': cached_data['user_info'],
-                'tweets': visible_tweets,
+                'user_info': {'username': username, 'followers_count': 0},
+                'tweets': [],
                 'cache_info': {
-                    'cache_hit': True, 
+                    'cache_hit': False,
+                    'cache_fresh': False,
+                    'cache_age_hours': 0,
                     'new_tweets': 0,
-                    'cached_tweets': len(cached_data['tweets'])
+                    'cached_tweets': 0,
+                    'provider_used': 'none'
                 }
             }
-        else:
-            # INCREMENTAL UPDATE: Cache is stale - refresh last 4 days
-            fetch_days = INCREMENTAL_FETCH_DAYS
-            base_time = last_updated
-            bt.logging.info(f"Incremental update for @{username} (last {fetch_days} days)")
-        
-        # Calculate cutoff for API pagination stopping point
-        incremental_cutoff = base_time - timedelta(days=fetch_days)
+
+        # Check cache for existing data
+        cached_data = get_cached_user_tweets(username)
+
+        # Check if cache is fresh and we should skip API call
+        if skip_if_cache_fresh and cached_data:
+            freshness_seconds = CACHE_FRESHNESS_SECONDS
+            cache_timestamp = cached_data.get('cache_timestamp')
+
+            if cache_timestamp:
+                try:
+                    cache_time = datetime.fromisoformat(cache_timestamp)
+                    age_seconds = (datetime.now() - cache_time).total_seconds()
+
+                    if age_seconds < freshness_seconds:
+                        bt.logging.info(f"Cache fresh for @{username} ({age_seconds/3600:.1f}h old), skipping API call")
+                        # Return cached data with cache hit info
+                        visible_tweets, _ = self._post_process_tweets(
+                            tweets=cached_data.get('tweets', []),
+                            username=username
+                        )
+                        return {
+                            'user_info': cached_data.get('user_info', {'username': username, 'followers_count': 0}),
+                            'tweets': visible_tweets,
+                            'cache_info': {
+                                'cache_hit': True,
+                                'cache_fresh': True,
+                                'cache_age_hours': round(age_seconds / 3600, 1),
+                                'new_tweets': 0,
+                                'cached_tweets': len(cached_data.get('tweets', [])),
+                                'provider_used': 'cache'
+                            }
+                        }
+                except (ValueError, TypeError):
+                    pass  # Fall through to API fetch if timestamp parsing fails
+
+        # Use cache timestamp as cutoff when available (fetch only newer tweets)
+        incremental_cutoff = None
+        if cached_data:
+            cache_timestamp = cached_data.get('cache_timestamp')
+            if cache_timestamp:
+                try:
+                    cache_time = datetime.fromisoformat(cache_timestamp)
+                    incremental_cutoff = cache_time - timedelta(hours=1)
+                    bt.logging.info(
+                        f"Fetching tweets for @{username} since cache "
+                        f"({(datetime.now() - cache_time).total_seconds() / 3600:.1f}h ago)"
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+        if incremental_cutoff is None:
+            incremental_cutoff = datetime.now() - timedelta(days=fetch_days)
+            bt.logging.info(f"Fetching tweets for @{username} (last {fetch_days} days)")
         
         # API fetch limit (used for pagination)
-        tweet_limit = MAX_TWEETS_PER_FETCH
-        
-        # Select endpoints based on posts_only mode
         if self.posts_only:
-            # Posts-only mode: faster, uses less quota (excludes replies)
-            endpoints = [
-                "https://twitter-v24.p.rapidapi.com/user/tweets"
-            ]
+            tweet_limit = MAX_TWEETS_PER_FETCH
         else:
-            # Dual-endpoint mode: complete tweet coverage (includes replies)
-            endpoints = [
-                "https://twitter-v24.p.rapidapi.com/user/tweetsandreplies",
-                "https://twitter-v24.p.rapidapi.com/user/tweets"
-            ]
+            tweet_limit = 200  # 200 per endpoint in dual-endpoint mode
         
-        # Fetch from endpoint(s) in parallel
-        all_tweets = []
-        user_info = None
-        api_fetch_succeeded = False
-        
-        with ThreadPoolExecutor(max_workers=len(endpoints)) as executor:
-            future_to_endpoint = {
-                executor.submit(
-                    self._fetch_from_single_endpoint,
-                    url, username, tweet_limit, incremental_cutoff
-                ): url
-                for url in endpoints
-            }
-            
-            for future in as_completed(future_to_endpoint):
-                endpoint_url = future_to_endpoint[future]
-                try:
-                    tweets, endpoint_user_info, endpoint_success = future.result()
-                    all_tweets.extend(tweets)
-                    
-                    # Use user_info from first successful endpoint
-                    if endpoint_user_info and not user_info:
-                        user_info = endpoint_user_info
-                    
-                    # Track if any endpoint succeeded
-                    if endpoint_success:
-                        api_fetch_succeeded = True
-                        
-                    bt.logging.debug(f"Fetched {len(tweets)} tweets from {endpoint_url.split('/')[-1]}")
-                except Exception as e:
-                    bt.logging.warning(f"Failed to fetch from {endpoint_url}: {e}")
-                    # Continue with other endpoints
-        
-        # Deduplicate by tweet_id (handles overlap between endpoints and pinned tweets)
-        unique_map = {t['tweet_id']: t for t in all_tweets if t.get('tweet_id')}
-        tweets = list(unique_map.values())
-        
-        # Log deduplication metrics for dual endpoint mode
-        if len(endpoints) > 1:
-            overlap_count = len(all_tweets) - len(tweets)
-            bt.logging.info(
-                f"Fetched {len(all_tweets)} total tweets from {len(endpoints)} endpoints for @{username}, "
-                f"{len(tweets)} unique ({overlap_count} duplicates removed)"
+        # Fetch from provider
+        try:
+            tweets, user_info, api_fetch_succeeded = self.provider.fetch_user_tweets(
+                username=username,
+                incremental_cutoff=incremental_cutoff,
+                tweet_limit=tweet_limit,
+                posts_only=self.posts_only
             )
-        else:
-            bt.logging.info(f"Fetched {len(tweets)} tweets for @{username}")
+            
+            if not api_fetch_succeeded:
+                bt.logging.warning(
+                    f"Provider ({self.provider_name}) returned no tweets for @{username}"
+                )
+                tweets = []
+                user_info = None
+                
+        except Exception as e:
+            bt.logging.error(
+                f"Provider ({self.provider_name}) failed for @{username}: {e}"
+            )
+            tweets = []
+            user_info = None
+            api_fetch_succeeded = False
         
         # Reset missing counter for newly fetched tweets
         for tweet in tweets:
             tweet['missing_count'] = 0
         
-        # Smart merge: combine new tweets with cached tweets, track deleted tweets
+        # Merge new tweets with cached tweets, track deleted tweets
         all_tweets = tweets.copy()
         cached_count = 0
         incremented_missing = 0
@@ -525,186 +393,58 @@ class TwitterClient:
             username=username
         )
         
-        # Cache all tweets including deleted ones
-        cache_data = {
-            'user_info': (cached_data.get('user_info') if cached_data else None) or user_info or {'username': username, 'followers_count': 0},
-            'tweets': tweets_to_cache,
-            'last_updated': datetime.now()
-        }
-        cache_user_tweets(username, cache_data)
+        # Smart merge of user_info
+        final_user_info = {'username': username, 'followers_count': 0}
+        
+        if user_info and user_info.get('followers_count', 0) > 0:
+            final_user_info = {**user_info, 'username': username}
+        elif cached_data and cached_data.get('user_info'):
+            cached_user_info = cached_data['user_info']
+            final_user_info = {
+                'username': username,
+                'followers_count': cached_user_info.get('followers_count', 0)
+            }
+        
+        # Only update cache timestamp if API fetch succeeded AND we have tweets to cache.
+        # If the API returned 0 tweets with no prior cached tweets, the result is likely
+        # a rate-limit artifact (empty timeline response after 429 retry) - skip the
+        # timestamp update so the next run retries rather than treating it as fresh.
+        if api_fetch_succeeded and tweets_to_cache:
+            cache_data = {
+                'user_info': final_user_info,
+                'tweets': tweets_to_cache,
+                'last_updated': datetime.now()
+            }
+            cache_user_tweets(username, cache_data)
+        elif api_fetch_succeeded and not tweets_to_cache:
+            bt.logging.debug(f"API succeeded but 0 tweets for @{username}, skipping cache timestamp update to allow retry")
+            cache_data = cached_data or {}
+        elif not cached_data:
+            # No cached data and API failed - store with current timestamp (no other option)
+            cache_data = {
+                'user_info': final_user_info,
+                'tweets': tweets_to_cache,
+                'last_updated': datetime.now()
+            }
+            cache_user_tweets(username, cache_data)
+        else:
+            # API failed but we have cached data - preserve original timestamps
+            # so next run will retry the API call
+            bt.logging.debug(f"API failed for @{username}, preserving original cache timestamp for retry")
+            cache_data = cached_data
         
         return {
-            'user_info': cache_data['user_info'],
+            'user_info': final_user_info,
             'tweets': visible_tweets,
             'cache_info': {
                 'cache_hit': bool(cached_data), 
                 'new_tweets': len(tweets), 
-                'cached_tweets': cached_count
+                'cached_tweets': cached_count,
+                'provider_used': self.provider_name
             }
         }
     
-    def _parse_tweet_result(self, tweet_result: Dict) -> Optional[Dict]:
-        """
-        Parse tweet data from tweet_results.result object.
-        
-        Shared parsing logic for both regular tweets and profile-conversation items.
-        """
-        try:
-            legacy = tweet_result.get('legacy', {})
-            
-            # Check for note_tweet (extended tweets)
-            note_tweet = tweet_result.get('note_tweet', {}).get('note_tweet_results', {}).get('result', {})
-            
-            if note_tweet and note_tweet.get('text'):
-                text = note_tweet['text']
-                entity_set = note_tweet.get('entity_set', {})
-                tagged_accounts = [m.get('screen_name', '').lower() 
-                                 for m in entity_set.get('user_mentions', [])]
-            else:
-                text = legacy.get('full_text', '')
-                if not text:
-                    return None
-                tagged_accounts = [m.get('screen_name', '').lower() 
-                                 for m in legacy.get('entities', {}).get('user_mentions', [])]
-            
-            # Parse retweet
-            is_retweet = text.startswith('RT @')
-            retweeted_user = None
-            retweeted_tweet_id = None
-            if is_retweet:
-                rt_match = re.match(r'RT @(\w+):', text)
-                retweeted_user = rt_match.group(1).lower() if rt_match else None
-                tagged_accounts = []
-                retweeted_status = legacy.get('retweeted_status_result', {}).get('result', {})
-                retweeted_tweet_id = retweeted_status.get('rest_id')
-            
-            # Parse quote tweet
-            is_quote = legacy.get('is_quote_status', False) and not is_retweet
-            quoted_user = None
-            quoted_tweet_id = None
-            if is_quote:
-                # Check multiple sources for quoted tweet ID (Twitter API returns it in different places)
-                # 1. Direct field in legacy object (most reliable)
-                quoted_tweet_id = legacy.get('quoted_status_id_str')
-                
-                # 2. Nested object (alternative structure)
-                if not quoted_tweet_id:
-                    quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
-                    quoted_tweet_id = quoted_status_result.get('rest_id')
-                
-                # 3. Parse from permalink URL (fallback)
-                if not quoted_tweet_id:
-                    url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
-                    match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
-                    if match:
-                        quoted_user = match.group(1).lower()
-                        quoted_tweet_id = match.group(2)
-                
-                # Extract quoted user if not already found
-                if quoted_tweet_id and not quoted_user:
-                    # Try to get from quoted_status_result
-                    try:
-                        quoted_status_result = legacy.get('quoted_status_result', {}).get('result', {})
-                        quoted_user = quoted_status_result['core']['user_results']['result']['legacy']['screen_name'].lower()
-                    except (KeyError, AttributeError, TypeError):
-                        # Fallback to permalink URL
-                        url = legacy.get('quoted_status_permalink', {}).get('expanded', '')
-                        match = re.search(r'twitter\.com/([^/]+)/status/(\d+)', url)
-                        if match:
-                            quoted_user = match.group(1).lower()
-            
-            # Extract actual author from core.user_results (not the timeline owner)
-            # This is crucial for detecting retweets that don't have "RT @" prefix
-            author = None
-            try:
-                author = tweet_result['core']['user_results']['result']['legacy']['screen_name'].lower()
-            except (KeyError, AttributeError, TypeError):
-                try:
-                    # Fallback: some API responses use 'core' instead of 'legacy'
-                    author = tweet_result['core']['user_results']['result']['core']['screen_name'].lower()
-                except (KeyError, AttributeError, TypeError):
-                    pass
-            
-            # Extract views count (at tweet_result level, not in legacy)
-            # Views object format: {"count": "123456", "state": "EnabledWithCount"} or {"state": "Enabled"}
-            # Retweets typically don't have view counts, only original tweets
-            views_obj = tweet_result.get('views', {})
-            views_count = 0
-            if views_obj.get('count'):
-                try:
-                    views_count = int(views_obj['count'])
-                except (ValueError, TypeError):
-                    views_count = 0
-            
-            return {
-                'tweet_id': tweet_result.get('rest_id', ''),
-                'created_at': legacy.get('created_at', ''),
-                'text': text,
-                'author': author,  # Actual tweet author (None if not found)
-                'tagged_accounts': tagged_accounts,
-                'retweeted_user': retweeted_user,
-                'retweeted_tweet_id': retweeted_tweet_id,
-                'quoted_user': quoted_user,
-                'quoted_tweet_id': quoted_tweet_id,
-                'lang': legacy.get('lang', 'und'),
-                'favorite_count': legacy.get('favorite_count', 0),
-                'retweet_count': legacy.get('retweet_count', 0),
-                'reply_count': legacy.get('reply_count', 0),
-                'quote_count': legacy.get('quote_count', 0),
-                'bookmark_count': legacy.get('bookmark_count', 0),
-                'views_count': views_count,
-                'in_reply_to_status_id': legacy.get('in_reply_to_status_id_str'),
-                'in_reply_to_user': legacy.get('in_reply_to_screen_name')
-            }
-        except (KeyError, AttributeError):
-            return None
-    
-    def _parse_tweet(self, entry: Dict, username: str) -> Optional[Dict]:
-        """Extract tweet data from regular tweet entry."""
-        try:
-            tweet_result = entry['content']['itemContent']['tweet_results']['result']
-            return self._parse_tweet_result(tweet_result)
-        except (KeyError, AttributeError):
-            return None
-    
-    def _extract_followers_count(self, entry: Dict) -> Optional[int]:
-        """Extract followers count from tweet entry.
-        
-        Args:
-            entry: Tweet entry from API response
-            
-        Returns:
-            Followers count if available, None otherwise
-        """
-        try:
-            user_data = entry['content']['itemContent']['tweet_results']['result']['core']['user_results']['result']['legacy']
-            return user_data.get('followers_count', 0)
-        except (KeyError, AttributeError):
-            return None
-    
-    def _parse_profile_conversation(self, entry: Dict, username: str) -> List[Dict]:
-        """Extract tweets from profile-conversation entry containing multiple tweets."""
-        tweets = []
-        
-        try:
-            items = entry.get('content', {}).get('items', [])
-            for item in items:
-                try:
-                    item_content = item.get('item', {}).get('itemContent', {})
-                    tweet_result = item_content.get('tweet_results', {}).get('result', {})
-                    
-                    if tweet_result:
-                        tweet_data = self._parse_tweet_result(tweet_result)
-                        if tweet_data:
-                            tweets.append(tweet_data)
-                except (KeyError, AttributeError):
-                    continue
-        except (KeyError, AttributeError):
-            pass
-        
-        return tweets
-    
-    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None, min_tweets: int = 1) -> bool:
+    def check_user_relevance(self, username: str, keywords: List[str], min_followers: int = 0, lang: Optional[str] = None, min_tweets: int = 1, skip_if_cache_fresh: bool = False) -> bool:
         """Check if user tweets about keywords and meets follower threshold.
         
         Args:
@@ -714,11 +454,12 @@ class TwitterClient:
             lang: Optional language filter (e.g., 'en', 'zh'). If specified, user must have at least 
                   one tweet in this language, but keywords are checked across all tweets.
             min_tweets: Minimum number of tweets containing keywords for user to be considered relevant
+            skip_if_cache_fresh: If True, skip API call if cache was updated within freshness window
         
         Returns:
             True if user is relevant (meets all criteria), False otherwise
         """
-        result = self.fetch_user_tweets(username)
+        result = self.fetch_user_tweets(username, skip_if_cache_fresh=skip_if_cache_fresh)
         
         if not result['tweets']:
             return False
@@ -746,9 +487,11 @@ class TwitterClient:
         for tweet in result['tweets']:
             text_lower = tweet['text'].lower()
             
-            # Check if tweet contains any keyword
+            # Check if tweet contains any keyword with exact matching
+            # Hashtags/cashtags: use trailing word boundary only (# and $ are non-word chars)
+            # Regular keywords: use word boundaries on both ends
             has_keyword = any(
-                kw in text_lower if kw.startswith(('#', '$'))
+                bool(re.search(re.escape(kw) + r'\b', text_lower)) if kw.startswith(('#', '$'))
                 else bool(re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
                 for kw in keywords_lower
             )
@@ -760,4 +503,100 @@ class TwitterClient:
         
         return False
     
-
+    def search_tweets(self, query: str, max_results: int = 100, sort: str = "latest") -> Dict[str, Any]:
+        """
+        Search for tweets using X-style query syntax.
+        
+        Supports standard Twitter search operators:
+        - Keywords: "bitcoin"
+        - Hashtags: "#bitcast"
+        - Mentions: "@username"
+        - Quoted tweet: "quoted_tweet_id:123456"
+        - Date filters: "since:2026-01-01 until:2026-01-15"
+        
+        Args:
+            query: Search query string with X-style operators
+            max_results: Maximum number of tweets to return (default: 100)
+            sort: Sort order - "latest" or "top" (default: "latest")
+        
+        Returns:
+            Dict with 'tweets' list and 'api_succeeded' boolean
+        """
+        try:
+            tweets, api_succeeded = self.provider.search_tweets(
+                query=query,
+                max_results=max_results,
+                sort=sort
+            )
+            
+            return {
+                'tweets': tweets,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Search failed for query '{query[:50]}...': {e}")
+            return {
+                'tweets': [],
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }
+    
+    def get_retweeters(self, tweet_id: str, max_results: int = 100) -> Dict[str, Any]:
+        """
+        Get list of usernames who retweeted a specific tweet.
+        
+        Args:
+            tweet_id: The tweet ID to get retweeters for
+            max_results: Maximum number of retweeters to return (default: 100)
+        
+        Returns:
+            Dict with 'retweeters' list (usernames) and 'api_succeeded' boolean
+        """
+        try:
+            usernames, api_succeeded = self.provider.get_retweeters(
+                tweet_id=tweet_id,
+                max_results=max_results
+            )
+            
+            return {
+                'retweeters': usernames,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Get retweeters failed for tweet {tweet_id}: {e}")
+            return {
+                'retweeters': [],
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }
+    
+    def fetch_tweet_by_id(self, tweet_id: str) -> Dict[str, Any]:
+        """
+        Fetch a single tweet by its ID.
+        
+        Args:
+            tweet_id: The tweet ID to fetch
+        
+        Returns:
+            Dict with 'tweet' (normalized dict or None) and 'api_succeeded' boolean
+        """
+        try:
+            tweet, api_succeeded = self.provider.fetch_tweet_by_id(tweet_id=tweet_id)
+            
+            return {
+                'tweet': tweet,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+            
+        except Exception as e:
+            bt.logging.error(f"Fetch tweet by ID failed for {tweet_id}: {e}")
+            return {
+                'tweet': None,
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }

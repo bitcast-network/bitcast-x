@@ -2,7 +2,10 @@
 Main tweet scorer orchestrator.
 
 Coordinates the complete tweet scoring pipeline from social map loading
-through tweet fetching, filtering, engagement analysis, and score calculation.
+through targeted search-based tweet discovery, engagement analysis, and score calculation.
+
+Uses TweetDiscovery for efficient search-based tweet retrieval instead of
+fetching all tweets from all accounts.
 """
 
 import json
@@ -10,15 +13,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import bittensor as bt
 
 from bitcast.validator.clients import TwitterClient
 from bitcast.validator.utils.config import (
     PAGERANK_RETWEET_WEIGHT,
     PAGERANK_QUOTE_WEIGHT,
-    BASELINE_TWEET_SCORE_FACTOR,
-    SOCIAL_DISCOVERY_MAX_WORKERS
+    BASELINE_TWEET_SCORE_FACTOR
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher
 from bitcast.validator.utils.date_utils import parse_brief_date
@@ -31,34 +32,8 @@ from .social_map_loader import (
     load_relationship_scores
 )
 from .tweet_filter import TweetFilter
-from .engagement_analyzer import EngagementAnalyzer
+from .tweet_discovery import TweetDiscovery
 from .score_calculator import ScoreCalculator
-
-
-def fetch_user_tweets_safe(
-    client: TwitterClient,
-    username: str,
-    force_refresh: bool = False
-) -> Tuple[List[Dict], Optional[str]]:
-    """
-    Safely fetch tweets for a user with error handling.
-    
-    Args:
-        client: TwitterClient instance
-        username: Username to fetch tweets for
-        force_refresh: If True, force cache refresh
-        
-    Returns:
-        Tuple of (tweets_list, error_message)
-    """
-    try:
-        # TwitterClient.fetch_user_tweets() validates author and ensures all tweets have the author field set
-        # Uses MAX_TWEETS_PER_FETCH from config (default: 200)
-        result = client.fetch_user_tweets(username, force_refresh=force_refresh)
-        return result.get('tweets', []), None
-    except Exception as e:
-        bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
-        return [], str(e)
 
 
 def filter_tweets_by_date(tweets: List[Dict], cutoff_start: datetime, cutoff_end: Optional[datetime] = None) -> List[Dict]:
@@ -144,18 +119,22 @@ def score_tweets_for_pool(
     qrt: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
-    force_cache_refresh: Optional[bool] = None,
     max_members: Optional[int] = None,
-    considered_accounts_limit: Optional[int] = None
+    considered_accounts_limit: Optional[int] = None,
+    thorough: bool = False,
 ) -> List[Dict]:
     """
     Score tweets for a pool based on RT/QRT engagement.
     
-    This is the main entry point for tweet scoring. It:
+    Two discovery modes:
+    - Lightweight (thorough=False): Uses search API for fast, targeted discovery
+    - Thorough (thorough=True): Fetches connected accounts' timelines for complete coverage
+    
+    Steps:
     1. Loads pool configuration and social map
-    2. Fetches tweets from connected active members
-    3. Filters tweets by date, type, language, optional tag, and optional QRT
-    4. Analyzes engagement patterns
+    2. Discovers tweets (via search or timeline, based on mode)
+    3. Filters to active/connected accounts
+    4. Gets engagement (RTs/QRTs) via direct API calls
     5. Calculates weighted scores
     6. Saves results to disk
     
@@ -166,26 +145,33 @@ def score_tweets_for_pool(
              If provided and non-empty, only tweets from accounts in this set will be scored
              If None or empty, all active members from the social map will be scored
         run_id: Optional run identifier (auto-generated if not provided)
-        tag: Optional tag/string to filter tweets by (e.g., '#bitcast', '@elon')
-             Only tweets containing this tag will be scored
-        qrt: Optional quoted tweet ID to filter by (e.g., '1983210945288569177')
-             Only tweets that quote this specific tweet ID will be scored
+        tag: Tag/string to filter tweets by (e.g., '#bitcast', '@elon')
+             At least one of tag or qrt is REQUIRED
+        qrt: Quoted tweet ID to filter by (e.g., '1983210945288569177')
+             At least one of tag or qrt is REQUIRED
         start_date: Start date for brief window (inclusive, REQUIRED)
-             Only tweets posted on or after this date will be scored
         end_date: End date for brief window (inclusive, REQUIRED)
-             Only tweets posted on or before this date will be scored
-        force_cache_refresh: If True, force cache refresh (30-day fetch instead of 4-day incremental)
+        max_members: Optional limit on active members
+        considered_accounts_limit: Optional limit on considered accounts
+        thorough: If True, use timeline-based discovery instead of search API
         
     Returns:
         List of dicts with keys: author, tweet_id, score
         Complete results are also saved to file
         
     Raises:
-        ValueError: If pool not found or social map doesn't exist
+        ValueError: If pool not found, social map doesn't exist, or neither tag nor qrt provided
     """
     start_time = time.time()
     
-    bt.logging.info(f"🔍 Starting tweet scoring: pool={pool_name}, brief={brief_id}")
+    bt.logging.info(f"Starting tweet scoring: pool={pool_name}, brief={brief_id}")
+    
+    # Validate that at least one of tag or qrt is provided
+    if not tag and not qrt:
+        raise ValueError(
+            f"Brief '{brief_id}' must specify either 'tag' or 'qrt' field. "
+            "Search-based scoring requires at least one filter."
+        )
     
     # Generate run_id if not provided
     if run_id is None:
@@ -195,7 +181,6 @@ def score_tweets_for_pool(
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             run_id = f"tweet_scoring_vali_x_{vali_hotkey}_{timestamp}"
         except RuntimeError:
-            # Global publisher not initialized - fallback to timestamp
             run_id = f"tweet_scoring_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
     bt.logging.debug(f"Run ID: {run_id}")
@@ -209,28 +194,19 @@ def score_tweets_for_pool(
     if not pool_config:
         raise ValueError(f"Pool '{pool_name}' not found in configuration")
     
-    bt.logging.debug(f"Pool config: lang={pool_config.get('lang', 'any')}, "
-                    f"max_seed_accounts={pool_config.get('max_seed_accounts', 150)}, "
-                    f"min_interaction_weight={pool_config.get('min_interaction_weight', 0)}")
+    bt.logging.debug(f"Pool config: lang={pool_config.get('lang', 'any')}")
     
-    # Set up date filtering (all dates in UTC)
+    # Validate dates
     if not start_date or not end_date:
         raise ValueError(f"Brief '{brief_id}' must specify both start_date and end_date")
     
-    cutoff_start = start_date
-    cutoff_end = end_date
     bt.logging.debug(f"Brief window: {start_date.date()} to {end_date.date()}")
+    bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}")
     
-    if tag or qrt:
-        bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}")
-    
-    # Step 2: Load social map(s) and determine active members
+    # Step 2: Load social map and determine active members
     bt.logging.debug("Loading social map")
     
-    # If brief has dates and max_members, check for multi-map scenario
-    # (brief may span social map refresh which happens every 2 weeks)
     if start_date and end_date and max_members:
-        # Load all maps that were active during brief window and merge top N
         from .social_map_loader import get_active_members_for_brief
         active_members = get_active_members_for_brief(
             pool_name=pool_name,
@@ -238,204 +214,190 @@ def score_tweets_for_pool(
             end_date=end_date,
             max_members=max_members
         )
-        # Load latest map for considered accounts and metadata
         social_map, map_file = load_latest_social_map(pool_name)
     else:
-        # Simple case: single latest map
         social_map, map_file = load_latest_social_map(pool_name)
         active_members = get_active_members(social_map, limit=max_members)
     
-    # Determine considered accounts limit with fallback:
-    # 1. Brief-level config (if provided)
-    # 2. Default (300)
+    # Get considered accounts
     DEFAULT_CONSIDERED = 300
     considered_limit = considered_accounts_limit or DEFAULT_CONSIDERED
-    
-    considered_accounts = get_considered_accounts(
-        social_map,
-        considered_limit
-    )
+    considered_accounts_list = get_considered_accounts(social_map, considered_limit)
+    considered_accounts_dict = dict(considered_accounts_list)
     
     # Load relationship scores for cabal protection
     relationship_scores, scores_usernames, scores_username_to_idx = load_relationship_scores(pool_name)
     
     bt.logging.debug(f"Social map: {map_file}")
     bt.logging.info(
-        f"  → {len(active_members)} active members"
-        f"{' (limited by brief: ' + str(max_members) + ')' if max_members else ''}, "
-        f"{len(considered_accounts)} considered accounts "
-        f"(limit: {considered_limit})"
+        f"  -> {len(active_members)} active members"
+        f"{' (limited: ' + str(max_members) + ')' if max_members else ''}, "
+        f"{len(considered_accounts_dict)} considered accounts"
     )
     
-    # Filter to only connected accounts if provided
+    # Filter to connected accounts if provided
     if connected_accounts:
         original_count = len(active_members)
         active_members = [m for m in active_members if m in connected_accounts]
-        filtered_count = len(active_members)
         
         bt.logging.info(
-            f"  → Filtered to {filtered_count} connected accounts "
-            f"(excluded {original_count - filtered_count} non-connected)"
+            f"  -> Filtered to {len(active_members)} connected accounts "
+            f"(excluded {original_count - len(active_members)} non-connected)"
         )
         
         if not active_members:
             bt.logging.warning(f"No connected accounts found in social map for pool {pool_name}")
             return []
-    else:
-        bt.logging.info("  → No connected accounts filter applied (scoring all active members)")
     
-    # Step 3: Fetch tweets from connected active members
-    bt.logging.debug("Fetching tweets from active members")
+    # Step 3: Discover tweets
+    mode_label = "thorough (timeline)" if thorough else "lightweight (search)"
+    bt.logging.info(f"Discovering tweets via {mode_label} mode")
     
     twitter_client = TwitterClient(posts_only=False)
-    member_tweets = []
-    failed_members = []
     
-    fetch_start = time.time()
-    
-    # Use ThreadPoolExecutor for parallel fetching (like social_discovery)
-    with ThreadPoolExecutor(max_workers=SOCIAL_DISCOVERY_MAX_WORKERS) as executor:
-        future_to_member = {
-            executor.submit(fetch_user_tweets_safe, twitter_client, member, force_cache_refresh): member
-            for member in active_members
-        }
-        
-        for future in as_completed(future_to_member):
-            member = future_to_member[future]
-            tweets, error = future.result()
-            
-            if error:
-                failed_members.append((member, error))
-            else:
-                member_tweets.extend(tweets)
-    
-    fetch_time = time.time() - fetch_start
-    bt.logging.info(
-        f"  → Fetched {len(member_tweets)} tweets from "
-        f"{len(active_members) - len(failed_members)}/{len(active_members)} members "
-        f"({fetch_time:.1f}s)"
+    discovery = TweetDiscovery(
+        client=twitter_client,
+        active_accounts=set(active_members),
+        considered_accounts=considered_accounts_dict,
     )
     
-    if failed_members:
-        bt.logging.debug(
-            f"Failed to fetch from {len(failed_members)} members: "
-            f"{[m for m, _ in failed_members[:5]]}"
-            f"{' and more...' if len(failed_members) > 5 else ''}"
-        )
+    discover_start = time.time()
     
-    # Step 4: Fetch tweets from considered accounts
-    bt.logging.debug("Fetching tweets from considered accounts")
-    
-    considered_tweets = []
-    considered_usernames = [username for username, _ in considered_accounts]
-    
-    # Deduplicate with active members (many will overlap)
-    unique_considered = set(considered_usernames) - set(active_members)
-    bt.logging.debug(
-        f"Fetching from {len(unique_considered)} additional considered accounts "
-        f"(total {len(considered_accounts)}, {len(active_members)} already fetched)"
-    )
-    
-    with ThreadPoolExecutor(max_workers=SOCIAL_DISCOVERY_MAX_WORKERS) as executor:
-        future_to_account = {
-            executor.submit(fetch_user_tweets_safe, twitter_client, account): account
-            for account in unique_considered
-        }
-        
-        for future in as_completed(future_to_account):
-            tweets, error = future.result()
-            if not error:
-                considered_tweets.extend(tweets)
-    
-    # Step 4.5: Deduplicate tweets by tweet_id
-    # The tweetsandreplies endpoint can return duplicates, so we need to deduplicate
-    bt.logging.debug("Deduplicating tweets by tweet_id")
-    
-    def deduplicate_tweets(tweets: List[Dict]) -> List[Dict]:
-        """Remove duplicate tweets by tweet_id, keeping first occurrence."""
-        seen = set()
-        unique = []
-        for tweet in tweets:
-            tweet_id = tweet.get('tweet_id')
-            if tweet_id and tweet_id not in seen:
-                seen.add(tweet_id)
-                unique.append(tweet)
-        return unique
-    
-    member_tweets = deduplicate_tweets(member_tweets)
-    considered_tweets = deduplicate_tweets(considered_tweets)
-    
-    bt.logging.debug(f"After deduplication: {len(member_tweets)} member tweets, {len(considered_tweets)} considered tweets")
-    
-    # Combine all tweets for engagement detection
-    all_tweets = member_tweets + considered_tweets
-    bt.logging.debug(f"Total tweets for engagement analysis: {len(all_tweets)}")
-    
-    # Step 5: Filter member tweets by date window (only tweets in brief window get scored)
-    # Note: considered_tweets are NOT filtered - they can contribute engagement from any time
-    bt.logging.debug("Filtering member tweets by brief window")
-    
-    # Filter by date - only score tweets within the brief window
-    date_filtered = filter_tweets_by_date(member_tweets, cutoff_start, cutoff_end)
-    
-    if start_date and end_date:
-        bt.logging.debug(
-            f"Date filter: {len(member_tweets)} → {len(date_filtered)} "
-            f"(brief window: {start_date.date()} to {end_date.date()})"
+    if thorough:
+        discovered_tweets = discovery.discover_tweets_from_timelines(
+            tag=tag,
+            qrt=qrt,
+            start_date=start_date,
+            end_date=end_date,
         )
     else:
-        date_range_days = (cutoff_end - cutoff_start).days
-        bt.logging.debug(
-            f"Date filter: {len(member_tweets)} → {len(date_filtered)} "
-            f"({date_range_days} day window)"
+        discovered_tweets = discovery.discover_tweets(
+            tag=tag,
+            qrt=qrt,
+            start_date=start_date,
+            end_date=end_date,
+            max_results=500,
         )
     
-    # Filter by content (language, optional tag, and optional QRT)
+    discover_time = time.time() - discover_start
+    bt.logging.info(f"  -> Discovered {len(discovered_tweets)} tweets ({discover_time:.1f}s)")
+    
+    if not discovered_tweets:
+        bt.logging.warning(f"No tweets found matching criteria for brief {brief_id}")
+        # Still save empty results for audit
+        metadata = {
+            'run_id': run_id,
+            'brief_id': brief_id,
+            'created_at': datetime.now().isoformat(),
+            'pool_name': pool_name,
+            'tag_filter': tag,
+            'qrt_filter': qrt,
+            'start_date': start_date.isoformat(),
+            'end_date': end_date.isoformat(),
+            'total_tweets_scored': 0,
+            'execution_time_seconds': round(time.time() - start_time, 2)
+        }
+        save_scored_tweets(pool_name, brief_id, [], metadata)
+        return []
+    
+    # Step 4: Filter by content (language, type)
     tweet_filter = TweetFilter(language=pool_config.get('lang'), tag=tag, qrt=qrt)
-    content_filtered = tweet_filter.filter_tweets(date_filtered)
+    filtered_tweets = tweet_filter.filter_tweets(discovered_tweets)
     
-    # Step 6: Score tweets with cabal protection and participant exclusion
-    bt.logging.debug("Calculating weighted scores")
+    bt.logging.debug(f"After content filter: {len(filtered_tweets)} tweets")
     
-    analyzer = EngagementAnalyzer()
-    calculator = ScoreCalculator(
-        considered_accounts=dict(considered_accounts),
-        relationship_scores=relationship_scores,
-        scores_username_to_idx=scores_username_to_idx
-    )
+    # Step 5: Get engagements and score tweets
+    bt.logging.info("Retrieving engagements and scoring tweets")
     
     # Exclude brief participants from contributing to each other's scores
     excluded_engagers = {m.lower() for m in active_members}
     
-    scored_tweets = calculator.score_tweets_batch(
-        content_filtered,
-        all_tweets,
-        analyzer,
+    # Initialize score calculator
+    calculator = ScoreCalculator(
+        considered_accounts=considered_accounts_dict,
+        relationship_scores=relationship_scores,
+        scores_username_to_idx=scores_username_to_idx
+    )
+    
+    score_start = time.time()
+    
+    # Fetch all engagements concurrently
+    all_engagements = discovery.get_engagements_batch(
+        tweets=filtered_tweets,
         excluded_engagers=excluded_engagers
     )
     
-    # Filter out tweets with 0 score
-    total_tweets_before_filter = len(scored_tweets)
+    # Score each tweet using pre-fetched engagements
+    scored_tweets = []
+    for tweet in filtered_tweets:
+        tweet_id = tweet.get('tweet_id', '')
+        author = tweet.get('author', '').lower()
+        engagements = all_engagements.get(tweet_id, {})
+        
+        author_influence = considered_accounts_dict.get(author, calculator.min_influence_score)
+        
+        score, details = calculator.calculate_tweet_score(
+            engagements=engagements,
+            author_influence_score=author_influence,
+            author=author
+        )
+        
+        retweets = [d['username'] for d in details if d['engagement_type'] == 'retweet']
+        quotes = [d['username'] for d in details if d['engagement_type'] == 'quote']
+        
+        scored_tweet = {
+            'tweet_id': tweet_id,
+            'author': author,
+            'text': tweet.get('text', ''),
+            'url': f"https://twitter.com/{author}/status/{tweet_id}",
+            'created_at': tweet.get('created_at', ''),
+            'lang': tweet.get('lang', 'und'),
+            'score': score,
+            'retweets': retweets,
+            'quotes': quotes,
+            'favorite_count': tweet.get('favorite_count', 0),
+            'retweet_count': tweet.get('retweet_count', 0),
+            'reply_count': tweet.get('reply_count', 0),
+            'quote_count': tweet.get('quote_count', 0),
+            'bookmark_count': tweet.get('bookmark_count', 0),
+            'views_count': tweet.get('views_count', 0)
+        }
+        
+        if tweet.get('quoted_tweet_id'):
+            scored_tweet['quoted_tweet_id'] = tweet['quoted_tweet_id']
+        
+        scored_tweets.append(scored_tweet)
+    
+    score_time = time.time() - score_start
+    bt.logging.debug(f"Scoring completed in {score_time:.1f}s")
+    
+    # Sort by score descending
+    scored_tweets.sort(key=lambda t: t['score'], reverse=True)
+    
+    # Filter out zero-score tweets
+    total_before = len(scored_tweets)
     scored_tweets = [t for t in scored_tweets if t['score'] > 0]
     
     bt.logging.debug(
-        f"Filtered out {total_tweets_before_filter - len(scored_tweets)} tweets with 0 score, "
-        f"keeping {len(scored_tweets)} tweets with engagement"
+        f"Filtered out {total_before - len(scored_tweets)} zero-score tweets, "
+        f"keeping {len(scored_tweets)} with engagement"
     )
     
     # Calculate statistics
     total_score = sum(t['score'] for t in scored_tweets)
-    tweets_with_engagement = len(scored_tweets)  # All remaining tweets have engagement
     
-    bt.logging.debug(f"  → Scored {len(scored_tweets)} tweets (total score: {total_score:.6f})")
     if scored_tweets:
-        bt.logging.debug(f"  Avg score: {total_score / len(scored_tweets):.6f}, "
-                        f"Highest: {scored_tweets[0]['score']:.6f} (@{scored_tweets[0]['author']})")
+        bt.logging.info(
+            f"  -> Scored {len(scored_tweets)} tweets (total: {total_score:.6f})"
+        )
+        bt.logging.debug(
+            f"  Avg: {total_score / len(scored_tweets):.6f}, "
+            f"Highest: {scored_tweets[0]['score']:.6f} (@{scored_tweets[0]['author']})"
+        )
     
-    # Step 7: Build metadata
+    # Step 6: Save results
     bt.logging.debug("Saving results")
     
-    # Try to get validator hotkey
     validator_hotkey = None
     try:
         publisher = get_global_publisher()
@@ -455,15 +417,14 @@ def score_tweets_for_pool(
         'end_date': end_date.isoformat(),
         'date_range_days': (end_date - start_date).days,
         'total_tweets_scored': len(scored_tweets),
-        'tweets_with_engagement': tweets_with_engagement,
+        'tweets_with_engagement': len(scored_tweets),
         'active_members_count': len(active_members),
         'max_members_limit': max_members,
-        'max_members_source': 'brief' if max_members else 'default',
-        'considered_accounts_count': len(considered_accounts),
+        'considered_accounts_count': len(considered_accounts_dict),
         'considered_accounts_limit': considered_limit,
-        'considered_accounts_source': 'brief' if considered_accounts_limit else 'default',
         'pool_language': pool_config.get('lang'),
         'social_map_file': map_file,
+        'scoring_method': 'search_based',
         'weights': {
             'retweet_weight': PAGERANK_RETWEET_WEIGHT,
             'quote_weight': PAGERANK_QUOTE_WEIGHT,
@@ -472,15 +433,14 @@ def score_tweets_for_pool(
         'execution_time_seconds': round(time.time() - start_time, 2)
     }
     
-    # Save results
     output_file = save_scored_tweets(pool_name, brief_id, scored_tweets, metadata)
     
     # Final summary
     total_time = time.time() - start_time
-    bt.logging.debug(f"✅ Tweet scoring complete: {len(scored_tweets)} tweets scored ({total_time:.1f}s)")
+    bt.logging.info(f"Tweet scoring complete: {len(scored_tweets)} tweets scored ({total_time:.1f}s)")
     bt.logging.debug(f"Output: {output_file}")
     
-    # Return simplified data structure for programmatic use
+    # Return simplified data structure
     result = [
         {
             'author': tweet['author'],
@@ -519,11 +479,11 @@ if __name__ == "__main__":
             default=None,
             help="Brief identifier (fetches pool, dates, filters from brief server) (required)"
         )
-        
         parser.add_argument(
-            "--force-cache-refresh",
+            "--thorough",
             action="store_true",
-            help="Force cache refresh - ignores freshness check (overrides config)"
+            default=False,
+            help="Use thorough (timeline-based) discovery instead of search API"
         )
         
         # Build args list from command line
@@ -571,12 +531,6 @@ if __name__ == "__main__":
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"tweet_scoring_cli_{timestamp}"
         
-        # Determine force_cache_refresh (CLI flag overrides config)
-        force_cache_refresh = config.force_cache_refresh if hasattr(config, 'force_cache_refresh') and config.force_cache_refresh else None
-        
-        if force_cache_refresh:
-            bt.logging.info("Force cache refresh enabled - ignoring cache freshness check")
-        
         # Load connected accounts from database (matching production behavior)
         bt.logging.info(f"Loading connected accounts from database for pool '{pool_name}'...")
         db = ConnectionDatabase()
@@ -605,9 +559,9 @@ if __name__ == "__main__":
             qrt=qrt,
             start_date=start_date,
             end_date=end_date,
-            force_cache_refresh=force_cache_refresh,
             max_members=brief_max_members,
-            considered_accounts_limit=brief_max_considered
+            considered_accounts_limit=brief_max_considered,
+            thorough=config.thorough
         )
         
         # Print summary

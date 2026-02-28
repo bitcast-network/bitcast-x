@@ -5,7 +5,7 @@ Uses SQLite with a single connections table for all pools.
 """
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 import bittensor as bt
@@ -54,6 +54,11 @@ class ConnectionDatabase:
         - account_username: Twitter username that posted the tag
         - added: Timestamp when first discovered
         - updated: Timestamp of last update (for duplicate detection)
+        - referral_code: Raw referral code (if provided)
+        - referred_by: Decoded X handle of referrer (if provided)
+        - referee_amount: USD bonus for the referee (default 50.0)
+        - referrer_amount: USD bonus for the referrer (default 50.0)
+        - payout_date: Date when referral bonus is paid (nullable, set once)
         
         UNIQUE constraint on (pool_name, account_username, tag) ensures one connection per pool-account-tag combination.
         """
@@ -70,10 +75,29 @@ class ConnectionDatabase:
                 account_username VARCHAR(100) NOT NULL,
                 added DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                referral_code VARCHAR(100),
+                referred_by VARCHAR(100),
+                referee_amount REAL DEFAULT 50.0,
+                referrer_amount REAL DEFAULT 50.0,
+                payout_date DATE,
                 UNIQUE(pool_name, account_username, tag)
             )
             """
             cursor.execute(create_table_sql)
+            
+            # Add columns that may be missing on existing databases
+            existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(connections)").fetchall()}
+            new_columns = [
+                ("referral_code", "VARCHAR(100)"),
+                ("referred_by", "VARCHAR(100)"),
+                ("referee_amount", "REAL DEFAULT 50.0"),
+                ("referrer_amount", "REAL DEFAULT 50.0"),
+                ("payout_date", "DATE"),
+            ]
+            for col_name, col_type in new_columns:
+                if col_name not in existing_columns:
+                    cursor.execute(f"ALTER TABLE connections ADD COLUMN {col_name} {col_type}")
+                    bt.logging.info(f"Added column {col_name} to connections table")
             
             # Create indexes for efficient querying
             indexes = [
@@ -82,6 +106,7 @@ class ConnectionDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_tweet_id ON connections(tweet_id)",
                 "CREATE INDEX IF NOT EXISTS idx_account ON connections(account_username)",
                 "CREATE INDEX IF NOT EXISTS idx_added ON connections(added)",
+                "CREATE INDEX IF NOT EXISTS idx_payout_date ON connections(payout_date)",
             ]
             
             for index_sql in indexes:
@@ -95,20 +120,19 @@ class ConnectionDatabase:
         pool_name: str,
         tweet_id: int, 
         tag: str, 
-        account_username: str
+        account_username: str,
+        referral_code: Optional[str] = None,
+        referred_by: Optional[str] = None,
+        referee_amount: float = 50.0,
+        referrer_amount: float = 50.0,
     ) -> bool:
         """
         Insert new connection or update existing one.
         
         If a connection with the same pool_name, account_username and tag already exists,
         updates the updated timestamp and tweet_id. Otherwise, inserts a new record.
+        Referral fields are only stored on the initial insert; updates preserve existing values.
         
-        Args:
-            pool_name: Name of the pool
-            tweet_id: ID of the tweet containing the tag
-            tag: The connection tag
-            account_username: Twitter username (lowercase)
-            
         Returns:
             True if a new connection was inserted, False if existing was updated
         """
@@ -118,7 +142,6 @@ class ConnectionDatabase:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             
-            # Check if connection already exists
             check_sql = """
             SELECT connection_id FROM connections
             WHERE pool_name = ? AND account_username = ? AND tag = ?
@@ -127,7 +150,6 @@ class ConnectionDatabase:
             existing = cursor.fetchone()
             
             if existing:
-                # Update existing connection
                 update_sql = """
                 UPDATE connections
                 SET tweet_id = ?, updated = ?
@@ -138,16 +160,106 @@ class ConnectionDatabase:
                 bt.logging.debug(f"Updated connection: {pool_name}/{account_username} - {tag}")
                 return False
             else:
-                # Insert new connection
                 insert_sql = """
-                INSERT INTO connections (pool_name, tweet_id, tag, account_username, added, updated)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO connections (pool_name, tweet_id, tag, account_username, added, updated,
+                                        referral_code, referred_by, referee_amount, referrer_amount)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
                 now = datetime.now(timezone.utc)
-                cursor.execute(insert_sql, (pool_name, tweet_id, tag, account_username, now, now))
+                cursor.execute(insert_sql, (pool_name, tweet_id, tag, account_username, now, now,
+                                           referral_code, referred_by, referee_amount, referrer_amount))
                 conn.commit()
                 bt.logging.debug(f"Inserted new connection: {pool_name}/{account_username} - {tag}")
                 return True
+    
+    def get_referrals_for_payout(self, payout_date: date, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get all referrals scheduled for payout on a specific date.
+        
+        Args:
+            payout_date: The date to check for payouts
+            pool_name: Optional pool name to filter by
+            
+        Returns:
+            List of referral dictionaries with connection info
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            if pool_name:
+                select_sql = """
+                SELECT * FROM connections
+                WHERE payout_date = ? AND pool_name = ?
+                ORDER BY added DESC
+                """
+                cursor.execute(select_sql, (payout_date, pool_name.lower()))
+            else:
+                select_sql = """
+                SELECT * FROM connections
+                WHERE payout_date = ?
+                ORDER BY added DESC
+                """
+                cursor.execute(select_sql, (payout_date,))
+            
+            results = cursor.fetchall()
+            return [dict(row) for row in results]
+    
+    def set_payout_date(self, connection_id: int, payout_date: date) -> bool:
+        """
+        Set payout date for a referral. Only sets if currently null (one-time).
+        
+        Args:
+            connection_id: The connection ID to update
+            payout_date: Date when referral bonus is paid
+            
+        Returns:
+            True if the date was set, False if already set
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            update_sql = """
+            UPDATE connections
+            SET payout_date = ?
+            WHERE connection_id = ? AND payout_date IS NULL
+            """
+            cursor.execute(update_sql, (payout_date, connection_id))
+            conn.commit()
+            
+            return cursor.rowcount > 0
+    
+    def get_all_connections_with_referrals(self, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get all connections that have referral information.
+        
+        Args:
+            pool_name: Optional pool name to filter by
+            
+        Returns:
+            List of connection dictionaries with referral fields
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            if pool_name:
+                select_sql = """
+                SELECT * FROM connections
+                WHERE pool_name = ? AND referred_by IS NOT NULL
+                ORDER BY added DESC
+                """
+                cursor.execute(select_sql, (pool_name.lower(),))
+            else:
+                select_sql = """
+                SELECT * FROM connections
+                WHERE referred_by IS NOT NULL
+                ORDER BY added DESC
+                """
+                cursor.execute(select_sql)
+            
+            results = cursor.fetchall()
+            return [dict(row) for row in results]
     
     def get_connections_by_tag(self, tag: str, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -344,7 +456,9 @@ class ConnectionDatabase:
                 
             elif tag.startswith('bitcast-hk:'):
                 # Hotkey tag - extract and look up
-                hotkey = tag.split('bitcast-hk:', 1)[1]
+                # Strip any referral code suffix before looking up hotkey
+                hotkey_part = tag.split('bitcast-hk:', 1)[1]
+                hotkey = hotkey_part.split('-')[0]  # Remove referral code suffix if present
                 try:
                     uid = metagraph.hotkeys.index(hotkey)
                     bt.logging.debug(f"Hotkey {hotkey} found at UID {uid}")

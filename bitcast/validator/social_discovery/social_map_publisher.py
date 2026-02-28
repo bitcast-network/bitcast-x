@@ -31,6 +31,7 @@ from bitcast.validator.utils.config import (
     HOTKEY_NAME
 )
 from bitcast.validator.utils.data_publisher import get_global_publisher, initialize_global_publisher
+from .adjacency_utils import serialize_adjacency_matrix, deserialize_adjacency_matrix
 
 
 async def publish_social_map(
@@ -38,7 +39,8 @@ async def publish_social_map(
     social_map_data: Dict,
     adjacency_matrix: np.ndarray,
     usernames: List[str],
-    run_id: str
+    run_id: str,
+    relationship_matrix: Optional[np.ndarray] = None
 ) -> bool:
     """
     Publish social map data using unified API format.
@@ -49,6 +51,7 @@ async def publish_social_map(
         adjacency_matrix: Network adjacency matrix
         usernames: Sorted list of usernames
         run_id: Validation cycle identifier
+        relationship_matrix: Optional relationship scores matrix
         
     Returns:
         bool: True if successful, False otherwise
@@ -56,13 +59,29 @@ async def publish_social_map(
     try:
         bt.logging.info(f"🗺️ Publishing social map for pool '{pool_name}' to {X_SOCIAL_MAP_ENDPOINT}")
         
-        # Create payload structure
+        # Serialize adjacency matrix in compact edge format
+        matrix_data = serialize_adjacency_matrix(
+            adjacency_matrix=adjacency_matrix,
+            relationship_matrix=relationship_matrix,
+            usernames=usernames
+        )
+        
+        # Remap local storage keys to API schema keys
+        api_matrix_data = {
+            "edges": matrix_data["adjacency_edges"],
+            "shape": matrix_data["adjacency_shape"],
+            "usernames": matrix_data.get("usernames"),
+            "format_version": matrix_data.get("format_version"),
+        }
+        if "relationship_edges" in matrix_data:
+            api_matrix_data["relationship_edges"] = matrix_data["relationship_edges"]
+            api_matrix_data["relationship_shape"] = matrix_data["relationship_shape"]
+
         payload_data = {
             "pool_name": pool_name,
             "metadata": social_map_data['metadata'],
             "accounts": social_map_data['accounts'],
-            "adjacency_matrix": adjacency_matrix.tolist(),
-            "usernames": usernames,
+            "adjacency_matrix": api_matrix_data,
             "timestamp": datetime.now().isoformat()
         }
         
@@ -132,9 +151,7 @@ async def republish_latest_social_map(
         matrix_file = social_maps_dir / f"{timestamp_prefix}_adjacency.json"
         with open(matrix_file, 'r') as f:
             matrix_data = json.load(f)
-        
-        adjacency_matrix = np.array(matrix_data['adjacency_matrix'])
-        usernames = matrix_data['usernames']
+        adjacency_matrix, relationship_matrix, usernames = deserialize_adjacency_matrix(matrix_data)
         
         # Use original run_id from metadata if not provided
         if run_id is None:
@@ -154,7 +171,8 @@ async def republish_latest_social_map(
             social_map_data=social_map_data,
             adjacency_matrix=adjacency_matrix,
             usernames=usernames,
-            run_id=run_id
+            run_id=run_id,
+            relationship_matrix=relationship_matrix
         )
         
     except Exception as e:

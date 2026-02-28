@@ -12,7 +12,9 @@ from bitcast.validator.account_connection.connection_scanner import ConnectionSc
 from bitcast.validator.social_discovery.social_discovery import run_discovery_for_stale_pools
 
 from bitcast.utils.uids import get_all_uids
-from bitcast.validator.utils.config import VALIDATOR_WAIT, ACCOUNT_CONNECTION_INTERVAL_HOURS, REWARDS_INTERVAL_HOURS
+from bitcast.validator.utils.config import (
+    VALIDATOR_WAIT, SCORING_INTERVAL_MINUTES, THOROUGH_SCORING_INTERVAL_MINUTES
+)
 from bitcast.validator.utils.data_publisher import initialize_global_publisher, get_global_publisher
 
 # Singleton for efficiency
@@ -39,13 +41,21 @@ def get_reward_orchestrator() -> RewardOrchestrator:
 
 
 async def forward(self):
-    """Forward function with integrated scheduling for all validator operations."""
-    # Run forward every hour on the hour (:00) and half hour (:30)
-    if self.step % 30 != 0:
+    """
+    Forward function for standard and discovery modes.
+    
+    Performs full validation (account connection, tweet scoring, filtering, rewards).
+    - Standard mode: Downloads social maps from reference validator
+    - Discovery mode: Generates social maps via social discovery
+    """
+    # Run forward every SCORING_INTERVAL_MINUTES
+    if self.step % SCORING_INTERVAL_MINUTES != 0:
         time.sleep(VALIDATOR_WAIT)
         return
 
-    bt.logging.info(f"🚀 Starting validation cycle (step {self.step})")
+    from bitcast.validator.utils.config import VALIDATOR_MODE
+    mode_label = "STANDARD" if VALIDATOR_MODE == "standard" else "DISCOVERY"
+    bt.logging.info(f"Starting validation cycle - {mode_label} mode (step {self.step})")
     
     # Initialize global publisher if not already done
     try:
@@ -55,33 +65,42 @@ async def forward(self):
         bt.logging.debug("Global data publisher initialized")
 
     try:
-        # Account connection scan (every 1 hour at :00)
-        if self.step % (ACCOUNT_CONNECTION_INTERVAL_HOURS * 60) == 30:
-            bt.logging.info("🔗 Starting account connection scan for all pools...")
-            scanner = ConnectionScanner(lookback_days=7)
-            summary = await scanner.scan_all_pools()
-            bt.logging.info(
-                f"Account connection scan complete: {summary['pools_scanned']} pools, "
-                f"{summary['tags_found']} tags, {summary['new_connections']} new"
-            )
+        # Social map handling - mode-specific behavior
+        if VALIDATOR_MODE == 'discovery':
+            results = await run_discovery_for_stale_pools()
+            if results:
+                bt.logging.info(f"Social discovery complete for {len(results)} pool(s): {list(results.keys())}")
+        else:
+            # Standard mode: Download social maps from reference validator (every 12 hours)
+            if self.step % (12 * 60) == 0:
+                from bitcast.validator.social_discovery.social_map_downloader import download_stale_social_maps
+                bt.logging.info("Checking for stale social maps...")
+                downloaded = await download_stale_social_maps()
+                if downloaded:
+                    bt.logging.info(f"Downloaded {len(downloaded)} social map(s): {', '.join(downloaded)}")
         
-        # Social discovery (bi-weekly on Sundays, for stale pools)
-        results = await run_discovery_for_stale_pools()
-        if results:
-            bt.logging.info(f"Social discovery complete for {len(results)} pool(s): {list(results.keys())}")
+        # Account connection scan
+        bt.logging.info("Starting account connection scan...")
+        scanner = ConnectionScanner()
+        summary = await scanner.scan_all_pools()
+        bt.logging.info(
+            f"Connection scan complete: {summary['pools_scanned']} pools, "
+            f"{summary['tags_found']} tags, {summary['new_connections']} new"
+        )
         
-        # Reward engine (every 1 hour at :30, staggered from account scan)
-        if self.step % (REWARDS_INTERVAL_HOURS * 60) == 0:
-            bt.logging.info("💰 Starting reward engine...")
-            miner_uids = get_all_uids(self)
-            orchestrator = get_reward_orchestrator()
-            rewards, _ = await orchestrator.calculate_rewards(self, miner_uids)
-            
-            bt.logging.info("UID Rewards:")
-            for uid, reward in zip(miner_uids, rewards):
-                bt.logging.info(f"UID {uid}: {reward:.6f}")
-            
-            self.update_scores(rewards, miner_uids)
+        # Reward engine
+        is_thorough = self.step % THOROUGH_SCORING_INTERVAL_MINUTES == 0
+        mode = "thorough (timeline)" if is_thorough else "lightweight (search)"
+        bt.logging.info(f"Starting reward engine ({mode} discovery)...")
+        miner_uids = get_all_uids(self)
+        orchestrator = get_reward_orchestrator()
+        rewards = await orchestrator.calculate_rewards(self, miner_uids, thorough=is_thorough)
+        
+        bt.logging.info("UID Rewards:")
+        for uid, reward in zip(miner_uids, rewards):
+            bt.logging.info(f"UID {uid}: {reward:.6f}")
+        
+        self.update_scores(rewards, miner_uids)
         
     except Exception as e:
         bt.logging.error(f"Error in validation cycle: {e}")

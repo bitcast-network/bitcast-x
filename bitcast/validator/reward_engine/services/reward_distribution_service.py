@@ -1,10 +1,9 @@
 """Handles final reward distribution - extracted from reward.py normalization and allocation logic."""
 
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 import bittensor as bt
 from ..models.emission_target import EmissionTarget
-from ..models.evaluation_result import EvaluationResultCollection
 from .treasury_allocation import allocate_subnet_treasury
 
 
@@ -14,25 +13,14 @@ class RewardDistributionService:
     def calculate_distribution(
         self,
         emission_targets: List[EmissionTarget],
-        evaluation_results: EvaluationResultCollection,
         briefs: List[Dict[str, Any]],
         uids: List[int]
-    ) -> Tuple[np.ndarray, List[dict]]:
+    ) -> np.ndarray:
         """Calculate final reward distribution from emission targets."""
         try:
-            # Convert emission targets to raw weights matrix
             raw_weights_matrix = self._extract_raw_weights_matrix(emission_targets, len(uids))
-            
-            # Normalize weights into final rewards
-            rewards, rewards_matrix, brief_emission_percentages = self._normalize_weights(raw_weights_matrix, briefs, uids)
-            
-            # Create stats from evaluation results
-            stats_list = self._create_stats_list(evaluation_results, uids, brief_emission_percentages)
-            
-            # Apply subnet treasury allocation
-            final_rewards = allocate_subnet_treasury(rewards, uids)
-            
-            return final_rewards, stats_list
+            rewards = self._normalize_weights(raw_weights_matrix, briefs, uids)
+            return allocate_subnet_treasury(rewards, uids)
             
         except Exception as e:
             bt.logging.error(f"Error in reward distribution: {e}")
@@ -76,33 +64,21 @@ class RewardDistributionService:
         weights_matrix: np.ndarray, 
         briefs: List[Dict[str, Any]], 
         uids: List[int]
-    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    ) -> np.ndarray:
         """Normalize weights into final reward distribution."""
         if weights_matrix.size == 0:
             bt.logging.warning("Empty weights matrix - returning zero rewards")
-            return np.zeros(len(uids)), np.zeros((len(uids), 0)), {}
+            return np.zeros(len(uids))
         
-        # Apply caps and global constraints
         normalized = self._apply_emission_constraints(weights_matrix, briefs)
-        
-        # Sum to get final rewards
         rewards = self._sum_to_final_rewards(normalized, uids)
         
         final_total = float(np.sum(rewards))
         final_non_zero = np.count_nonzero(rewards)
         max_reward = float(np.max(rewards)) if len(rewards) > 0 else 0.0
-        
         bt.logging.debug(f"Normalized rewards: {final_non_zero}/{len(uids)} miners, total={final_total:.4f}, max={max_reward:.6f}")
         
-        # Calculate brief emission percentages for stats
-        brief_emission_percentages = {}
-        for brief_idx, brief in enumerate(briefs):
-            brief_percentage = normalized[:, brief_idx].sum()
-            brief_id = brief.get('id', f'brief_{brief_idx}')
-            brief_emission_percentages[brief_id] = brief_percentage
-            bt.logging.debug(f"Brief {brief_id}: {brief_percentage:.6f} emission %")
-        
-        return rewards, normalized, brief_emission_percentages
+        return rewards
     
     def _apply_emission_constraints(
         self, 
@@ -156,51 +132,6 @@ class RewardDistributionService:
         
         return rewards
     
-    def _create_stats_list(
-        self,
-        evaluation_results: EvaluationResultCollection,
-        uids: List[int],
-        brief_emission_percentages: Dict[str, float] = None
-    ) -> List[dict]:
-        """Create simplified stats list from evaluation results."""
-        stats_list = []
-        
-        for uid in uids:
-            eval_result = evaluation_results.get_result(uid)
-            
-            if eval_result:
-                # Convert evaluation result to stats format
-                stats = {
-                    "scores": eval_result.aggregated_scores,
-                    "uid": uid
-                }
-                
-                # Add account details
-                for account_id, account_result in eval_result.account_results.items():
-                    stats[account_id] = {
-                        "platform_data": account_result.platform_data,
-                        "content": account_result.content,
-                        "scores": account_result.scores,
-                        "performance_stats": account_result.performance_stats
-                    }
-                
-                # Add metagraph info if available
-                if eval_result.metagraph_info:
-                    stats["metagraph"] = eval_result.metagraph_info
-            else:
-                # Minimal stats for missing results
-                stats = {"scores": {}, "uid": uid}
-            
-            stats_list.append(stats)
-        
-        # Add brief emission percentages to the first stats entry (BA requirement)
-        if stats_list and brief_emission_percentages:
-            stats_list[0]["brief_emission_percentages"] = brief_emission_percentages
-        
-        return stats_list
-    
-    def _error_fallback(self, uids: List[int]) -> Tuple[np.ndarray, List[dict]]:
-        """Simple error fallback that gives all rewards to UID 0."""
-        rewards = np.array([1.0 if uid == 0 else 0.0 for uid in uids])
-        stats_list = [{"scores": {}, "uid": uid} for uid in uids]
-        return rewards, stats_list
+    def _error_fallback(self, uids: List[int]) -> np.ndarray:
+        """Error fallback that gives all rewards to UID 0."""
+        return np.array([1.0 if uid == 0 else 0.0 for uid in uids])

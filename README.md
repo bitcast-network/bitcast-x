@@ -36,7 +36,7 @@ Visit [x.bitcast.network](https://x.bitcast.network/) for the simplest setup:
 3. Click "Generate Tag" to receive your unique connection tag
 4. Post a tweet containing your tag to link your X account
 5. Complete briefs(https://x.bitcast.network/) to start earning!
-6. Rewards are distributed daily through a managed UID (UID 68)
+6. Rewards are distributed daily through a managed UID (UID 114)
 
 *Note: Emissions will incur a 5% fee*
 
@@ -108,10 +108,19 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 - **Quote Tweet Requirements**: Some briefs require quote tweets of specific posts
 - **Quality Filter**: Tweets portraying sponsors negatively will fail evaluation
 
-### 6. Reward Distribution
+### 6. Referral Program
+
+- **Referral Codes**: Miners can refer others by appending a referral code to their connection tag:
+  - `bitcast-hk:{substrate_hotkey}-{referral_code}`
+  - `bitcast-x{identifier}-{referral_code}`
+- **Referral Code Format**: A Base64url-encoded X handle of the referrer (e.g., `@bitcast_network` → `Yml0Y2FzdF9uZXR3b3Jr`)
+- **Activation**: Referral bonuses activate once the referee participates in a brief (has tweets passing the filter)
+- **Bonus Payout**: Both referee and referrer receive a $50 bonus, paid out the day after activation
+
+### 7. Reward Distribution
 
 - **Budget Allocation**: Each brief has a daily budget distributed over 7-day emissions period
-- **Delay Period**: 2-day delay after brief closes before rewards begin (for engagement verification)
+- **Delay Period**: 1-day delay after brief closes before rewards begin (for engagement verification)
 - **Proportional Distribution**: Rewards distributed based on relative tweet scores
 - **Treasury Allocation**: Unclaimed emissions go to subnet treasury
 
@@ -127,15 +136,21 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 
 ### API Setup Requirements
 
-**Weight Copy Mode (Recommended - Default)**
-- No API keys required!
-- Fetches weights from primary validator
-- Much simpler setup
+Choose your mode based on desired level of independence:
 
-**Full Validation Mode (Optional)**
-1. **RapidAPI Key** - [The Old Bird V2](https://rapidapi.com/datahungrybeast/api/twitter-v24) - Mega subscription ($200/month)
-2. **Chutes API Key** - Get from [Chutes.ai](https://chutes.ai/) - Plus subscription ($10/month)
-3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/)
+**Weight Copy Mode (Recommended - Default)**
+- No API keys required
+
+**Standard & Discovery Modes (Independent Validation / Full Independence)**
+
+To run in either Standard or Discovery mode, you need these API keys and subscriptions:
+- **Twitter API Provider**: Choose one  
+  - **Desearch.ai** (Recommended): [Desearch.ai](https://desearch.ai) — modern Twitter data API  
+  - **RapidAPI** (Alternative): [twitter-v24](https://rapidapi.com/Glavier/api/twitter-v24) (Mega Plan)
+- **Chutes API Key**: [Chutes.ai](https://chutes.ai/) (Plus subscription ~$10/month)
+- **Weights & Biases API Key**: [wandb.ai](https://wandb.ai/) — for monitoring and debugging
+
+_Discovery mode additionally requires higher API Quota_
 
 ---
 
@@ -165,12 +180,24 @@ cp bitcast/validator/.env.example bitcast/validator/.env
 Edit `bitcast/validator/.env` and set your wallet information:
 - `WALLET_NAME`: Your Bittensor wallet name (coldkey)
 - `HOTKEY_NAME`: Your validator hotkey name
-- `WC_MODE`: Set to `true` for weight copy mode (recommended, default)
+- `VALIDATOR_MODE`: Choose validator mode (see below)
 
-For **full validation mode only** (`WC_MODE=false`), also set:
-- `RAPID_API_KEY`: Your RapidAPI key
+**Validator Modes (choose based on desired level of independence):**
+
+- `weight_copy` (default): Minimal independence - fetches pre-calculated weights from reference validator via API. Requires no API keys. **Use this if you want to participate with minimal setup and resources.**
+
+- `standard` (independent validation): Medium independence - performs full validation (account scanning, tweet scoring, filtering, rewards) using social maps downloaded from reference validator. Downloads maps at startup if missing, then periodically refreshes. Requires Twitter, Chutes, and WandB API keys. **Use this if you want to compute your own weights independently while relying on others for social mapping.**
+
+- `discovery` (full independence): Complete independence - performs full validation including social discovery/mapping. Downloads social maps at startup for quick start, then generates fresh maps bi-weekly via social discovery. Requires all API keys. **Use this if you want complete independence.**
+
+All modes can be run from zero state and will automatically download necessary data at startup.
+
+For **standard and discovery modes**, also set:
+- `TWITTER_API_PROVIDER`: Choose provider: `desearch` (default) or `rapidapi`
+- `DESEARCH_API_KEY`: Your Desearch.ai API key (format: dt_$YOUR_KEY) - required if using Desearch
+- `RAPID_API_KEY`: Your RapidAPI key - only required if using RapidAPI provider
 - `CHUTES_API_KEY`: Your Chutes API key
-- `WANDB_API_KEY`: Your Weights & Biases API key
+- `WANDB_API_KEY`: Your Weights & Biases API key (for monitoring and debugging)
 
 ### 4. Register on Bittensor Network
 
@@ -196,7 +223,7 @@ btcli subnet register \
 ./scripts/run_validator.sh
 ```
 
-The validator automatically detects your configuration and runs in the appropriate mode (WC or full validation).
+The validator automatically detects your configuration and runs in the appropriate mode (weight_copy, standard, or discovery).
 
 ### Process Management with PM2
 
@@ -215,7 +242,7 @@ bitcast-x/
 │   ├── tweet_filtering/      # LLM-based brief evaluation
 │   ├── reward_engine/        # Reward calculation and distribution
 │   ├── weight_copy/          # Weight copy mode implementation
-│   ├── api/                  # Weights API for WC validators
+│   ├── api/                  # Weights API for weight_copy validators
 │   ├── clients/              # External API clients (Twitter, LLM)
 │   └── utils/                # Shared utilities and configuration
 ├── scripts/                  # Setup and run scripts

@@ -1,49 +1,37 @@
 """
 PageRank-based social discovery engine for X platform.
 
-Replaces random scoring with real Twitter network analysis using PageRank algorithm.
+Provides TwitterNetworkAnalyzer for PageRank-based social network analysis.
 Analyzes interactions (mentions, retweets, quotes) to discover social influence networks.
 """
 
-import asyncio
 import json
-import os
 import numpy as np
 import networkx as nx
 import time
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import bittensor as bt
-import argparse
-from dotenv import load_dotenv
 
-# Initialize environment BEFORE importing custom modules when running standalone
-if __name__ == "__main__":
-    # Load environment variables from .env file
-    env_path = Path(__file__).parents[1] / '.env'  # bitcast/validator/.env
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
-        print(f"Loaded environment variables from {env_path}")
-
-# Now import custom modules that use bt.logging
 from bitcast.validator.clients.twitter_client import TwitterClient
 from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 from .pool_manager import PoolManager
-from .social_map_publisher import publish_social_map, republish_latest_social_map
 from bitcast.validator.utils.config import (
     PAGERANK_MENTION_WEIGHT,
     PAGERANK_RETWEET_WEIGHT,
     PAGERANK_QUOTE_WEIGHT,
     PAGERANK_ALPHA,
-    ENABLE_DATA_PUBLISH,
-    WALLET_NAME,
-    HOTKEY_NAME,
-    SOCIAL_DISCOVERY_MAX_WORKERS
+    SOCIAL_DISCOVERY_MAX_WORKERS,
+    SOCIAL_DISCOVERY_LOOKBACK,
+    SOCIAL_DISCOVERY_FETCH_DAYS
 )
-from bitcast.validator.utils.data_publisher import get_global_publisher, initialize_global_publisher
 from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
+from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
+
+# Reference date for social discovery scheduling
+DISCOVERY_REFERENCE_DATE = date(2025, 11, 9)
 
 
 class TwitterNetworkAnalyzer:
@@ -57,22 +45,36 @@ class TwitterNetworkAnalyzer:
     - Score normalization
     """
     
-    def __init__(self, twitter_client: Optional[TwitterClient] = None, max_workers: Optional[int] = None, force_cache_refresh: bool = False, posts_only: bool = True):
+    def __init__(
+        self,
+        twitter_client: Optional[TwitterClient] = None,
+        max_workers: Optional[int] = None,
+        fetch_days: Optional[int] = None,
+        posts_only: bool = True,
+        max_data_age_days: Optional[int] = None,
+        skip_if_cache_fresh: bool = False,
+    ):
         """
         Initialize analyzer with optional custom Twitter client.
-        
+
         Args:
             twitter_client: Optional TwitterClient instance (typically for testing/mocking).
-                          If provided, force_cache_refresh and posts_only are ignored.
+                          If provided, posts_only is ignored.
             max_workers: Number of concurrent workers (1=sequential, 2+=concurrent)
                         If None, uses SOCIAL_DISCOVERY_MAX_WORKERS config
-            force_cache_refresh: If True, force Twitter API cache refresh (30-day fetch).
-                               Passed to fetch_user_tweets() calls.
+            fetch_days: Number of days of tweet history to fetch per account.
+                       If None, uses SOCIAL_DISCOVERY_FETCH_DAYS default (30 days).
             posts_only: If True, use only /user/tweets endpoint (faster, saves quota).
                        Default: True for social discovery. Only applied when twitter_client is not provided.
+            max_data_age_days: Maximum age of cached tweets to use in analysis (in days).
+                              If None, uses all cached data. Default: None
+            skip_if_cache_fresh: If True, skip API calls if cache was updated within freshness window.
+                                Default: False for full fetches, useful for extended iterations.
         """
         self.twitter_client = twitter_client or TwitterClient(posts_only=posts_only)
-        self.force_cache_refresh = force_cache_refresh
+        self.fetch_days = fetch_days or SOCIAL_DISCOVERY_FETCH_DAYS
+        self.max_data_age_days = max_data_age_days
+        self.skip_if_cache_fresh = skip_if_cache_fresh
         
         # PageRank weights
         self.tag_weight = PAGERANK_MENTION_WEIGHT
@@ -90,24 +92,30 @@ class TwitterNetworkAnalyzer:
         else:
             bt.logging.info("Sequential mode (concurrency disabled)")
     
-    def _fetch_tweets_safe(self, username: str) -> Tuple[str, List[Dict], Dict, Optional[str]]:
+    def _fetch_tweets_safe(self, username: str, skip_if_cache_fresh: Optional[bool] = None) -> Tuple[str, List[Dict], Dict, Optional[str]]:
         """
         Fetch tweets for a user with error handling.
-        
+
         Args:
             username: Twitter username
-            
+            skip_if_cache_fresh: If provided, overrides instance's skip_if_cache_fresh setting
+
         Returns:
             Tuple of (username_lower, tweets_list, user_info, error_message)
         """
         try:
-            result = self.twitter_client.fetch_user_tweets(username.lower(), force_refresh=self.force_cache_refresh)
+            skip_fresh = skip_if_cache_fresh if skip_if_cache_fresh is not None else self.skip_if_cache_fresh
+            result = self.twitter_client.fetch_user_tweets(
+                username.lower(),
+                fetch_days=self.fetch_days,
+                skip_if_cache_fresh=skip_fresh,
+            )
             return username.lower(), result['tweets'], result['user_info'], None
         except Exception as e:
             bt.logging.warning(f"Failed to fetch tweets for @{username}: {e}")
             return username.lower(), [], {'username': username.lower(), 'followers_count': 0}, str(e)
     
-    def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None, min_tweets: int = 1) -> Tuple[str, bool]:
+    def _check_relevance_safe(self, username: str, keywords: List[str], min_followers: int, lang: Optional[str] = None, min_tweets: int = 1, skip_if_cache_fresh: bool = False) -> Tuple[str, bool]:
         """
         Check user relevance with error handling.
         
@@ -117,33 +125,40 @@ class TwitterNetworkAnalyzer:
             min_followers: Minimum follower threshold
             lang: Optional language filter
             min_tweets: Minimum number of tweets containing keywords
+            skip_if_cache_fresh: If True, skip API call if cache was updated within freshness window
             
         Returns:
             Tuple of (username, is_relevant)
         """
         try:
-            return username, self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets)
+            return username, self.twitter_client.check_user_relevance(
+                username, keywords, min_followers, lang, min_tweets,
+                skip_if_cache_fresh=skip_if_cache_fresh,
+            )
         except Exception as e:
             bt.logging.warning(f"Relevance check failed for @{username}: {e}")
             return username, False
     
     def analyze_network(
-        self, 
-        seed_accounts: List[str], 
-        keywords: List[str], 
+        self,
+        seed_accounts: List[str],
+        keywords: List[str],
         min_followers: int = 0,
         lang: Optional[str] = None,
         min_tweets: int = 1,
-        min_interaction_weight: float = 0
+        min_interaction_weight: float = 0,
+        core_accounts: Optional[Set[str]] = None,
+        use_personalized_pagerank: bool = False,
+        skip_if_cache_fresh: Optional[bool] = None
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
-        
+
         Scores are calculated as: PageRank × (total_pool_followers / 1000)
         This gives "absolute influence" that can be compared across pools with different
         difficulty levels (pools with more followers = higher difficulty).
         The division by 1000 keeps scores at a reasonable scale for UIs.
-        
+
         Args:
             seed_accounts: Initial accounts to analyze
             keywords: Keywords to filter accounts by
@@ -153,6 +168,13 @@ class TwitterNetworkAnalyzer:
             min_interaction_weight: Minimum total incoming interaction weight for quality filtering.
                                    Accounts with incoming weight below threshold are filtered out.
                                    Seed accounts are always preserved.
+            core_accounts: Optional set of "core" accounts for personalized PageRank.
+                          When provided with use_personalized_pagerank=True, the random walk
+                          restart distribution is biased toward these accounts.
+            use_personalized_pagerank: If True (and core_accounts provided), use personalized
+                                      PageRank biased toward core accounts instead of standard PageRank.
+            skip_if_cache_fresh: If provided, overrides the instance's skip_if_cache_fresh setting
+                                for this analyze_network call only.
             
         Returns:
             Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
@@ -163,22 +185,38 @@ class TwitterNetworkAnalyzer:
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
-        
+
+        # Relax params when seed count is low to bootstrap discovery
+        if len(seed_accounts) < 20:
+            if min_interaction_weight > 1 or min_tweets > 1:
+                bt.logging.info(
+                    f"Low seed count ({len(seed_accounts)} < 20): relaxing "
+                    f"min_interaction_weight {min_interaction_weight}→1, min_tweets {min_tweets}→1"
+                )
+                min_interaction_weight = 1
+                min_tweets = 1
+
+        # Determine if we should skip API calls based on cache freshness
+        # Use parameter override if provided, otherwise use instance setting
+        skip_if_fresh = skip_if_cache_fresh if skip_if_cache_fresh is not None else self.skip_if_cache_fresh
+        if skip_if_fresh:
+            bt.logging.info("Cache freshness check enabled (fresh if < 24h old)")
+
         # Step 1: Fetch tweets for seed accounts
         fetch_start = time.time()
         all_tweets = {}
         user_info_map = {}
         failed_accounts = []
-        
+
         if self.max_workers > 1:
             # Concurrent execution
             bt.logging.info(f"Fetching tweets concurrently ({self.max_workers} workers)...")
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_username = {
-                    executor.submit(self._fetch_tweets_safe, username): username 
+                    executor.submit(self._fetch_tweets_safe, username, skip_if_fresh): username
                     for username in seed_accounts
                 }
-                
+
                 for future in as_completed(future_to_username):
                     username, tweets, user_info, error = future.result()
                     if error:
@@ -189,18 +227,51 @@ class TwitterNetworkAnalyzer:
             # Sequential execution
             for username in seed_accounts:
                 username_lower = username.lower()
-                result = self.twitter_client.fetch_user_tweets(username_lower, force_refresh=self.force_cache_refresh)
+                result = self.twitter_client.fetch_user_tweets(
+                    username_lower,
+                    fetch_days=self.fetch_days,
+                    skip_if_cache_fresh=skip_if_fresh,
+                )
                 all_tweets[username_lower] = result['tweets']
                 user_info_map[username_lower] = result['user_info']
         
         fetch_time = time.time() - fetch_start
         total_tweets = sum(len(tweets) for tweets in all_tweets.values())
         bt.logging.info(f"Fetched {total_tweets} tweets from {len(all_tweets)} accounts in {fetch_time:.1f}s")
-        
+
         if failed_accounts:
             bt.logging.warning(f"Failed to fetch {len(failed_accounts)} accounts: {[acc for acc, _ in failed_accounts]}")
-        
-        # Step 2: Build interaction network
+
+        # Step 2: Filter tweets by age if max_data_age_days is specified
+        if self.max_data_age_days:
+            cutoff_date = datetime.now() - timedelta(days=self.max_data_age_days)
+            filtered_tweets = {}
+            total_before = sum(len(tweets) for tweets in all_tweets.values())
+
+            for username, tweets in all_tweets.items():
+                filtered = []
+                for tweet in tweets:
+                    try:
+                        if tweet.get('created_at'):
+                            tweet_date = datetime.strptime(tweet['created_at'], '%a %b %d %H:%M:%S %z %Y')
+                            # Make cutoff timezone-aware
+                            cutoff_with_tz = cutoff_date.replace(tzinfo=tweet_date.tzinfo)
+                            if tweet_date >= cutoff_with_tz:
+                                filtered.append(tweet)
+                    except Exception as e:
+                        bt.logging.debug(f"Error parsing tweet date for @{username}: {e}")
+                        # Include tweet if date parsing fails (safer than excluding)
+                        filtered.append(tweet)
+                filtered_tweets[username] = filtered
+
+            all_tweets = filtered_tweets
+            total_after = sum(len(tweets) for tweets in all_tweets.values())
+            bt.logging.info(
+                f"Filtered tweets by age ({self.max_data_age_days} days max): "
+                f"{total_after}/{total_before} tweets remain ({total_before - total_after} filtered out)"
+            )
+
+        # Step 3: Build interaction network
         interaction_weights = {}  # (from_user, to_user) -> max weight for influence (PageRank)
         relationship_scores = {}  # (from_user, to_user) -> sum of weighted interactions for cabal protection
         discovered_users = set()
@@ -221,6 +292,9 @@ class TwitterNetworkAnalyzer:
                 
                 # Handle mentions
                 for tagged_user in tweet.get('tagged_accounts', []):
+                    # Skip invalid usernames (numeric IDs from suspended/deleted accounts)
+                    if not is_valid_twitter_username(tagged_user):
+                        continue
                     if tagged_user != from_user:
                         key = (from_user, tagged_user)
                         # For influence score: max weight
@@ -235,6 +309,9 @@ class TwitterNetworkAnalyzer:
                 # Handle retweets
                 if tweet.get('retweeted_user'):
                     retweeted_user = tweet['retweeted_user']
+                    # Skip invalid usernames (numeric IDs from suspended/deleted accounts)
+                    if not is_valid_twitter_username(retweeted_user):
+                        continue
                     if retweeted_user != from_user:
                         key = (from_user, retweeted_user)
                         # For influence score: max weight
@@ -249,6 +326,9 @@ class TwitterNetworkAnalyzer:
                 # Handle quotes
                 if tweet.get('quoted_user'):
                     quoted_user = tweet['quoted_user']
+                    # Skip invalid usernames (numeric IDs from suspended/deleted accounts)
+                    if not is_valid_twitter_username(quoted_user):
+                        continue
                     if quoted_user != from_user:
                         key = (from_user, quoted_user)
                         # For influence score: max weight
@@ -278,10 +358,10 @@ class TwitterNetworkAnalyzer:
                 bt.logging.info(f"Checking relevance concurrently ({self.max_workers} workers)...")
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
-                        executor.submit(self._check_relevance_safe, username, keywords, min_followers, lang, min_tweets): username
+                        executor.submit(self._check_relevance_safe, username, keywords, min_followers, lang, min_tweets, skip_if_fresh): username
                         for username in all_accounts_to_check
                     }
-                    
+
                     for future in as_completed(futures):
                         username, is_relevant = future.result()
                         if is_relevant:
@@ -289,7 +369,7 @@ class TwitterNetworkAnalyzer:
             else:
                 # Sequential relevance checking
                 for username in all_accounts_to_check:
-                    if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets):
+                    if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets, skip_if_cache_fresh=skip_if_fresh):
                         relevant_users.add(username)
             
             relevance_time = time.time() - relevance_start
@@ -370,7 +450,23 @@ class TwitterNetworkAnalyzer:
         for (from_user, to_user), weight in interaction_weights.items():
             G.add_edge(from_user, to_user, weight=weight)
         
-        pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
+        if use_personalized_pagerank and core_accounts:
+            # Personalized PageRank biased toward core accounts
+            personalization = {
+                node: 1.0 if node in core_accounts else 0.0
+                for node in G.nodes()
+            }
+            if sum(personalization.values()) > 0:
+                bt.logging.info(f"Using personalized PageRank biased toward {int(sum(personalization.values()))} core accounts")
+                pagerank_scores = nx.pagerank(
+                    G, weight='weight', alpha=self.alpha,
+                    personalization=personalization, max_iter=1000
+                )
+            else:
+                bt.logging.warning("No core accounts found in graph, falling back to standard PageRank")
+                pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
+        else:
+            pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
         
         # Step 5: Calculate pool difficulty and absolute influence scores
         # Pool difficulty = total followers across all pool members
@@ -436,238 +532,64 @@ class TwitterNetworkAnalyzer:
         return absolute_scores, adjacency_matrix, relationship_matrix, usernames_sorted, user_info_map, total_pool_followers
 
 
-async def discover_social_network(
-    pool_name: str = "tao", 
-    run_id: Optional[str] = None,
-    force_cache_refresh: bool = False,
-    posts_only: bool = True
-) -> str:
+def should_run_discovery_today(date_offset: int = 0, reference_date: date = DISCOVERY_REFERENCE_DATE) -> bool:
     """
-    Discover social network using PageRank network analysis.
+    Check if discovery should run today based on the date offset.
     
     Args:
-        pool_name: Name of the pool to discover social network for
-        run_id: Validation cycle identifier (auto-generated if not provided)
-        force_cache_refresh: If True, force Twitter API cache refresh for all accounts
-        posts_only: If True, use only /user/tweets endpoint (faster, saves quota). Default: True
+        date_offset: Number of days offset from reference date (0-13 for bi-weekly cycle)
+        reference_date: Reference date for calculating cycles
         
     Returns:
-        Path to saved social map file
+        True if discovery should run today, False otherwise
     """
-    # Generate default run_id with validator hotkey if not provided
-    if run_id is None:
-        try:
-            publisher = get_global_publisher()
-            vali_hotkey = publisher.wallet.hotkey.ss58_address
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            run_id = f"vali_x_{vali_hotkey}_{timestamp}"
-        except RuntimeError:
-            # Global publisher not initialized - fallback to timestamp only
-            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    from datetime import timezone
     
-    bt.logging.info(f"Discovering social network for pool: {pool_name} with run_id: {run_id}")
+    today = datetime.now(timezone.utc).date()
+    days_since_reference = (today - reference_date).days
     
-    try:
-        # Load pool configuration
-        pool_manager = PoolManager()
-        pool_config = pool_manager.get_pool(pool_name)
-        
-        if not pool_config:
-            raise Exception(f"Pool '{pool_name}' not found in configuration")
-        
-        # Get existing accounts or use initial accounts
-        social_maps_dir = Path(__file__).parent / "social_maps"
-        pool_dir = social_maps_dir / pool_name
-        
-        seed_accounts = []
-        
-        if pool_dir.exists():
-            # Look for existing social map files
-            social_map_files = [f for f in pool_dir.glob("*.json") 
-                              if not f.name.endswith('_adjacency.json') 
-                              and not f.name.endswith('_metadata.json')
-                              and not f.name.startswith('recursive_summary_')]
-            if social_map_files:
-                # Use latest social map by filename timestamp
-                latest_file = max(
-                    social_map_files,
-                    key=lambda f: parse_social_map_filename(f.name) or datetime.min.replace(tzinfo=timezone.utc)
-                )
-                with open(latest_file, 'r') as f:
-                    existing_data = json.load(f)
-                
-                # Extract top accounts by score as seeds
-                max_seed_accounts = pool_config.get('max_seed_accounts', 150)
-                
-                # Get all accounts sorted by score
-                all_accounts = [
-                    (acc, data.get('score', 0.0))
-                    for acc, data in existing_data['accounts'].items()
-                ]
-                
-                # Sort by score descending and take top N
-                all_accounts.sort(key=lambda x: x[1], reverse=True)
-                seed_accounts = [acc for acc, _ in all_accounts[:max_seed_accounts]]
-                
-                bt.logging.info(f"Using top {len(seed_accounts)} accounts (max: {max_seed_accounts}) from previous run as seeds")
-        
-        if not seed_accounts:
-            seed_accounts = pool_config['initial_accounts']
-            bt.logging.info(f"Using {len(seed_accounts)} initial accounts as seeds")
-        
-        # Analyze network
-        analyzer = TwitterNetworkAnalyzer(force_cache_refresh=force_cache_refresh, posts_only=posts_only)
-        scores, adjacency_matrix, relationship_matrix, usernames, user_info_map, total_pool_followers = analyzer.analyze_network(
-            seed_accounts=seed_accounts,
-            keywords=pool_config['keywords'],
-            min_followers=0,
-            lang=pool_config.get('lang'),
-            min_tweets=pool_config.get('min_tweets', 1),
-            min_interaction_weight=pool_config.get('min_interaction_weight', 0)
-        )
-        
-        # Create social map data structure
-        # Sort accounts by score in descending order
-        sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        
-        # Calculate scaled pool difficulty for metadata (matches score scaling)
-        scaled_pool_difficulty = total_pool_followers / 1000
-        
-        social_map_data = {
-            'metadata': {
-                'created_at': datetime.now().isoformat(),
-                'pool_name': pool_name,
-                'total_accounts': len(scores),
-                'pool_difficulty': round(scaled_pool_difficulty, 2),  # Scaled (sum/1000) for score calculations
-                'total_followers': total_pool_followers  # Raw sum of all members' followers
-            },
-            'accounts': {
-                username: {
-                    'score': score,
-                    'followers_count': user_info_map.get(username, {}).get('followers_count', 0)
-                }
-                for username, score in sorted_accounts
-            }
-        }
-        
-        # Save results
-        pool_dir.mkdir(parents=True, exist_ok=True)
-        timestamp_str = datetime.now().strftime("%Y.%m.%d_%H.%M.%S")
-        
-        # Save social map
-        social_map_file = pool_dir / f"{timestamp_str}.json"
-        with open(social_map_file, 'w') as f:
-            json.dump(social_map_data, f, indent=2)
-        
-        # Save adjacency matrix with relationship scores
-        matrix_file = pool_dir / f"{timestamp_str}_adjacency.json"
-        matrix_data = {
-            'usernames': usernames,
-            'adjacency_matrix': adjacency_matrix.tolist(),  # Max weights for influence
-            'relationship_scores': relationship_matrix.tolist(),  # Cumulative scores for cabal protection
-            'created_at': datetime.now().isoformat()
-        }
-        with open(matrix_file, 'w') as f:
-            json.dump(matrix_data, f, indent=2)
-        
-        # Save metadata file
-        metadata_file = pool_dir / f"{timestamp_str}_metadata.json"
-        
-        # Try to get validator hotkey, but don't fail if unavailable
-        validator_hotkey = None
-        try:
-            publisher = get_global_publisher()
-            validator_hotkey = publisher.wallet.hotkey.ss58_address
-        except RuntimeError as e:
-            bt.logging.debug(f"No global publisher available for metadata: {e}")
-        except Exception as e:
-            bt.logging.debug(f"Could not retrieve validator hotkey for metadata: {e}")
-        
-        metadata = {
-            'run_id': run_id,
-            'validator_hotkey': validator_hotkey,
-            'created_at': datetime.now().isoformat(),
-            'pool_name': pool_name
-        }
-        with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
-        
-        bt.logging.info(f"✅ Social discovery completed successfully! Saved results to {pool_dir}")
-        
-        # Publish social map data if enabled (fire-and-forget pattern)
-        if ENABLE_DATA_PUBLISH:
-            try:
-                success = await publish_social_map(
-                    pool_name=pool_name,
-                    social_map_data=social_map_data,
-                    adjacency_matrix=adjacency_matrix,
-                    usernames=usernames,
-                    run_id=run_id
-                )
-                if success:
-                    bt.logging.info(f"🚀 Social map data published successfully for pool {pool_name}")
-                else:
-                    bt.logging.warning(f"⚠️ Social map data publishing failed for pool {pool_name} (local results saved)")
-            except RuntimeError as e:
-                error_msg = str(e)
-                if "running event loop" in error_msg.lower() or "asyncio.run" in error_msg.lower():
-                    bt.logging.warning(f"📴 Social map publishing skipped - nested event loop conflict: {e}")
-                else:
-                    bt.logging.warning(f"📴 Social map publishing skipped: {e}")
-            except Exception as e:
-                # Log but don't fail social discovery (fire-and-forget pattern)
-                bt.logging.warning(f"⚠️ Social map publishing failed: {e} (local results saved)")
-        else:
-            bt.logging.debug("📴 Social map publishing disabled by config")
-        
-        return str(social_map_file)
-        
-    except Exception as e:
-        bt.logging.error(f"❌ Social discovery core process failed: {e}")
-        raise
+    # Apply offset and check if it's a discovery day (every 14 days)
+    adjusted_days = days_since_reference - date_offset
+    return adjusted_days >= 0 and adjusted_days % 14 == 0
 
 
 async def run_discovery_for_stale_pools() -> Dict[str, str]:
     """
-    Run social discovery only for pools that need updating today.
+    Run social discovery for pools that are scheduled to update today.
     
-    Checks each active pool's latest social map timestamp.
-    Only runs discovery for pools without a map from today (UTC).
-    Only runs every 2 weeks on Sundays.
+    Each pool can have a 'date_offset' (0-13) that determines which day in the 
+    14-day cycle it runs. This allows distributing discovery across different days.
+    
+    Checks each active pool's:
+    - date_offset configuration to see if today is its scheduled day
+    - latest social map timestamp to avoid redundant runs
     
     Always forces cache refresh to ensure fresh Twitter data for bi-weekly discovery.
     
     Returns:
         Dict mapping pool_name to social_map_path for pools that ran
     """
-    from datetime import timezone, date, timedelta
+    from datetime import timezone
     
     now = datetime.now(timezone.utc)
-    
-    # Only run on Sundays
-    if now.weekday() != 6:
-        bt.logging.debug("Not Sunday - skipping social discovery")
-        return {}
-    
-    # Only run every 2 weeks (reference: November 09, 2025)
-    reference_date = date(2025, 11, 9)
     today = now.date()
-    days_since_reference = (today - reference_date).days
-    if days_since_reference % 14 != 0:
-        next_run_date = today + timedelta(days=14 - (days_since_reference % 14))
-        bt.logging.debug(f"Skipping social discovery. Next run: {next_run_date}")
-        return {}
-    
-    bt.logging.info("🔄 Bi-weekly discovery: forcing cache refresh for fresh Twitter data")
     
     pool_manager = PoolManager()
     results = {}
+    pools_scheduled_today = []
     
     for pool_name, config in pool_manager.pools.items():
         if not config.get('active', True):
             continue
         
-        # Check if this specific pool needs update
+        # Check if this pool is scheduled to run today
+        date_offset = config.get('date_offset', 0)
+        if not should_run_discovery_today(date_offset, DISCOVERY_REFERENCE_DATE):
+            continue
+        
+        pools_scheduled_today.append(pool_name)
+        
+        # Check if this specific pool needs update (hasn't run today)
         social_maps_dir = Path(__file__).parent / "social_maps" / pool_name
         needs_update = False
         
@@ -677,7 +599,7 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
             social_map_files = [
                 f for f in social_maps_dir.glob("*.json")
                 if not f.name.endswith(('_adjacency.json', '_metadata.json'))
-                and not f.name.startswith('recursive_summary_')
+                and not f.name.startswith(('recursive_summary_', 'two_stage_summary_'))
             ]
             
             if not social_map_files:
@@ -695,81 +617,33 @@ async def run_discovery_for_stale_pools() -> Dict[str, str]:
         # Only run if needed
         if needs_update:
             try:
-                bt.logging.info(f"Running discovery for {pool_name} (no map from today)")
-                social_map_path = await discover_social_network(
-                    pool_name=pool_name, 
-                    force_cache_refresh=True,
-                    posts_only=True  # Use posts-only mode for faster discovery
+                from .recursive_discovery import two_stage_discovery
+                
+                bt.logging.info(
+                    f"Running two-stage discovery for {pool_name} "
+                    f"(offset={date_offset}, no map from today)"
+                )
+                social_map_path, _ = await two_stage_discovery(
+                    pool_name=pool_name,
+                    posts_only=True,
                 )
                 results[pool_name] = social_map_path
             except Exception as e:
                 bt.logging.error(f"Discovery failed for {pool_name}: {e}")
+        else:
+            bt.logging.debug(f"Pool {pool_name} already has map from today, skipping")
+    
+    if pools_scheduled_today:
+        bt.logging.info(
+            f"🔄 Bi-weekly discovery check: {len(pools_scheduled_today)} pool(s) scheduled today: "
+            f"{', '.join(pools_scheduled_today)}"
+        )
+    else:
+        bt.logging.debug("No pools scheduled for discovery today")
     
     return results
 
 
-if __name__ == "__main__":
-    """Standalone social network discovery."""
-    try:
-        # Create argument parser with all options
-        parser = argparse.ArgumentParser(
-            description="Discover social network using PageRank analysis"
-        )
-        bt.logging.add_args(parser)
-        bt.wallet.add_args(parser)
-        bt.subtensor.add_args(parser)
-        
-        parser.add_argument(
-            "--pool-name",
-            type=str,
-            default="tao",
-            help="Name of the pool to discover (default: tao)"
-        )
-        parser.add_argument(
-            "--dual-endpoint",
-            action="store_true",
-            help="Use both /user/tweets and /user/tweetsandreplies endpoints (default: posts-only)"
-        )
-        
-        # Build args list from environment variables for wallet config
-        # Start with command-line args, then add environment-based defaults
-        import sys
-        args_list = sys.argv[1:]  # Get actual command-line arguments
-        
-        # Add wallet config from env if not already in CLI args
-        if WALLET_NAME and '--wallet.name' not in args_list:
-            args_list.extend(['--wallet.name', WALLET_NAME])
-        if HOTKEY_NAME and '--wallet.hotkey' not in args_list:
-            args_list.extend(['--wallet.hotkey', HOTKEY_NAME])
-        
-        # Add debug logging if no logging level specified
-        if not any(arg.startswith('--logging.') for arg in args_list):
-            args_list.insert(0, '--logging.debug')
-        
-        # Parse configuration with merged args
-        config = bt.config(parser, args=args_list)
-        bt.logging.set_config(config=config.logging)
-        
-        # Initialize global publisher with properly configured wallet
-        wallet = bt.wallet(config=config)
-        initialize_global_publisher(wallet)
-        bt.logging.info("🌐 Global publisher initialized for standalone mode")
-        
-        # Auto-generate run_id with validator hotkey
-        vali_hotkey = wallet.hotkey.ss58_address
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_id = f"vali_x_{vali_hotkey}_{timestamp}"
-        
-        # Determine posts_only mode
-        posts_only = not config.dual_endpoint if hasattr(config, 'dual_endpoint') else True
-        
-        # In standalone mode, asyncio.run is safe (no parent event loop)
-        saved_file = asyncio.run(discover_social_network(
-            pool_name=config.pool_name,
-            run_id=run_id,
-            posts_only=posts_only
-        ))
-        print(f"✅ Social network discovered: {saved_file}")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        exit(1)
+# NOTE: CLI entry point moved to __main__.py
+# Use: python -m bitcast.validator.social_discovery --pool-name tao
+# (Running this file directly causes a RuntimeWarning due to module naming conflict)

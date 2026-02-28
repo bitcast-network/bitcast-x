@@ -47,7 +47,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
         self,
         briefs: List[Dict[str, Any]],
         connected_accounts: set,
-        run_id: Optional[str] = None
+        run_id: Optional[str] = None,
+        thorough: bool = False,
     ) -> None:
         """
         Score and publish briefs in 'scoring' state for monitoring purposes.
@@ -59,6 +60,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             briefs: List of briefs in 'scoring' state
             connected_accounts: Set of connected account usernames to filter scoring
             run_id: Optional run identifier
+            thorough: If True, use timeline-based discovery instead of search API
         """
         if not briefs:
             return
@@ -91,7 +93,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     start_date=start_date,
                     end_date=end_date,
                     max_members=brief_max_members,
-                    considered_accounts=brief_considered
+                    considered_accounts=brief_considered,
+                    thorough=thorough,
                 )
                 
                 if not scored_tweets:
@@ -130,7 +133,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
         uid_account_mappings: List[Dict[str, Any]],
         connected_accounts: set,
         metagraph: Any,
-        run_id: Optional[str] = None
+        run_id: Optional[str] = None,
+        thorough: bool = False,
     ) -> EvaluationResultCollection:
         """
         Evaluate briefs in 'emission' state and calculate reward distribution.
@@ -147,6 +151,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             connected_accounts: Set of connected account usernames to filter scoring
             metagraph: Bittensor metagraph
             run_id: Optional run identifier
+            thorough: If True, use timeline-based discovery instead of search API
             
         Returns:
             EvaluationResultCollection with reward results per UID
@@ -259,7 +264,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     start_date=start_date,
                     end_date=end_date,
                     max_members=brief_max_members,
-                    considered_accounts=brief_considered
+                    considered_accounts=brief_considered,
+                    thorough=thorough,
                 )
                 
                 if not scored_tweets:
@@ -323,6 +329,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                         'reply_count': tweet.get('reply_count', 0),
                         'quote_count': tweet.get('quote_count', 0),
                         'bookmark_count': tweet.get('bookmark_count', 0),
+                        'views_count': tweet.get('views_count', 0),
                         'retweets': tweet.get('retweets', []),
                         'quotes': tweet.get('quotes', []),
                         'created_at': tweet.get('created_at', ''),
@@ -415,7 +422,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         max_members: Optional[int] = None,
-        considered_accounts: Optional[int] = None
+        considered_accounts: Optional[int] = None,
+        thorough: bool = False,
     ) -> List[Dict]:
         """
         Score tweets using tweet_scoring module.
@@ -434,6 +442,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             end_date: Brief end date (inclusive)
             max_members: Optional brief-level max members limit
             considered_accounts: Optional brief-level considered accounts limit
+            thorough: If True, use timeline-based discovery instead of search API
         
         Returns:
             List of dicts with keys: author, tweet_id, score
@@ -450,7 +459,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 start_date=start_date,
                 end_date=end_date,
                 max_members=max_members,
-                considered_accounts_limit=considered_accounts
+                considered_accounts_limit=considered_accounts,
+                thorough=thorough,
             )
             
             # Files are saved by score_tweets_for_pool() for audit purposes
@@ -611,6 +621,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 'reply_count': tweet_reward.get('reply_count', 0),
                 'quote_count': tweet_reward.get('quote_count', 0),
                 'bookmark_count': tweet_reward.get('bookmark_count', 0),
+                'views_count': tweet_reward.get('views_count', 0),
                 'retweets': tweet_reward.get('retweets', []),
                 'quotes': tweet_reward.get('quotes', []),
                 'created_at': tweet_reward.get('created_at', ''),

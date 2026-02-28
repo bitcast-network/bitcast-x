@@ -1,96 +1,73 @@
 # Account Connection
 
-Scans pool member tweets for connection tags and tracks account-UID mappings in SQLite.
+Discovers connection tags by searching for tweets containing a search keyword (e.g. `@bitcast`), then extracting `bitcast-hk:` and `bitcast-x` tags from matching tweets.
 
 ## Overview
 
-Monitors tweets from social discovery pools for special connection tags that link X accounts to Bittensor UIDs:
-- `bitcast-hk:{substrate_hotkey}` - Direct hotkey connection
-- `bitcast-x` - No-code mining platform connection
+Connection tweets must include:
+1. The search keyword (default: `@bitcast`) - so the search API can find them
+2. A connection tag - to link the X account to a Bittensor UID
 
-Scans all accounts from the social map, sorted by influence score. Eligibility filtering is handled at the brief level.
+### Tag Formats
+- `bitcast-hk:{substrate_hotkey}` - Direct hotkey connection
+- `bitcast-x{identifier}` - No-code mining connection
+
+Both formats support an optional referral code suffix:
+- `bitcast-hk:{substrate_hotkey}-{referral_code}`
+- `bitcast-x{identifier}-{referral_code}`
+
+Referral codes are URL-safe Base64-encoded X handles (no padding).
+
+### Example Connection Tweets
+```
+@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq
+@bitcast bitcast-xabc123-ZHJlYWRib25nMA
+```
+
+## How It Works
+
+1. **Search API** - Searches for tweets containing `@bitcast` (configurable via `CONNECTION_SEARCH_TAG`)
+2. **Cross-reference** - Filters results to authors in the social map
+3. **Extract tags** - Parses `bitcast-hk:` and `bitcast-x` tags from tweet text
+4. **Store** - Saves connections to SQLite database
+5. **Publish** - Optionally publishes to data API
+
+Uses dual-sort search (both "latest" and "top") for maximum coverage. Runs every hour.
 
 ## Automatic Connection Download
 
-New validators automatically download existing account connections from the reference validator on startup, allowing them to immediately access miner account-UID mappings without waiting for the first connection scan.
+New validators automatically download existing connections from the reference validator on startup:
 
-### How It Works
-
-1. **On validator startup**, checks if `connections.db` is empty
-2. **Downloads all connections** from reference validator API (`/account-connections`)
-3. **Stores connections** in local database using same schema as scanner
-4. **If download fails**, validator continues normally - connection scanner will populate database on its next run
-
-### Benefits
-
-- **Faster startup**: New validators can reward miners immediately
-- **Consistency**: All validators start with same connection state
-- **Redundancy**: Connection data preserved across validator deployments
-- **Optional**: Only downloads if database is completely empty
-
-### Manual Download
-
-Download connections manually using the CLI tool:
+1. Checks if `connections.db` is empty
+2. Downloads all connections from reference validator API (`/account-connections`)
+3. Stores in local database
 
 ```bash
-# Download all connections
+# Manual download
 python -m bitcast.validator.account_connection.download_connections
-
-# Download for specific pool only
-python -m bitcast.validator.account_connection.download_connections --pool-name tao
 
 # Force download even with existing connections
 python -m bitcast.validator.account_connection.download_connections --force
-
-# Use custom reference validator URL
-python -m bitcast.validator.account_connection.download_connections --server-url http://custom-validator:8094
-```
-
-### Verification
-
-```bash
-# Check downloaded connections
-sqlite3 bitcast/validator/account_connection/connections.db "SELECT COUNT(*) FROM connections;"
-
-# View connections by pool
-sqlite3 bitcast/validator/account_connection/connections.db "SELECT pool_name, COUNT(*) FROM connections GROUP BY pool_name;"
-
-# Compare with reference validator
-curl http://44.241.197.212:8094/account-connections | jq '.total_connections'
 ```
 
 ## Architecture
 
 ```
 account_connection/
-├── connection_scanner.py  # Main scanner + CLI
+├── connection_scanner.py  # Search-based scanner + CLI
 ├── connection_db.py       # SQLite operations
 ├── tag_parser.py          # Tag extraction/validation
+├── referral_code.py       # Referral code encode/decode
+├── connection_publisher.py # Data API publishing
+├── download_connections.py # Bootstrap from reference validator
 └── connections.db         # SQLite database
-```
-
-## Database Schema
-
-**Location**: `connections.db`  
-**Tables**: One per pool (`connections_{pool_name}`)
-
-```sql
-CREATE TABLE connections_{pool_name} (
-    connection_id INTEGER PRIMARY KEY,
-    tweet_id BIGINT NOT NULL,
-    tag VARCHAR(100) NOT NULL,
-    account_username VARCHAR(100) NOT NULL,
-    added DATETIME NOT NULL,
-    updated DATETIME NOT NULL,
-    UNIQUE(account_username, tag)
-);
 ```
 
 ## Usage
 
 ### Command Line
 ```bash
-# Scan default pool (tao)
+# Scan all pools
 python -m bitcast.validator.account_connection.connection_scanner
 
 # Scan specific pool
@@ -98,135 +75,37 @@ python -m bitcast.validator.account_connection.connection_scanner --pool-name ta
 
 # Custom lookback period
 python -m bitcast.validator.account_connection.connection_scanner --lookback-days 14
-
-# Scan all accounts in social map (not just 'in' and 'promoted')
-python -m bitcast.validator.account_connection.connection_scanner --scan-all-accounts
 ```
 
 ### Programmatic
 ```python
 from bitcast.validator.account_connection import ConnectionScanner, ConnectionDatabase
 
-# Scan pool (active members only)
-scanner = ConnectionScanner(lookback_days=7)
-summary = scanner.scan_pool("tao")
-
-# Scan all accounts in social map
-scanner = ConnectionScanner(lookback_days=7, scan_all=True)
-summary = scanner.scan_pool("tao")
+# Scan all pools
+scanner = ConnectionScanner()
+summary = await scanner.scan_all_pools()
 
 # Query database
-db = ConnectionDatabase(pool_name="tao")
-connections = db.get_connections_by_tag("bitcast-hk:5DNm...")
-accounts_with_uids = db.get_accounts_with_uids()
+db = ConnectionDatabase()
+connections = db.get_connections_by_account("username")
+accounts = db.get_accounts_with_uids("tao", metagraph)
 ```
-
-## Tag Format
-
-### Valid Tags
-- `bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq` (47-48 char hotkey)
-- `BITCAST-HK:5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY` (case-insensitive)
-- `bitcast-x` (no-code mining)
-
-Tags are case-insensitive and must appear in original tweets (not retweets).
 
 ## Configuration
 
-Environment variables:
 ```python
-TWITTER_DEFAULT_LOOKBACK_DAYS = 7  # Days to scan back
-RAPID_API_KEY = "..."               # Twitter API access
-```
-
-## Key Methods
-
-### ConnectionDatabase
-```python
-# Get all connections for an account
-connections = db.get_connections_by_account("username")
-
-# Get all connections for a tag
-connections = db.get_connections_by_tag("bitcast-hk:...")
-
-# Get accounts mapped to UIDs (via hotkey tags)
-accounts_with_uids = db.get_accounts_with_uids()
-# Returns: [{"account_username": "user1", "uid": 42}, ...]
-
-# Check if connection exists
-exists = db.connection_exists("username", "bitcast-hk:...")
-```
-
-### ConnectionScanner
-```python
-# Scan a pool for connection tags
-summary = scanner.scan_pool()
-# Returns: {
-#   "accounts_checked": 128,
-#   "tags_found": 15,
-#   "new_connections": 12,
-#   "duplicates_skipped": 3
-# }
-```
-
-## Integration
-
-### With Reward Engine
-```python
-# Reward engine uses this to map accounts to UIDs
-from bitcast.validator.account_connection import ConnectionDatabase
-
-db = ConnectionDatabase(pool_name="tao")
-accounts_with_uids = db.get_accounts_with_uids()
-
-# Map scored tweets to UIDs
-for tweet in scored_tweets:
-    account = tweet['author']
-    uid = next((a['uid'] for a in accounts_with_uids 
-                if a['account_username'] == account), None)
-```
-
-### With Validator
-```python
-# Run every 1 hour in validator forward pass
-if self.step % (ACCOUNT_CONNECTION_INTERVAL_HOURS * 60) == 0:
-    scanner = ConnectionScanner(pool_name="tao")
-    scanner.scan_pool()
+CONNECTION_SEARCH_TAG = '@bitcast'  # Keyword to search for (env: CONNECTION_SEARCH_TAG)
+SCORING_INTERVAL_MINUTES = 45  # Scoring + connection scan frequency
 ```
 
 ## Data Flow
 
 ```
-Pool Config → Social Map → Active Members
-                               ↓
-                      Fetch Recent Tweets
-                               ↓
-                      Parse Connection Tags
-                               ↓
-                      Store in Database
-                               ↓
-                      Return Summary
+Search API ("@bitcast") → Filter by Social Map → Extract Tags → Store in SQLite
 ```
-
-## Troubleshooting
-
-### No tags found
-- Normal if pool members haven't posted tags yet
-- Verify lookback period is appropriate
-- Check tweets manually on X
-
-### Database permission errors
-- Ensure write access to `account_connection/` directory
-- Check file permissions on `connections.db`
-
-### API errors
-- Verify `RAPID_API_KEY` in `.env`
-- Check API quota on RapidAPI dashboard
 
 ## Testing
 
 ```bash
-# Run tests
 pytest tests/validator/account_connection/ -v
-
-# Tests use isolated temp databases (safe to run)
 ```

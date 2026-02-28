@@ -238,7 +238,7 @@ class TestTwitterEvaluator:
         ]
         
         # Mock scoring to fail for first brief, succeed for second
-        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date, max_members=None, considered_accounts=None):
+        def mock_score(pool_name, brief_id, connected_accounts, tag, qrt, run_id, start_date, end_date, max_members=None, considered_accounts=None, thorough=False):
             if brief_id == 'error_brief':
                 raise ValueError("Scoring failed")
             return [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5}]
@@ -419,7 +419,7 @@ class TestTwitterEvaluator:
         tweet_rewards = [{
             'tweet_id': '123', 'author': 'user1', 'uid': 1, 'score': 0.85, 'total_usd': 700.0,
             'favorite_count': 10, 'retweet_count': 5, 'reply_count': 3, 'quote_count': 2,
-            'bookmark_count': 1, 'retweets': ['acc1', 'acc2'], 'quotes': ['acc3'],
+            'bookmark_count': 1, 'views_count': 5000, 'retweets': ['acc1', 'acc2'], 'quotes': ['acc3'],
             'created_at': '2025-11-01T10:00:00Z', 'lang': 'en'
         }]
         

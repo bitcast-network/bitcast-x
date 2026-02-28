@@ -18,12 +18,11 @@ Discovers and analyzes Twitter/X social influence networks using PageRank algori
 
 ```
 social_discovery/
-├── social_discovery.py          # Main analyzer & CLI
+├── social_discovery.py          # Main analyzer (TwitterNetworkAnalyzer)
 ├── pool_manager.py               # Pool configuration loader
 ├── pool_status_manager.py        # Membership & transitions
-├── recursive_discovery.py        # Iterative discovery
+├── recursive_discovery.py        # Two-stage discovery with CLI
 ├── social_map_publisher.py       # Publishing to API
-├── pools_config.json             # Pool definitions
 └── social_maps/                  # Output directory
     ├── tao/
     ├── ai_crypto/
@@ -35,32 +34,23 @@ social_discovery/
 ### Command Line
 
 ```bash
-# Single discovery run
-python -m bitcast.validator.social_discovery.social_discovery \
-  --pool-name tao
-
-# Recursive discovery (runs until convergence)
+# Two-stage discovery with convergence (default)
 python -m bitcast.validator.social_discovery.recursive_discovery \
   --pool-name tao \
-  --max-iterations 10 \
-  --convergence-threshold 0.95
+  --max-iterations 3 \
+  --convergence-threshold 0.90
 ```
 
 ### Programmatic
 
 ```python
-from bitcast.validator.social_discovery import discover_social_network
+from bitcast.validator.social_discovery import two_stage_discovery
 
-# Single discovery
-social_map_path = discover_social_network(pool_name="tao")
-
-# Recursive discovery until convergence
-from bitcast.validator.social_discovery.recursive_discovery import recursive_social_discovery
-
-path, iterations, converged, metrics = recursive_social_discovery(
+# Two-stage discovery with core/extended phases
+path, metrics = await two_stage_discovery(
     pool_name="tao",
-    max_iterations=10,
-    convergence_threshold=0.95
+    max_iterations=3,
+    convergence_threshold=0.90
 )
 ```
 
@@ -180,13 +170,31 @@ Saved to `social_maps/{pool_name}/{timestamp}.json`:
 ### Adjacency Matrix
 Saved to `social_maps/{pool_name}/{timestamp}_adjacency.json`:
 
+**Compact edge format (v2.0):**
 ```json
 {
   "usernames": ["user1", "user2", "user3"],
-  "adjacency_matrix": [[0, 2.0, 1.0], [1.0, 0, 0], [1.5, 0, 0]],
+  "format_version": "2.0",
+  "adjacency_edges": {
+    "sources": [0, 0, 1, 2],
+    "targets": [1, 2, 0, 0],
+    "weights": [2.0, 1.0, 1.0, 1.5]
+  },
+  "adjacency_shape": [3, 3],
+  "relationship_edges": {
+    "sources": [0, 0, 1, 2],
+    "targets": [1, 2, 0, 0],
+    "weights": [3.0, 1.5, 1.0, 2.0]
+  },
+  "relationship_shape": [3, 3],
   "created_at": "2025-11-11T12:00:00"
 }
 ```
+
+**Format Notes:**
+- The compact edge format stores only non-zero edges as parallel arrays (`sources`, `targets`, `weights`)
+- This reduces file size by ~700-1000x for typical sparse social networks (99%+ sparsity)
+- Only the v2.0 compact format is supported; old dense files must be re-generated via social discovery
 
 ### Metadata
 Saved to `social_maps/{pool_name}/{timestamp}_metadata.json`:
@@ -338,7 +346,7 @@ ValueError: No interactions found in network
 
 2. Run discovery:
 ```bash
-python -m bitcast.validator.social_discovery.social_discovery --pool-name my_pool
+python -m bitcast.validator.social_discovery.recursive_discovery --pool-name my_pool
 ```
 
 ### Testing
