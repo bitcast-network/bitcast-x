@@ -31,7 +31,7 @@ Bitcast X is a Bittensor subnet that incentivizes X content creators to connect 
 #### Option 1: Managed Mining
 
 Visit [x.bitcast.network](https://x.bitcast.network/) for the simplest setup:
-1. Create a Bittensor wallet using [Crucible](https://cruciblelabs.com/) or [Talisman](https://talisman.xyz/)
+1. Create a Bittensor wallet. Recommended: [Talisman](https://talisman.xyz/)
 2. Go to [x.bitcast.network](https://x.bitcast.network/) and paste your wallet address
 3. Click "Generate Tag" to receive your unique connection tag
 4. Post a tweet containing your tag to link your X account
