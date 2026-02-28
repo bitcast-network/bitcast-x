@@ -137,52 +137,52 @@ class RewardOrchestrator:
             )
             
             # 10. Check and activate new referrals, then apply today's bonuses
-            referral_service = ReferralBonusService(connection_db=db)
-            
-            # Collect participating accounts from evaluation results (already computed)
-            participating_accounts = set()
-            for uid, result in evaluation_results.results.items():
-                participating_accounts.update(result.account_results.keys())
-            
-            activated = referral_service.check_and_activate_referrals(
-                participating_accounts=participating_accounts
-            )
-            if activated > 0:
-                bt.logging.info(f"Activated {activated} new referral bonuses")
-            
-            # 11. Apply referral bonuses for today
-            today = date.today()
-            result = referral_service.get_referral_bonuses(
-                payout_date=today,
-                account_to_uid=account_to_uid
-            )
-            
-            if result.bonuses:
-                from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price, get_total_miner_emissions
-                alpha_price = get_bitcast_alpha_price()
-                daily_alpha = get_total_miner_emissions()
-                daily_emission_usd = alpha_price * daily_alpha
+            try:
+                referral_service = ReferralBonusService(connection_db=db)
                 
-                uid_to_idx = {uid: i for i, uid in enumerate(uids)}
-                bonus_total_usd = 0.0
-                for uid, bonus_usd in result.bonuses.items():
-                    idx = uid_to_idx.get(uid)
-                    if idx is not None:
-                        bonus_weight = bonus_usd / daily_emission_usd
-                        rewards[idx] += bonus_weight
-                        bonus_total_usd += bonus_usd
-                        bt.logging.info(f"Referral bonus: ${bonus_usd:.2f} (weight {bonus_weight:.6f}) to UID {uid}")
+                participating_accounts = set()
+                for uid, result in evaluation_results.results.items():
+                    participating_accounts.update(result.account_results.keys())
                 
-                bt.logging.info(f"Applied ${bonus_total_usd:.2f} in referral bonuses to {len(result.bonuses)} UIDs")
-                
-                # 12. Publish referral bonus data
-                await self._publish_referral_bonuses(
-                    referrals=result.referrals,
-                    account_to_uid=account_to_uid,
-                    activated=activated,
-                    payout_date=today,
-                    run_id=run_id
+                activated = referral_service.check_and_activate_referrals(
+                    participating_accounts=participating_accounts
                 )
+                if activated > 0:
+                    bt.logging.info(f"Activated {activated} new referral bonuses")
+                
+                today = date.today()
+                result = referral_service.get_referral_bonuses(
+                    payout_date=today,
+                    account_to_uid=account_to_uid
+                )
+                
+                if result.bonuses:
+                    from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price, get_total_miner_emissions
+                    alpha_price = get_bitcast_alpha_price()
+                    daily_alpha = get_total_miner_emissions()
+                    daily_emission_usd = alpha_price * daily_alpha
+                    
+                    uid_to_idx = {uid: i for i, uid in enumerate(uids)}
+                    bonus_total_usd = 0.0
+                    for uid, bonus_usd in result.bonuses.items():
+                        idx = uid_to_idx.get(uid)
+                        if idx is not None:
+                            bonus_weight = bonus_usd / daily_emission_usd
+                            rewards[idx] += bonus_weight
+                            bonus_total_usd += bonus_usd
+                            bt.logging.info(f"Referral bonus: ${bonus_usd:.2f} (weight {bonus_weight:.6f}) to UID {uid}")
+                    
+                    bt.logging.info(f"Applied ${bonus_total_usd:.2f} in referral bonuses to {len(result.bonuses)} UIDs")
+                    
+                    await self._publish_referral_bonuses(
+                        referrals=result.referrals,
+                        account_to_uid=account_to_uid,
+                        activated=activated,
+                        payout_date=today,
+                        run_id=run_id
+                    )
+            except Exception as e:
+                bt.logging.error(f"Referral bonus calculation failed (rewards unaffected): {e}")
             
             total_rewards = float(np.sum(rewards))
             non_zero_uids = np.count_nonzero(rewards)
