@@ -7,7 +7,7 @@ import bittensor as bt
 env_path = Path(__file__).parents[1] / '.env'
 load_dotenv(dotenv_path=env_path)
 
-__version__ = "1.2.5"
+__version__ = "1.5.0"
 
 # =============================================================================
 # Cache Configuration

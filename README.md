@@ -139,21 +139,18 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 Choose your mode based on desired level of independence:
 
 **Weight Copy Mode (Recommended - Default)**
-- No API keys required!
-- Fetches weights from reference validator
-- Minimal setup and resources
+- No API keys required
 
-**Standard Mode (Independent Validation)**
-1. **Twitter API Provider** - Choose one:
-   - **Desearch.ai** (Recommended) - [Desearch.ai](https://desearch.ai) - Modern Twitter data API
-   - **RapidAPI** (Alternative) - [twitter-v24](https://rapidapi.com/Glavier/api/twitter-v24) - Backup provider
-2. **Chutes API Key** - Get from [Chutes.ai](https://chutes.ai/) - Plus subscription ($10/month)
-3. **Weights & Biases API Key** - Get from [wandb.ai](https://wandb.ai/) - For monitoring
+**Standard & Discovery Modes (Independent Validation / Full Independence)**
 
-**Discovery Mode (Full Independence)**
-- Same as Standard Mode (Twitter API, Chutes, WandB)
-- Requires higher resources for social discovery
-- Contributes social maps for the network
+To run in either Standard or Discovery mode, you need these API keys and subscriptions:
+- **Twitter API Provider**: Choose one  
+  - **Desearch.ai** (Recommended): [Desearch.ai](https://desearch.ai) — modern Twitter data API  
+  - **RapidAPI** (Alternative): [twitter-v24](https://rapidapi.com/Glavier/api/twitter-v24) (Mega Plan)
+- **Chutes API Key**: [Chutes.ai](https://chutes.ai/) (Plus subscription ~$10/month)
+- **Weights & Biases API Key**: [wandb.ai](https://wandb.ai/) — for monitoring and debugging
+
+_Discovery mode additionally requires higher API Quota_
 
 ---
 
