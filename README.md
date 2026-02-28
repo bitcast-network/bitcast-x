@@ -36,7 +36,7 @@ Visit [x.bitcast.network](https://x.bitcast.network/) for the simplest setup:
 3. Click "Generate Tag" to receive your unique connection tag
 4. Post a tweet containing your tag to link your X account
 5. Complete briefs(https://x.bitcast.network/) to start earning!
-6. Rewards are distributed daily through a managed UID (UID 68)
+6. Rewards are distributed daily through a managed UID (UID 114)
 
 *Note: Emissions will incur a 5% fee*
 
@@ -108,10 +108,19 @@ Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly dis
 - **Quote Tweet Requirements**: Some briefs require quote tweets of specific posts
 - **Quality Filter**: Tweets portraying sponsors negatively will fail evaluation
 
-### 6. Reward Distribution
+### 6. Referral Program
+
+- **Referral Codes**: Miners can refer others by appending a referral code to their connection tag:
+  - `bitcast-hk:{substrate_hotkey}-{referral_code}`
+  - `bitcast-x{identifier}-{referral_code}`
+- **Referral Code Format**: A Base64url-encoded X handle of the referrer (e.g., `@bitcast_network` → `Yml0Y2FzdF9uZXR3b3Jr`)
+- **Activation**: Referral bonuses activate once the referee participates in a brief (has tweets passing the filter)
+- **Bonus Payout**: Both referee and referrer receive a $50 bonus, paid out the day after activation
+
+### 7. Reward Distribution
 
 - **Budget Allocation**: Each brief has a daily budget distributed over 7-day emissions period
-- **Delay Period**: 2-day delay after brief closes before rewards begin (for engagement verification)
+- **Delay Period**: 1-day delay after brief closes before rewards begin (for engagement verification)
 - **Proportional Distribution**: Rewards distributed based on relative tweet scores
 - **Treasury Allocation**: Unclaimed emissions go to subnet treasury
 
@@ -146,26 +155,6 @@ Choose your mode based on desired level of independence:
 - Requires higher resources for social discovery
 - Contributes social maps for the network
 
-#### Twitter API Provider Configuration
-
-Bitcast X supports two Twitter API providers with manual switching:
-
-**Desearch.ai (Default - Recommended)**
-- Supports dual-endpoint mode for complete reply coverage
-- Modern pagination with 400 tweet fetch support
-- API Key format: `dt_$YOUR_KEY`
-- Get your key at [Desearch.ai](https://desearch.ai)
-
-**RapidAPI (Alternative)**
-- Alternative provider for reliability testing
-- Cursor-based pagination
-- Supports both posts and replies
-- Get your key at [RapidAPI](https://rapidapi.com/Glavier/api/twitter-v24)
-
-**Switching Providers**
-
-To switch between providers, update TWITTER_API_PROVIDER in your `.env` file:
-
 ---
 
 ## 🚀 Installation & Setup
@@ -198,7 +187,7 @@ Edit `bitcast/validator/.env` and set your wallet information:
 
 **Validator Modes (choose based on desired level of independence):**
 
-- `weight_copy` (default, recommended for most): Minimal independence - fetches pre-calculated weights from reference validator via API. No validation work, no social maps needed. Requires no API keys. **Use this if you want to participate with minimal setup and resources.**
+- `weight_copy` (default): Minimal independence - fetches pre-calculated weights from reference validator via API. Requires no API keys. **Use this if you want to participate with minimal setup and resources.**
 
 - `standard` (independent validation): Medium independence - performs full validation (account scanning, tweet scoring, filtering, rewards) using social maps downloaded from reference validator. Downloads maps at startup if missing, then periodically refreshes. Requires Twitter, Chutes, and WandB API keys. **Use this if you want to compute your own weights independently while relying on others for social mapping.**
 
