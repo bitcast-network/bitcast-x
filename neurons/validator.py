@@ -7,7 +7,7 @@ import bittensor as bt
 import random
 
 from bitcast.base.validator import BaseValidatorNeuron
-from bitcast.validator.utils.config import __version__, WANDB_PROJECT, WC_MODE
+from bitcast.validator.utils.config import __version__, WANDB_PROJECT, VALIDATOR_MODE
 from bitcast.validator.utils.startup_checks import (
     check_and_download_social_maps,
     check_and_download_account_connections
@@ -15,9 +15,9 @@ from bitcast.validator.utils.startup_checks import (
 from core.auto_update import run_auto_update
 
 # Conditionally import forward implementation based on mode
-if WC_MODE:
+if VALIDATOR_MODE == 'weight_copy':
     from bitcast.validator.weight_copy.wc_forward import forward_weight_copy as forward_impl
-else:
+else:  # standard or discovery
     from bitcast.validator.forward import forward as forward_impl
 
 class Validator(BaseValidatorNeuron):
@@ -44,8 +44,8 @@ class Validator(BaseValidatorNeuron):
             bt.logging.error(f"❌ Unexpected error in startup checks: {e}")
             raise
 
-        # Initialize wandb only if disable_set_weights is False AND not in WC mode
-        if not self.config.neuron.disable_set_weights and not WC_MODE:
+        # Initialize wandb for standard and discovery modes (not weight_copy)
+        if not self.config.neuron.disable_set_weights and VALIDATOR_MODE != 'weight_copy':
             try:
                 wandb.init(
                     entity="bitcast_network",
@@ -58,10 +58,12 @@ class Validator(BaseValidatorNeuron):
                 bt.logging.error(f"Failed to initialize wandb run: {e}")
 
         # Log which mode we're running in
-        if WC_MODE:
-            bt.logging.info("🔄 Running in WEIGHT COPY MODE - fetching weights from reference validator")
-        else:
-            bt.logging.info("✅ Running in FULL VALIDATION MODE - performing complete validation")
+        if VALIDATOR_MODE == 'weight_copy':
+            bt.logging.info("🔄 Running in WEIGHT COPY mode - fetching weights from reference validator")
+        elif VALIDATOR_MODE == 'standard':
+            bt.logging.info("✅ Running in STANDARD mode - performing validation with downloaded social maps")
+        else:  # discovery
+            bt.logging.info("🌟 Running in DISCOVERY mode - performing complete validation with social discovery")
 
         bt.logging.info("load_state()")
         self.load_state()
@@ -70,8 +72,10 @@ class Validator(BaseValidatorNeuron):
         """
         Validator forward pass.
         
-        In full mode: Generates queries, rewards miners, updates scores
-        In WC mode: Fetches weights from primary validator API
+        Mode behaviors:
+        - weight_copy: Fetches weights from reference validator API
+        - standard: Performs validation with downloaded social maps
+        - discovery: Performs complete validation with social discovery
         """
         return await forward_impl(self)
 

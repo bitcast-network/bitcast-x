@@ -5,6 +5,7 @@ from .platform_registry import PlatformRegistry
 from .emission_calculation_service import EmissionCalculationService
 from .reward_distribution_service import RewardDistributionService
 from .treasury_allocation import allocate_subnet_treasury
+from .referral_bonus_service import ReferralBonusService
 
 __all__ = [
     "ScoreAggregationService",
@@ -12,4 +13,5 @@ __all__ = [
     "EmissionCalculationService",
     "RewardDistributionService",
     "allocate_subnet_treasury",
+    "ReferralBonusService",
 ] 

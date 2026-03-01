@@ -36,7 +36,7 @@ class TestBriefCreation:
         assert brief.boost == 1.5
     
     def test_brief_creation_with_required_fields_only(self):
-        """Can create Brief with only required fields."""
+        """Can create Brief with only required fields plus tag/qrt."""
         start = datetime.now(timezone.utc)
         end = start + timedelta(days=7)
         
@@ -46,11 +46,12 @@ class TestBriefCreation:
             budget=500.0,
             start_date=start,
             end_date=end,
-            brief_text="Minimal campaign"
+            brief_text="Minimal campaign",
+            tag="#minimal"  # Required: at least one of tag or qrt
         )
         
         assert brief.id == "test_002"
-        assert brief.tag is None
+        assert brief.tag == "#minimal"
         assert brief.qrt is None
         assert brief.prompt_version == 1  # Default
         assert brief.boost == 1.0  # Default
@@ -71,7 +72,8 @@ class TestBriefValidation:
                 budget=-100,
                 start_date=start,
                 end_date=end,
-                brief_text="Test"
+                brief_text="Test",
+                tag="#test"
             )
     
     def test_end_before_start_raises_error(self):
@@ -86,7 +88,8 @@ class TestBriefValidation:
                 budget=100,
                 start_date=start,
                 end_date=end,
-                brief_text="Test"
+                brief_text="Test",
+                tag="#test"
             )
     
     def test_empty_id_raises_error(self):
@@ -101,7 +104,8 @@ class TestBriefValidation:
                 budget=100,
                 start_date=start,
                 end_date=end,
-                brief_text="Test"
+                brief_text="Test",
+                tag="#test"
             )
     
     def test_empty_pool_raises_error(self):
@@ -116,7 +120,8 @@ class TestBriefValidation:
                 budget=100,
                 start_date=start,
                 end_date=end,
-                brief_text="Test"
+                brief_text="Test",
+                tag="#test"
             )
 
 
@@ -136,7 +141,8 @@ class TestBriefProperties:
             budget=700.0,
             start_date=start,
             end_date=end,
-            brief_text="Test"
+            brief_text="Test",
+            tag="#test"
         )
         
         # daily_budget should be budget / EMISSIONS_PERIOD
@@ -180,6 +186,7 @@ class TestBriefFromDict:
             'id': 'api_002',
             'start_date': '2025-11-01T00:00:00Z',
             'end_date': '2025-11-08T00:00:00Z',
+            'tag': '#default'  # Required: at least one of tag or qrt
         }
         
         brief = Brief.from_dict(data)
@@ -189,6 +196,7 @@ class TestBriefFromDict:
         assert brief.brief_text == ''  # Default
         assert brief.prompt_version == 1  # Default
         assert brief.boost == 1.0  # Default
+        assert brief.tag == '#default'
 
 
 class TestBriefToDict:
@@ -264,6 +272,7 @@ class TestBriefEligibilityConfig:
             start_date=start,
             end_date=end,
             brief_text="Test campaign",
+            tag="#test",
             max_members=100,
             max_considered=250
         )
@@ -282,7 +291,8 @@ class TestBriefEligibilityConfig:
             budget=1000.0,
             start_date=start,
             end_date=end,
-            brief_text="Test campaign"
+            brief_text="Test campaign",
+            tag="#test"
         )
         
         assert brief.max_members is None
@@ -297,6 +307,7 @@ class TestBriefEligibilityConfig:
             'start_date': '2025-11-01T00:00:00Z',
             'end_date': '2025-11-08T00:00:00Z',
             'brief': 'API test with config',
+            'tag': '#test',
             'max_members': 75,
             'max_considered': 200
         }
@@ -314,7 +325,8 @@ class TestBriefEligibilityConfig:
             'budget': 3000,
             'start_date': '2025-11-01T00:00:00Z',
             'end_date': '2025-11-08T00:00:00Z',
-            'brief': 'API test without config'
+            'brief': 'API test without config',
+            'qrt': '123456789'  # Using qrt instead of tag
         }
         
         brief = Brief.from_dict(data)
@@ -334,6 +346,7 @@ class TestBriefEligibilityConfig:
             start_date=start,
             end_date=end,
             brief_text="Test campaign",
+            tag="#test",
             max_members=150,
             max_considered=300
         )
@@ -354,7 +367,8 @@ class TestBriefEligibilityConfig:
             budget=1500.0,
             start_date=start,
             end_date=end,
-            brief_text="Test campaign"
+            brief_text="Test campaign",
+            tag="#test"
         )
         
         data = brief.to_dict()

@@ -8,7 +8,7 @@ import json
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import bittensor as bt
 
 
@@ -305,7 +305,7 @@ def get_active_members_for_brief(
     return eligible_list
 
 
-def load_relationship_scores(pool_name: str) -> Tuple[Optional[np.ndarray], List[str], Dict[str, int]]:
+def load_relationship_scores(pool_name: str) -> Tuple[Optional[Any], List[str], Dict[str, int]]:
     """
     Load the latest relationship scores matrix for cabal protection.
     
@@ -313,13 +313,16 @@ def load_relationship_scores(pool_name: str) -> Tuple[Optional[np.ndarray], List
     used to detect and penalize coordinated "cabal" behavior where accounts
     frequently engage with each other to artificially inflate scores.
     
+    Returns a sparse CSR matrix for efficient memory usage with large networks.
+    
     Args:
         pool_name: Name of the pool
         
     Returns:
-        Tuple of (relationship_scores_matrix, usernames_list, username_to_idx_map)
-        Returns (None, [], {}) if relationship scores not available (backward compatibility)
+        Tuple of (relationship_scores_sparse_matrix, usernames_list, username_to_idx_map)
     """
+    from bitcast.validator.social_discovery.adjacency_utils import load_relationship_scores_sparse
+    
     social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
     
     # Find latest adjacency file
@@ -336,18 +339,26 @@ def load_relationship_scores(pool_name: str) -> Tuple[Optional[np.ndarray], List
     with open(latest_file, 'r') as f:
         data = json.load(f)
     
-    # Check if relationship_scores field exists (backward compatibility)
-    if 'relationship_scores' not in data:
+    # Load as sparse matrix
+    try:
+        relationship_matrix, usernames = load_relationship_scores_sparse(data)
+    except Exception as e:
         bt.logging.warning(
-            f"Adjacency file {latest_file.name} doesn't contain relationship_scores field. "
+            f"Failed to parse adjacency file {latest_file.name}: {e}. "
             f"Cabal protection disabled. Re-run social discovery to enable."
         )
         return None, [], {}
     
-    scores_matrix = np.array(data['relationship_scores'], dtype=float)
-    usernames = data['usernames']
+    # Check if relationship matrix was loaded
+    if relationship_matrix is None:
+        bt.logging.warning(
+            f"Adjacency file {latest_file.name} doesn't contain relationship_scores. "
+            f"Cabal protection disabled. Re-run social discovery to enable."
+        )
+        return None, [], {}
+    
     username_to_idx = {user: i for i, user in enumerate(usernames)}
     
     bt.logging.info(f"Loaded relationship scores from {latest_file.name} for cabal protection")
     
-    return scores_matrix, usernames, username_to_idx
+    return relationship_matrix, usernames, username_to_idx

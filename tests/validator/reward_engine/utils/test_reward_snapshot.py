@@ -20,22 +20,22 @@ def sample_snapshot_data():
         'tweet_rewards': [
             {
                 'tweet_id': '123', 'author': 'user1', 'uid': 1, 'score': 0.85, 'total_usd': 50.25,
-                'favorite_count': 10, 'retweet_count': 5, 'reply_count': 3, 'quote_count': 2, 'bookmark_count': 1,
+                'favorite_count': 10, 'retweet_count': 5, 'reply_count': 3, 'quote_count': 2, 'bookmark_count': 1, 'views_count': 5000,
                 'retweets': ['acc1'], 'quotes': [], 'created_at': '2025-11-01T10:00:00Z', 'lang': 'en'
             },
             {
                 'tweet_id': '456', 'author': 'user2', 'uid': 1, 'score': 0.75, 'total_usd': 50.25,
-                'favorite_count': 0, 'retweet_count': 0, 'reply_count': 0, 'quote_count': 0, 'bookmark_count': 0,
+                'favorite_count': 0, 'retweet_count': 0, 'reply_count': 0, 'quote_count': 0, 'bookmark_count': 0, 'views_count': 0,
                 'retweets': [], 'quotes': [], 'created_at': '2025-11-02T11:00:00Z', 'lang': 'en'
             },
             {
                 'tweet_id': '789', 'author': 'user3', 'uid': 2, 'score': 1.20, 'total_usd': 200.75,
-                'favorite_count': 20, 'retweet_count': 10, 'reply_count': 5, 'quote_count': 3, 'bookmark_count': 2,
+                'favorite_count': 20, 'retweet_count': 10, 'reply_count': 5, 'quote_count': 3, 'bookmark_count': 2, 'views_count': 15000,
                 'retweets': ['acc1', 'acc2'], 'quotes': ['acc3'], 'created_at': '2025-11-03T12:00:00Z', 'lang': 'en'
             },
             {
                 'tweet_id': '101', 'author': 'user4', 'uid': 3, 'score': 0.60, 'total_usd': 50.25,
-                'favorite_count': 5, 'retweet_count': 2, 'reply_count': 1, 'quote_count': 0, 'bookmark_count': 0,
+                'favorite_count': 5, 'retweet_count': 2, 'reply_count': 1, 'quote_count': 0, 'bookmark_count': 0, 'views_count': 500,
                 'retweets': ['acc2'], 'quotes': [], 'created_at': '2025-11-04T13:00:00Z', 'lang': 'und'
             }
         ]
@@ -123,7 +123,7 @@ def test_snapshot_data_structure(sample_snapshot_data):
     required_tweet_fields = {
         'tweet_id': str, 'author': str, 'uid': int, 'score': (int, float), 'total_usd': (int, float),
         'favorite_count': int, 'retweet_count': int, 'reply_count': int, 'quote_count': int,
-        'bookmark_count': int, 'retweets': list, 'quotes': list, 'created_at': str, 'lang': str
+        'bookmark_count': int, 'views_count': int, 'retweets': list, 'quotes': list, 'created_at': str, 'lang': str
     }
     
     for tweet in sample_snapshot_data['tweet_rewards']:

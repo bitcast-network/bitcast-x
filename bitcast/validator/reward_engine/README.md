@@ -87,23 +87,21 @@ API (briefs) → Filter by reward window → Get UID mappings
 ### Automatic (via Validator)
 ```python
 # In validator forward pass
-from bitcast.validator.reward_engine import get_reward_orchestrator
+from bitcast.validator.forward import get_reward_orchestrator
 
 orchestrator = get_reward_orchestrator()
-rewards, metadata = await orchestrator.calculate_rewards(self, miner_uids)
+rewards = await orchestrator.calculate_rewards(self, miner_uids)
 self.update_scores(rewards, miner_uids)
 ```
 
 ### Manual Testing
 ```python
-from bitcast.validator.reward_engine import RewardOrchestrator
-from bitcast.validator.reward_engine.twitter_evaluator import TwitterEvaluator
+from bitcast.validator.forward import get_reward_orchestrator
 
-orchestrator = RewardOrchestrator()
-orchestrator.platforms.register('twitter', TwitterEvaluator())
+orchestrator = get_reward_orchestrator()
 
 # Run reward calculation
-rewards, metadata = await orchestrator.calculate_rewards(validator, uids)
+rewards = await orchestrator.calculate_rewards(validator, uids)
 ```
 
 ## Key Components
@@ -137,7 +135,7 @@ EMISSIONS_PERIOD = 7              # Days to distribute budget
 REWARDS_DELAY_DAYS = 2            # Days to wait after brief ends
 SUBNET_TREASURY_PERCENTAGE = 1.0  # Treasury allocation %
 SUBNET_TREASURY_UID = 106         # Treasury UID
-REWARDS_INTERVAL_HOURS = 4        # How often to run
+SCORING_INTERVAL_MINUTES = 45     # How often to run (scoring + connections)
 ```
 
 ## Output

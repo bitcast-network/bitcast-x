@@ -5,10 +5,6 @@ import numpy as np
 
 from bitcast.validator.reward_engine.services.reward_distribution_service import RewardDistributionService
 from bitcast.validator.reward_engine.models.emission_target import EmissionTarget
-from bitcast.validator.reward_engine.models.evaluation_result import (
-    EvaluationResultCollection,
-    EvaluationResult
-)
 
 
 @pytest.fixture
@@ -69,7 +65,7 @@ class TestNormalizeWeights:
         ]
         uids = [0, 1]
         
-        rewards, rewards_matrix, percentages = service._normalize_weights(raw_weights, briefs, uids)
+        rewards = service._normalize_weights(raw_weights, briefs, uids)
         
         # Rewards should sum to 1.0
         assert abs(np.sum(rewards) - 1.0) < 1e-6
@@ -80,7 +76,7 @@ class TestNormalizeWeights:
         briefs = []
         uids = [0, 1]
         
-        rewards, rewards_matrix, percentages = service._normalize_weights(raw_weights, briefs, uids)
+        rewards = service._normalize_weights(raw_weights, briefs, uids)
         
         # Should return zeros with UID 0 getting fallback
         assert len(rewards) == 2
@@ -93,11 +89,8 @@ class TestErrorFallback:
         """Should give all rewards to burn UID (0) on error."""
         uids = [0, 1, 2]
         
-        rewards, stats = service._error_fallback(uids)
+        rewards = service._error_fallback(uids)
         
-        # UID 0 should get 1.0, others 0.0
         assert rewards[0] == 1.0
         assert rewards[1] == 0.0
         assert rewards[2] == 0.0
-        # Should create stats for all UIDs
-        assert len(stats) == 3

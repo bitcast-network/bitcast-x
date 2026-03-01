@@ -6,6 +6,7 @@ Twitter/X platform data to external endpoints with message signing and error han
 """
 
 import asyncio
+import gzip
 import json
 import aiohttp
 import bittensor as bt
@@ -206,11 +207,12 @@ class UnifiedDataPublisher(DataPublisher):
     async def publish_data(self, data: Dict[str, Any], endpoint: str) -> bool:
         """
         Publish data to specified endpoint with unified API format handling.
-        
+        Automatically compresses large payloads using gzip.
+
         Args:
             data: Data payload to publish
             endpoint: Target endpoint URL
-            
+
         Returns:
             bool: True if successful, False otherwise
         """
@@ -218,17 +220,33 @@ class UnifiedDataPublisher(DataPublisher):
         try:
             # Sign the message using corrected format
             signed_payload = self._sign_message(data)
-            
+
+            # Serialize to JSON bytes
+            json_bytes = json.dumps(signed_payload).encode('utf-8')
+            original_size = len(json_bytes)
+
+            # Compress if payload is large (>1MB)
+            headers = {
+                "Accept": "application/json"
+            }
+            if original_size > 1_000_000:
+                compressed_bytes = gzip.compress(json_bytes, compresslevel=6)
+                compressed_size = len(compressed_bytes)
+                bt.logging.info(f"Compressed payload: {original_size / 1_000_000:.2f}MB -> {compressed_size / 1_000_000:.2f}MB ({compressed_size / original_size * 100:.1f}%)")
+                body = compressed_bytes
+                headers["Content-Type"] = "application/json"
+                headers["Content-Encoding"] = "gzip"
+            else:
+                body = json_bytes
+                headers["Content-Type"] = "application/json"
+
             # Make async HTTP request with longer timeout
             timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
-                    endpoint, 
-                    json=signed_payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Accept": "application/json"
-                    }
+                    endpoint,
+                    data=body,
+                    headers=headers
                 ) as response:
                     response_time = time.time() - start_time
                     if response.status == 202:  # Expect 202 Accepted for async processing

@@ -44,6 +44,13 @@ class Brief:
         
         if not self.pool:
             raise ValueError("Pool name cannot be empty")
+        
+        # Require at least one of tag or qrt for search-based tweet scoring
+        if not self.tag and not self.qrt:
+            raise ValueError(
+                f"Brief '{self.id}' must specify either 'tag' or 'qrt' field. "
+                "Search-based scoring requires at least one filter."
+            )
     
     @property
     def daily_budget(self) -> float:

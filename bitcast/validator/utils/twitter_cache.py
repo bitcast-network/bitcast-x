@@ -1,8 +1,11 @@
 """
-Twitter API data caching utilities.
+Caching utilities for social discovery and Twitter API data.
 
-Provides centralized caching for Twitter API responses following the standard
-cache pattern used throughout the system.
+DiscoveryCache: Cache for social discovery user timeline fetches (90-day expiry)
+- Used by social discovery to cache account timelines for network building
+- Keys: user_tweets_{username}, user_info_{username}
+
+For tweet scoring, use TweetStore (accumulative, no expiry) instead.
 """
 
 import os
@@ -13,15 +16,15 @@ from typing import Any, Dict, Optional
 from diskcache import Cache
 import bittensor as bt
 
-from bitcast.validator.utils.config import CACHE_DIRS, TWITTER_CACHE_EXPIRY
+from bitcast.validator.utils.config import CACHE_DIRS, CACHE_EXPIRY_SECONDS
 
 
-class TwitterCache:
+class DiscoveryCache:
     """
-    Thread-safe singleton cache for Twitter API data.
+    Thread-safe singleton cache for social discovery user timeline data.
     
-    Follows the standard cache pattern used throughout the system with
-    automatic cleanup and centralized management.
+    Stores account timelines fetched during social discovery with a 90-day expiry.
+    Tweet scoring uses TweetStore (accumulative, no expiry) instead.
     """
     
     _instance = None
@@ -40,9 +43,8 @@ class TwitterCache:
                 disk_min_file_size=0,
                 disk_pickle_protocol=4,
             )
-            # Register cleanup on program exit
             atexit.register(cls.cleanup)
-            bt.logging.info(f"TwitterCache initialized at: {cls._cache_dir}")
+            bt.logging.info(f"DiscoveryCache initialized at: {cls._cache_dir}")
 
     @classmethod
     def cleanup(cls) -> None:
@@ -83,18 +85,17 @@ def cache_user_tweets(username: str, data: Dict[str, Any]) -> None:
         username: Twitter username
         data: Tweet data to cache
     """
-    cache = TwitterCache.get_cache()
+    cache = DiscoveryCache.get_cache()
     cache_key = get_user_tweets_cache_key(username)
     
-    # Add timestamp for cache validation
     data_with_timestamp = {
         **data,
         'last_updated': data.get('last_updated', datetime.now()),
         'cache_timestamp': datetime.now().isoformat()
     }
     
-    cache.set(cache_key, data_with_timestamp, expire=TWITTER_CACHE_EXPIRY)
-    bt.logging.debug(f"Cached tweets for @{username} (expires in {TWITTER_CACHE_EXPIRY}s)")
+    cache.set(cache_key, data_with_timestamp, expire=CACHE_EXPIRY_SECONDS)
+    bt.logging.debug(f"Cached tweets for @{username} (expires in {CACHE_EXPIRY_SECONDS}s)")
 
 
 def get_cached_user_tweets(username: str) -> Optional[Dict[str, Any]]:
@@ -107,7 +108,7 @@ def get_cached_user_tweets(username: str) -> Optional[Dict[str, Any]]:
     Returns:
         Cached data if available, None otherwise
     """
-    cache = TwitterCache.get_cache()
+    cache = DiscoveryCache.get_cache()
     cache_key = get_user_tweets_cache_key(username)
     
     cached_data = cache.get(cache_key)
@@ -127,16 +128,15 @@ def cache_user_info(username: str, user_info: Dict[str, Any]) -> None:
         username: Twitter username
         user_info: User information to cache
     """
-    cache = TwitterCache.get_cache()
+    cache = DiscoveryCache.get_cache()
     cache_key = get_user_info_cache_key(username)
     
-    # Add timestamp
     info_with_timestamp = {
         **user_info,
         'cache_timestamp': datetime.now().isoformat()
     }
     
-    cache.set(cache_key, info_with_timestamp, expire=TWITTER_CACHE_EXPIRY)
+    cache.set(cache_key, info_with_timestamp, expire=CACHE_EXPIRY_SECONDS)
     bt.logging.debug(f"Cached user info for @{username}")
 
 
@@ -150,7 +150,7 @@ def get_cached_user_info(username: str) -> Optional[Dict[str, Any]]:
     Returns:
         Cached user info if available, None otherwise
     """
-    cache = TwitterCache.get_cache()
+    cache = DiscoveryCache.get_cache()
     cache_key = get_user_info_cache_key(username)
     
     cached_info = cache.get(cache_key)
@@ -175,7 +175,7 @@ def clear_empty_tweet_caches() -> Dict[str, int]:
         - 'removed': Number of empty entries removed
         - 'preserved': Number of entries with tweets preserved
     """
-    cache = TwitterCache.get_cache()
+    cache = DiscoveryCache.get_cache()
     
     stats = {
         'checked': 0,
@@ -183,9 +183,7 @@ def clear_empty_tweet_caches() -> Dict[str, int]:
         'preserved': 0
     }
     
-    # Iterate through all cache keys
     for key in list(cache.iterkeys()):
-        # Only process user_tweets entries
         if not key.startswith('user_tweets_'):
             continue
         
@@ -194,7 +192,6 @@ def clear_empty_tweet_caches() -> Dict[str, int]:
         try:
             cached_data = cache.get(key)
             
-            # Check if entry has no tweets
             if cached_data and not cached_data.get('tweets'):
                 username = key.replace('user_tweets_', '')
                 cache.delete(key)
@@ -215,4 +212,4 @@ def clear_empty_tweet_caches() -> Dict[str, int]:
 
 
 # Initialize cache
-TwitterCache.initialize_cache()
+DiscoveryCache.initialize_cache()
