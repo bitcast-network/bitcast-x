@@ -8,7 +8,7 @@ Referral bonuses are paid when:
 """
 
 from datetime import date, timedelta
-from typing import Dict, List, NamedTuple, Optional, Set
+from typing import Dict, List, NamedTuple, Set
 import bittensor as bt
 
 from bitcast.validator.account_connection.connection_db import ConnectionDatabase

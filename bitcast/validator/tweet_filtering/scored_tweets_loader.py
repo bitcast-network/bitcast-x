@@ -7,7 +7,7 @@ searching across all pool directories.
 
 import json
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 import bittensor as bt
 
 
