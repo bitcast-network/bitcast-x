@@ -11,7 +11,6 @@ This module implements the Twitter evaluator that:
 
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
-import asyncio
 import bittensor as bt
 
 from bitcast.validator.reward_engine.interfaces.platform_evaluator import ScanBasedEvaluator
