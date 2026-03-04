@@ -9,7 +9,7 @@ from slowapi.errors import RateLimitExceeded
 from pathlib import Path
 import numpy as np
 import json
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from datetime import datetime, timezone
 import uvicorn
 
