@@ -7,9 +7,8 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from bitcast.validator.social_discovery.social_map_client import SocialMapClient
+from bitcast.validator.social_discovery.social_map_client import SocialMapClient, get_latest_social_map_path
 from bitcast.validator.social_discovery.pool_manager import PoolManager
-from bitcast.validator.social_discovery.social_map_loader import get_latest_social_map_path
 
 
 def is_social_map_stale(pool_dir: Path, max_age_hours: int = 24) -> bool:

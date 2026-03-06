@@ -12,40 +12,38 @@ from datetime import datetime
 from bitcast.validator.utils.config import REFERENCE_VALIDATOR_ENDPOINT
 
 
+def get_latest_social_map_path(pool_dir: Path) -> Optional[Path]:
+    """
+    Get path to latest social map file in pool directory.
+    
+    Args:
+        pool_dir: Directory containing social maps for a pool
+        
+    Returns:
+        Path to latest social map file, or None if no files exist
+    """
+    if not pool_dir.exists():
+        return None
+    
+    social_map_files = [
+        f for f in pool_dir.glob("*.json")
+        if not f.name.endswith('_adjacency.json')
+        and not f.name.endswith('_metadata.json')
+        and not f.name.startswith('recursive_summary_')
+    ]
+    
+    if not social_map_files:
+        return None
+    
+    return max(social_map_files, key=lambda f: f.name)
+
+
 class SocialMapClient:
     """Client for downloading social maps from reference validator."""
     
     def __init__(self, timeout: float = 30.0):
         self.base_url = REFERENCE_VALIDATOR_ENDPOINT
         self.timeout = timeout
-    
-    def _get_latest_social_map_path(self, pool_dir: Path) -> Optional[Path]:
-        """
-        Get path to latest social map file in pool directory.
-        
-        Args:
-            pool_dir: Directory containing social maps for a pool
-            
-        Returns:
-            Path to latest social map file, or None if no files exist
-        """
-        if not pool_dir.exists():
-            return None
-        
-        # Find social map files (exclude adjacency, metadata, and recursive summary files)
-        social_map_files = [
-            f for f in pool_dir.glob("*.json")
-            if not f.name.endswith('_adjacency.json')
-            and not f.name.endswith('_metadata.json')
-            and not f.name.startswith('recursive_summary_')
-        ]
-        
-        if not social_map_files:
-            return None
-        
-        # Get latest by filename (timestamp-based)
-        latest_file = max(social_map_files, key=lambda f: f.name)
-        return latest_file
     
     def _is_content_identical(self, new_map: dict, existing_file: Path) -> bool:
         """
@@ -136,7 +134,7 @@ class SocialMapClient:
                 save_dir.mkdir(parents=True, exist_ok=True)
                 
                 # Check for content deduplication
-                existing_file = self._get_latest_social_map_path(save_dir)
+                existing_file = get_latest_social_map_path(save_dir)
                 if existing_file and self._is_content_identical(social_map, existing_file):
                     bt.logging.info(
                         f"📋 Social map for '{pool_name}' is identical to existing file {existing_file.name} "
