@@ -124,9 +124,17 @@ python -m bitcast.validator.tweet_filtering.tweet_filter \
 ## LLM Evaluation
 
 - **Model**: Configured in `ChuteClient.py` (default: DeepSeek-V3)
-- **Caching**: Disk-based cache enabled by default
+- **Caching**: Each check variant is cached independently (re-runs are fast)
 - **Temperature**: 0 (deterministic)
 - **Parallel Processing**: 10 workers default
+
+### Optimistic Multi-Check
+
+Each tweet is evaluated **3 times** (configurable via `NUM_LLM_CHECKS` in `brief_evaluator.py`). If **any** check passes, the tweet is accepted. This reduces false negatives from LLM inconsistency.
+
+- A check digit is appended to the tweet text for each evaluation (e.g., `"tweet text 1"`, `"tweet text 2"`, `"tweet text 3"`) to produce distinct prompts/cache keys
+- Short-circuits on first pass (1 API call best case, 3 worst case)
+- Results include `llm_checks_used` field showing how many checks were needed
 
 ### Prompt Versions
 Brief evaluation supports versioned prompts:

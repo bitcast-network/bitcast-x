@@ -1,3 +1,4 @@
+import time
 import bittensor as bt
 import requests
 import secrets
@@ -6,7 +7,7 @@ import os
 import atexit
 from threading import Lock
 from typing import Optional, Dict, Any
-from tenacity import retry, stop_after_attempt, wait_exponential
+
 from diskcache import Cache
 
 from bitcast.validator.utils.config import (
@@ -85,42 +86,52 @@ ChuteClient.initialize_cache()
 # Register cleanup on exit
 atexit.register(ChuteClient.cleanup)
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2
+
+
 def _make_chutes_request(model: str, **kwargs):
-    """Make Chutes API request with retry logic."""
+    """Make Chutes API request with retry and exponential backoff."""
     global chutes_request_count
     chutes_request_count += 1
     
-    try:
-        headers = {
-            "Authorization": f"Bearer {CHUTES_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        # Prepare request payload
-        payload = {
-            "model": model,
-            "messages": kwargs.get("messages", []),
-            "temperature": kwargs.get("temperature", 0),
-            "max_tokens": kwargs.get("max_tokens", 4096)
-        }
-        
-        response = requests.post(
-            "https://llm.chutes.ai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=60
-        )
-        response.raise_for_status()
-        
-        return response.json()
-        
-    except requests.exceptions.RequestException as e:
-        bt.logging.warning(f"Chutes API error (attempting retry): {e}")
-        raise
-    except Exception as e:
-        bt.logging.error(f"Unexpected error during Chutes request: {e}")
-        raise
+    headers = {
+        "Authorization": f"Bearer {CHUTES_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": model,
+        "messages": kwargs.get("messages", []),
+        "temperature": kwargs.get("temperature", 0),
+        "max_tokens": kwargs.get("max_tokens", 4096)
+    }
+    
+    last_exception = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                "https://llm.chutes.ai/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
+            response.raise_for_status()
+            return response.json()
+            
+        except requests.exceptions.RequestException as e:
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                wait = RETRY_BACKOFF_BASE ** attempt
+                bt.logging.warning(
+                    f"Chutes API error (attempt {attempt}/{MAX_RETRIES}, "
+                    f"retrying in {wait}s): {e}"
+                )
+                time.sleep(wait)
+            else:
+                bt.logging.error(f"Chutes API error (attempt {attempt}/{MAX_RETRIES}, giving up): {e}")
+    
+    raise last_exception
 
 def _crop_tweet(tweet) -> str:
     """Trim tweet to TWEET_MAX_LENGTH if needed."""
