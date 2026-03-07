@@ -3,6 +3,10 @@ Brief evaluation wrapper using ChuteClient LLM.
 
 Wraps the existing evaluate_content_against_brief function with
 batching, parallel processing, and error handling.
+
+Uses optimistic multi-check: each tweet is evaluated multiple times
+(with a small differentiator appended to produce distinct cache keys),
+and passes if ANY check passes (reducing false negatives).
 """
 
 import time
@@ -13,12 +17,16 @@ import bittensor as bt
 from bitcast.validator.clients.ChuteClient import evaluate_content_against_brief
 from bitcast.validator.utils.config import SOCIAL_DISCOVERY_MAX_WORKERS
 
+NUM_LLM_CHECKS = 3
+
 
 class BriefEvaluator:
     """
     Evaluates tweets against a brief using LLM.
     
     Provides single tweet and batch evaluation with parallel processing.
+    Uses optimistic multi-check: runs NUM_LLM_CHECKS evaluations per tweet
+    and accepts if any check passes.
     """
     
     def __init__(self, brief: Dict, max_workers: int = None):
@@ -41,16 +49,20 @@ class BriefEvaluator:
     
     def evaluate_tweet(self, tweet: Dict) -> Dict:
         """
-        Evaluate a single tweet against the brief.
+        Evaluate a single tweet against the brief using optimistic multi-check.
+        
+        Runs up to NUM_LLM_CHECKS evaluations, appending a check digit to the
+        tweet text so each call produces a distinct cache key/prompt.
+        If any check passes, the tweet is accepted (optimistic bias to reduce
+        false negatives). Short-circuits on first pass.
         
         Args:
             tweet: Tweet dict with at least 'text', 'tweet_id', 'author'
             
         Returns:
-            Tweet dict enriched with 'meets_brief' and 'reasoning' fields.
-            All original tweet fields are preserved.
+            Tweet dict enriched with 'meets_brief', 'reasoning', and
+            'llm_checks_used' fields. All original tweet fields are preserved.
         """
-        # Extract tweet text
         tweet_text = tweet.get('text', '')
         
         if not tweet_text:
@@ -63,36 +75,59 @@ class BriefEvaluator:
                 'reasoning': 'Tweet has no text content'
             }
         
-        # Evaluate using ChuteClient
-        try:
-            meets_brief, reasoning, detailed_breakdown = evaluate_content_against_brief(
-                self.brief, 
-                tweet_text, 
-                tweet_id=tweet.get('tweet_id'),
-                author=tweet.get('author')
-            )
-            
-            result = {
-                **tweet,
-                'meets_brief': meets_brief,
-                'reasoning': reasoning
-            }
-            
-            # Add detailed breakdown if available
-            if detailed_breakdown:
-                result['detailed_breakdown'] = detailed_breakdown
-            
-            return result
-            
-        except Exception as e:
-            bt.logging.error(
-                f"LLM evaluation failed for tweet {tweet.get('tweet_id', 'unknown')}: {e}"
-            )
-            return {
-                **tweet,
-                'meets_brief': False,
-                'reasoning': f'Evaluation failed: {str(e)}'
-            }
+        tweet_id = tweet.get('tweet_id', 'unknown')
+        author = tweet.get('author', 'unknown')
+        
+        last_reasoning = None
+        last_detailed_breakdown = None
+        
+        for check_num in range(1, NUM_LLM_CHECKS + 1):
+            try:
+                variant_text = f"{tweet_text} {check_num}"
+                
+                meets_brief, reasoning, detailed_breakdown = evaluate_content_against_brief(
+                    self.brief,
+                    variant_text,
+                    tweet_id=tweet.get('tweet_id'),
+                    author=tweet.get('author'),
+                )
+                
+                last_reasoning = reasoning
+                last_detailed_breakdown = detailed_breakdown
+                
+                if meets_brief:
+                    bt.logging.debug(
+                        f"Tweet {tweet_id} by @{author} passed on check {check_num}/{NUM_LLM_CHECKS}"
+                    )
+                    result = {
+                        **tweet,
+                        'meets_brief': True,
+                        'reasoning': reasoning,
+                        'llm_checks_used': check_num
+                    }
+                    if detailed_breakdown:
+                        result['detailed_breakdown'] = detailed_breakdown
+                    return result
+                    
+            except Exception as e:
+                bt.logging.error(
+                    f"LLM check {check_num}/{NUM_LLM_CHECKS} failed for tweet {tweet_id}: {e}"
+                )
+                last_reasoning = f'Evaluation failed: {str(e)}'
+                last_detailed_breakdown = None
+        
+        bt.logging.debug(
+            f"Tweet {tweet_id} by @{author} failed all {NUM_LLM_CHECKS} checks"
+        )
+        result = {
+            **tweet,
+            'meets_brief': False,
+            'reasoning': last_reasoning or 'All checks failed',
+            'llm_checks_used': NUM_LLM_CHECKS
+        }
+        if last_detailed_breakdown:
+            result['detailed_breakdown'] = last_detailed_breakdown
+        return result
     
     def evaluate_tweets_batch(self, tweets: List[Dict]) -> List[Dict]:
         """
