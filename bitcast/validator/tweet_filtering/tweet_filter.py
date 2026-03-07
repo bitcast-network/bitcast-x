@@ -103,13 +103,13 @@ def apply_max_tweets_filter(
         if len(author_tweets) <= max_tweets:
             limited_tweets.extend(author_tweets)
         else:
-            # Sort by score (descending), then by engagement metrics as tiebreaker
             sorted_tweets = sorted(
                 author_tweets,
                 key=lambda t: (
-                    -t.get('score', 0.0),        # Higher score first
-                    -t.get('views_count', 0),     # Higher views first
-                    -t.get('favorite_count', 0),  # Higher likes first
+                    -t.get('score', 0.0),
+                    -t.get('views_count', 0),
+                    -t.get('favorite_count', 0),
+                    t.get('created_at', ''),
                 )
             )
             limited_tweets.extend(sorted_tweets[:max_tweets])
