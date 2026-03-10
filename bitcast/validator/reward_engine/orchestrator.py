@@ -150,10 +150,25 @@ class RewardOrchestrator:
                 if activated > 0:
                     bt.logging.info(f"Activated {activated} new referral bonuses")
                 
+                # Build merged account_data from social maps for dynamic bonus calc
+                # Keys are lowercased to match connection DB convention
+                from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social_map
+                account_data: Dict[str, Dict] = {}
+                for pool in all_pools:
+                    try:
+                        social_map, _ = load_latest_social_map(pool)
+                        for username, data in social_map.get('accounts', {}).items():
+                            key = username.lower()
+                            if key not in account_data:
+                                account_data[key] = data
+                    except FileNotFoundError:
+                        bt.logging.warning(f"No social map for pool '{pool}', skipping for referral calc")
+                
                 today = date.today()
                 result = referral_service.get_referral_bonuses(
                     payout_date=today,
-                    account_to_uid=account_to_uid
+                    account_to_uid=account_to_uid,
+                    account_data=account_data,
                 )
                 
                 if result.bonuses:
@@ -214,17 +229,16 @@ class RewardOrchestrator:
             for ref in referrals:
                 referee = ref['account_username']
                 referrer = ref.get('referred_by')
-                referee_amount = ref.get('referee_amount', 50.0)
-                referrer_amount = ref.get('referrer_amount', 50.0)
+                amount = ref.get('computed_amount', 0.0)
                 bonuses.append({
                     "referee": referee,
                     "referrer": referrer,
                     "referee_uid": account_to_uid.get(referee),
                     "referrer_uid": account_to_uid.get(referrer) if referrer else None,
-                    "referee_amount_usd": referee_amount,
-                    "referrer_amount_usd": referrer_amount,
+                    "referee_amount_usd": amount,
+                    "referrer_amount_usd": amount,
                 })
-                total_usd += referee_amount + referrer_amount
+                total_usd += amount * (2 if referrer else 1)
             
             payload = {
                 "payout_date": payout_date.isoformat(),
