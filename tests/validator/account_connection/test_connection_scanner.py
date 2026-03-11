@@ -170,11 +170,13 @@ class TestConnectionScanner:
                     'tweet_id': '111',
                     'author': 'alice',
                     'text': 'bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+                    'in_reply_to_status_id': '9999',
                 },
                 {
                     'tweet_id': '222',
                     'author': 'bob',
                     'text': 'bitcast-xtest123',
+                    'in_reply_to_status_id': '9999',
                 },
             ],
             'api_succeeded': True,
@@ -203,13 +205,13 @@ class TestConnectionScanner:
         mock_twitter_client.fetch_post_replies.side_effect = [
             {
                 'tweets': [
-                    {'tweet_id': '111', 'author': 'alice', 'text': 'bitcast-xabc'},
+                    {'tweet_id': '111', 'author': 'alice', 'text': 'bitcast-xabc', 'in_reply_to_status_id': '8888'},
                 ],
                 'api_succeeded': True,
             },
             {
                 'tweets': [
-                    {'tweet_id': '222', 'author': 'bob', 'text': 'bitcast-xdef'},
+                    {'tweet_id': '222', 'author': 'bob', 'text': 'bitcast-xdef', 'in_reply_to_status_id': '9999'},
                 ],
                 'api_succeeded': True,
             },

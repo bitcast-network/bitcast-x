@@ -31,8 +31,8 @@ bitcast-xabc123-ZHJlYWRib25nMA
 5. **Publish** - Optionally publishes to data API
 
 Provider-specific behaviour:
-- **Desearch**: Uses `/twitter/replies/post` to fetch replies
-- **RapidAPI**: Uses `/tweet/details` with cursor-based pagination
+- **Desearch**: Uses `/twitter/replies/post` with `since:{today}` filtering (returns latest replies only)
+- **RapidAPI**: Uses `/tweet/details` with cursor-based pagination (returns all replies)
 
 Runs every `SCORING_INTERVAL_MINUTES` (default: 20 min).
 

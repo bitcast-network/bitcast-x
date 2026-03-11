@@ -167,16 +167,19 @@ class ConnectionScanner:
             bt.logging.warning("No CONNECTION_TWEET_IDS configured, skipping scan")
             return []
 
+        tweet_id_set = set(self.tweet_ids)
         all_replies: List[Dict] = []
         for tid in self.tweet_ids:
             bt.logging.info(f"Fetching replies for connection tweet {tid}")
             result = self.twitter_client.fetch_post_replies(tid)
             if result['api_succeeded']:
-                all_replies.extend([t for t in result['tweets'] if t.get('tweet_id')])
+                for t in result['tweets']:
+                    if t.get('tweet_id') and t.get('in_reply_to_status_id') in tweet_id_set:
+                        all_replies.append(t)
             else:
                 bt.logging.warning(f"Failed to fetch replies for tweet {tid}")
 
-        bt.logging.info(f"Fetched {len(all_replies)} total replies across {len(self.tweet_ids)} tweet(s)")
+        bt.logging.info(f"Fetched {len(all_replies)} direct replies across {len(self.tweet_ids)} tweet(s)")
         return all_replies
 
     async def scan_pool(self, pool_name: str, publish: bool = True,
