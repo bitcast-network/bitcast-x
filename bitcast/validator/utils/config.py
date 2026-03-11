@@ -137,8 +137,8 @@ SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
-# Account connection scanning
-CONNECTION_SEARCH_TAG = os.getenv('CONNECTION_SEARCH_TAG', '@Bitcast_network')
+# Account connection scanning -- designated tweets that miners reply to with connection tags
+CONNECTION_TWEET_IDS = ['2031383975088836738']
 
 # Validator mode: 'weight_copy' (default), 'standard', or 'discovery'
 # - weight_copy: Fetches weights from reference validator
@@ -180,4 +180,4 @@ bt.logging.info(f"NOCODE_UID: {NOCODE_UID}")
 bt.logging.info(f"SIMULATE_CONNECTIONS: {SIMULATE_CONNECTIONS}")
 bt.logging.info(f"VALIDATOR_MODE: {VALIDATOR_MODE}")
 bt.logging.info(f"REFERENCE_VALIDATOR_ENDPOINT: {REFERENCE_VALIDATOR_ENDPOINT}")
-bt.logging.info(f"CONNECTION_SEARCH_TAG: {CONNECTION_SEARCH_TAG}")
+bt.logging.info(f"CONNECTION_TWEET_IDS: {CONNECTION_TWEET_IDS}")

@@ -574,6 +574,35 @@ class TwitterClient:
                 'provider_used': self.provider_name
             }
     
+    def fetch_post_replies(self, tweet_id: str, max_results: int = 100) -> Dict[str, Any]:
+        """
+        Fetch replies to a specific tweet.
+        
+        Args:
+            tweet_id: The tweet ID to fetch replies for
+            max_results: Maximum number of replies to return
+        
+        Returns:
+            Dict with 'tweets' list and 'api_succeeded' boolean
+        """
+        try:
+            tweets, api_succeeded = self.provider.fetch_post_replies(
+                tweet_id=tweet_id,
+                max_results=max_results
+            )
+            return {
+                'tweets': tweets,
+                'api_succeeded': api_succeeded,
+                'provider_used': self.provider_name
+            }
+        except Exception as e:
+            bt.logging.error(f"Fetch post replies failed for tweet {tweet_id}: {e}")
+            return {
+                'tweets': [],
+                'api_succeeded': False,
+                'provider_used': self.provider_name
+            }
+
     def fetch_tweet_by_id(self, tweet_id: str) -> Dict[str, Any]:
         """
         Fetch a single tweet by its ID.

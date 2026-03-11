@@ -1,12 +1,10 @@
 # Account Connection
 
-Discovers connection tags by searching for tweets containing a search keyword (e.g. `@bitcast`), then extracting `bitcast-hk:` and `bitcast-x` tags from matching tweets.
+Discovers connection tags by fetching replies to designated connection tweets, then extracting `bitcast-hk:` and `bitcast-x` tags from matching replies.
 
 ## Overview
 
-Connection tweets must include:
-1. The search keyword (default: `@bitcast`) - so the search API can find them
-2. A connection tag - to link the X account to a Bittensor UID
+Miners register by replying to one or more designated tweets with a connection tag. The scanner fetches replies to those tweets and processes them.
 
 ### Tag Formats
 - `bitcast-hk:{substrate_hotkey}` - Direct hotkey connection
@@ -18,21 +16,25 @@ Both formats support an optional referral code suffix:
 
 Referral codes are URL-safe Base64-encoded X handles (no padding).
 
-### Example Connection Tweets
+### Example Connection Replies
 ```
-@bitcast bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq
-@bitcast bitcast-xabc123-ZHJlYWRib25nMA
+bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq
+bitcast-xabc123-ZHJlYWRib25nMA
 ```
 
 ## How It Works
 
-1. **Search API** - Searches for tweets containing `@bitcast` (configurable via `CONNECTION_SEARCH_TAG`)
-2. **Cross-reference** - Filters results to authors in the social map
-3. **Extract tags** - Parses `bitcast-hk:` and `bitcast-x` tags from tweet text
+1. **Fetch replies** - For each tweet ID in `CONNECTION_TWEET_IDS`, fetches replies via `TwitterClient.fetch_post_replies()`
+2. **Cross-reference** - Filters replies to authors in the social map
+3. **Extract tags** - Parses `bitcast-hk:` and `bitcast-x` tags from reply text
 4. **Store** - Saves connections to SQLite database
 5. **Publish** - Optionally publishes to data API
 
-Uses dual-sort search (both "latest" and "top") for maximum coverage. Runs every hour.
+Provider-specific behaviour:
+- **Desearch**: Uses `/twitter/replies/post` to fetch replies
+- **RapidAPI**: Uses `/tweet/details` with cursor-based pagination
+
+Runs every `SCORING_INTERVAL_MINUTES` (default: 20 min).
 
 ## Automatic Connection Download
 
@@ -54,7 +56,7 @@ python -m bitcast.validator.account_connection.download_connections --force
 
 ```
 account_connection/
-├── connection_scanner.py  # Search-based scanner + CLI
+├── connection_scanner.py  # Reply-based scanner + CLI
 ├── connection_db.py       # SQLite operations
 ├── tag_parser.py          # Tag extraction/validation
 ├── referral_code.py       # Referral code encode/decode
@@ -72,9 +74,6 @@ python -m bitcast.validator.account_connection.connection_scanner
 
 # Scan specific pool
 python -m bitcast.validator.account_connection.connection_scanner --pool-name tao
-
-# Custom lookback period
-python -m bitcast.validator.account_connection.connection_scanner --lookback-days 14
 ```
 
 ### Programmatic
@@ -93,15 +92,15 @@ accounts = db.get_accounts_with_uids("tao", metagraph)
 
 ## Configuration
 
-```python
-CONNECTION_SEARCH_TAG = '@bitcast'  # Keyword to search for (env: CONNECTION_SEARCH_TAG)
-SCORING_INTERVAL_MINUTES = 45  # Scoring + connection scan frequency
+```bash
+# Comma-separated list of tweet IDs that miners reply to with connection tags
+CONNECTION_TWEET_IDS=2031383975088836738,2031383975088836739
 ```
 
 ## Data Flow
 
 ```
-Search API ("@bitcast") → Filter by Social Map → Extract Tags → Store in SQLite
+Fetch replies to CONNECTION_TWEET_IDS → Filter by Social Map → Extract Tags → Store in SQLite
 ```
 
 ## Testing
