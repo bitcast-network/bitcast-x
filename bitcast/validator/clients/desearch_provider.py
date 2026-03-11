@@ -666,7 +666,7 @@ class DesearchProvider(TwitterProvider):
                 if not tweet_data:
                     return None, True
                 
-                parsed = self._parse_search_tweet(tweet_data)
+                parsed = self._parse_tweet(tweet_data)
                 if parsed:
                     bt.logging.info(f"Fetched tweet {tweet_id} by @{parsed.get('author', '?')}")
                 else:
