@@ -156,6 +156,26 @@ class TwitterProvider(ABC):
         pass
     
     @abstractmethod
+    def fetch_post_replies(
+        self,
+        tweet_id: str,
+        max_results: int = 100
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Fetch replies to a specific tweet/post.
+        
+        Args:
+            tweet_id: The tweet ID to fetch replies for
+            max_results: Maximum number of replies to return (default: 100)
+        
+        Returns:
+            Tuple of (tweets_list, api_succeeded):
+            - tweets_list: List of reply tweet dictionaries in normalized format
+            - api_succeeded: True if API call succeeded, False otherwise
+        """
+        pass
+    
+    @abstractmethod
     def fetch_tweet_by_id(
         self,
         tweet_id: str

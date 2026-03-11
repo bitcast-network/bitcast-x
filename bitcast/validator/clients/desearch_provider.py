@@ -593,6 +593,41 @@ class DesearchProvider(TwitterProvider):
         bt.logging.debug(f"Found {len(usernames)} retweeters for tweet {tweet_id}")
         return usernames, api_succeeded
     
+    def fetch_post_replies(
+        self,
+        tweet_id: str,
+        max_results: int = 100
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Fetch replies to a specific tweet via Desearch.ai /twitter/replies/post.
+
+        Uses since:{today} filtering to pull only the latest replies.
+        """
+        from datetime import date
+        url = f"{self.base_url}/twitter/replies/post"
+        params = {
+            "post_id": tweet_id,
+            "query": f"since:{date.today().isoformat()}",
+            "count": min(max_results, 100),
+        }
+
+        tweets = []
+        data, error = self._make_api_request(url, params)
+        if error:
+            bt.logging.warning(f"Desearch replies API error for tweet {tweet_id}: {error}")
+            return tweets, False
+
+        tweet_list = data if isinstance(data, list) else data.get('tweets', [])
+        for tweet_data in tweet_list:
+            parsed = self._parse_tweet(tweet_data)
+            if parsed:
+                tweets.append(parsed)
+                if len(tweets) >= max_results:
+                    break
+
+        bt.logging.info(f"Fetched {len(tweets)} replies for tweet {tweet_id}")
+        return tweets, True
+
     def fetch_tweet_by_id(
         self,
         tweet_id: str

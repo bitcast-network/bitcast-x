@@ -805,6 +805,90 @@ class RapidAPIProvider(TwitterProvider):
         bt.logging.debug(f"Found {len(usernames)} retweeters for tweet {tweet_id}")
         return usernames, api_succeeded
     
+    def fetch_post_replies(
+        self,
+        tweet_id: str,
+        max_results: int = 100
+    ) -> Tuple[List[Dict], bool]:
+        """
+        Fetch replies to a specific tweet via RapidAPI /tweet/details.
+
+        Paginates through conversation thread entries to collect all replies.
+        """
+        url = f"{self.base_url}/tweet/details"
+        tweets: List[Dict] = []
+        api_succeeded = False
+        cursor = None
+        max_pages = 10
+
+        try:
+            for page in range(max_pages):
+                if len(tweets) >= max_results:
+                    break
+
+                params: Dict = {"tweet_id": tweet_id}
+                if cursor:
+                    params["cursor"] = cursor
+
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                if response.status_code in [429, 500, 502, 503, 504]:
+                    bt.logging.warning(
+                        f"Tweet details API error {response.status_code} for tweet {tweet_id}"
+                    )
+                    if page == 0:
+                        return tweets, False
+                    break
+
+                response.raise_for_status()
+                data = response.json()
+                api_succeeded = True
+
+                timeline = data.get('data', {}).get(
+                    'threaded_conversation_with_injections_v2', {}
+                )
+                instructions = timeline.get('instructions', [])
+
+                entries = []
+                for instruction in instructions:
+                    if instruction.get('type') == 'TimelineAddEntries':
+                        entries.extend(instruction.get('entries', []))
+
+                cursor = None
+                for entry in entries:
+                    entry_id = entry.get('entryId', '')
+
+                    if entry_id.startswith('cursor-bottom'):
+                        cursor = entry.get('content', {}).get('value')
+                        continue
+
+                    if not entry_id.startswith('conversationthread-'):
+                        continue
+
+                    items = entry.get('content', {}).get('items', [])
+                    for item in items:
+                        try:
+                            tweet_result = (
+                                item['item']['itemContent']['tweet_results']['result']
+                            )
+                            parsed = self._parse_tweet(tweet_result)
+                            if parsed and parsed.get('tweet_id'):
+                                tweets.append(parsed)
+                                if len(tweets) >= max_results:
+                                    break
+                        except (KeyError, TypeError):
+                            continue
+
+                if not cursor or len(tweets) >= max_results:
+                    break
+
+                time.sleep(self.rate_limit_delay)
+
+        except Exception as e:
+            bt.logging.error(f"Tweet details API error for tweet {tweet_id}: {e}")
+
+        bt.logging.info(f"Fetched {len(tweets)} replies for tweet {tweet_id}")
+        return tweets, api_succeeded
+
     def fetch_tweet_by_id(
         self,
         tweet_id: str
