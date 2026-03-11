@@ -31,8 +31,8 @@ bitcast-xabc123-ZHJlYWRib25nMA
 5. **Publish** - Optionally publishes to data API
 
 Provider-specific behaviour:
-- **Desearch**: Uses `/twitter/replies/post` with `since:{today}` filtering (returns latest replies only)
-- **RapidAPI**: Uses `/tweet/details` with cursor-based pagination (returns all replies)
+- **Desearch**: Uses `/twitter/replies/post` to fetch replies
+- **RapidAPI**: Uses `/tweet/details` with cursor-based pagination
 
 Runs every `SCORING_INTERVAL_MINUTES` (default: 20 min).
 
@@ -92,10 +92,7 @@ accounts = db.get_accounts_with_uids("tao", metagraph)
 
 ## Configuration
 
-```bash
-# Comma-separated list of tweet IDs that miners reply to with connection tags
-CONNECTION_TWEET_IDS=2031383975088836738,2031383975088836739
-```
+Tweet IDs are hardcoded in `bitcast/validator/utils/config.py` as `CONNECTION_TWEET_IDS`.
 
 ## Data Flow
 
