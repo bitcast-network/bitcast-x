@@ -137,12 +137,8 @@ SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
-# Account connection scanning
-CONNECTION_TWEET_IDS = [
-    tid.strip() for tid in
-    os.getenv('CONNECTION_TWEET_IDS', '').split(',')
-    if tid.strip()
-]
+# Account connection scanning -- designated tweets that miners reply to with connection tags
+CONNECTION_TWEET_IDS = ['2031383975088836738']
 
 # Validator mode: 'weight_copy' (default), 'standard', or 'discovery'
 # - weight_copy: Fetches weights from reference validator
