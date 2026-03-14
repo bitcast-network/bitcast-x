@@ -73,6 +73,7 @@ class ConnectionDatabase:
                 tweet_id BIGINT NOT NULL,
                 tag VARCHAR(100) NOT NULL,
                 account_username VARCHAR(100) NOT NULL,
+                display_name VARCHAR(100),
                 added DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 referral_code VARCHAR(100),
@@ -88,6 +89,7 @@ class ConnectionDatabase:
             # Add columns that may be missing on existing databases
             existing_columns = {row[1] for row in cursor.execute("PRAGMA table_info(connections)").fetchall()}
             new_columns = [
+                ("display_name", "VARCHAR(100)"),
                 ("referral_code", "VARCHAR(100)"),
                 ("referred_by", "VARCHAR(100)"),
                 ("referee_amount", "REAL DEFAULT 50.0"),
@@ -121,6 +123,7 @@ class ConnectionDatabase:
         tweet_id: int, 
         tag: str, 
         account_username: str,
+        display_name: Optional[str] = None,
         referral_code: Optional[str] = None,
         referred_by: Optional[str] = None,
         referee_amount: float = 50.0,
@@ -161,12 +164,12 @@ class ConnectionDatabase:
                 return False
             else:
                 insert_sql = """
-                INSERT INTO connections (pool_name, tweet_id, tag, account_username, added, updated,
+                INSERT INTO connections (pool_name, tweet_id, tag, account_username, display_name, added, updated,
                                         referral_code, referred_by, referee_amount, referrer_amount)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
                 now = datetime.now(timezone.utc)
-                cursor.execute(insert_sql, (pool_name, tweet_id, tag, account_username, now, now,
+                cursor.execute(insert_sql, (pool_name, tweet_id, tag, account_username, display_name, now, now,
                                            referral_code, referred_by, referee_amount, referrer_amount))
                 conn.commit()
                 bt.logging.debug(f"Inserted new connection: {pool_name}/{account_username} - {tag}")

@@ -222,11 +222,14 @@ class DesearchProvider(TwitterProvider):
                 return None
 
             # Author resolution: use provided username, or extract from embedded user object
+            author_display_name = None
             if username:
                 author = username.lower()
             else:
                 user_data = desearch_data.get('user', {})
                 author = (user_data.get('username', '') or '').lower() if user_data else ''
+                if user_data:
+                    author_display_name = user_data.get('name') or None
                 if not author or not is_valid_twitter_username(author):
                     candidates = [
                         (user_data.get('screen_name', '') or '').lower(),
@@ -299,6 +302,7 @@ class DesearchProvider(TwitterProvider):
                 'created_at': created_at,
                 'text': text,
                 'author': author,
+                'author_display_name': author_display_name,
                 'tagged_accounts': tagged_accounts,
                 'retweeted_user': retweeted_user,
                 'retweeted_tweet_id': retweeted_tweet_id,
