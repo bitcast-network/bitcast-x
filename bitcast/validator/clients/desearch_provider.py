@@ -601,7 +601,9 @@ class DesearchProvider(TwitterProvider):
         """
         Fetch replies to a specific tweet via Desearch.ai /twitter/replies/post.
         """
+        from datetime import date, timedelta
         url = f"{self.base_url}/twitter/replies/post"
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
         params = {
             "post_id": tweet_id,
             "count": min(max_results, 100),
