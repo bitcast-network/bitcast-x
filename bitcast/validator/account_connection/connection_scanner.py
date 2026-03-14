@@ -106,12 +106,10 @@ class ConnectionScanner:
 
             tags = self.tag_parser.extract_tags(text)
 
-            display_name = tweet.get('author_display_name') or None
             for parsed in tags:
                 connections.append({
                     'tweet_id': tweet_id,
                     'username': author,
-                    'display_name': display_name,
                     'tag_type': parsed.tag_type,
                     'tag': parsed.full_tag,
                     'referral_code': parsed.referral_code,
@@ -147,7 +145,6 @@ class ConnectionScanner:
                     tweet_id=conn['tweet_id'],
                     tag=conn['tag'],
                     account_username=conn['username'],
-                    display_name=conn.get('display_name'),
                     referral_code=conn.get('referral_code'),
                     referred_by=conn.get('referred_by'),
                 )
@@ -246,7 +243,6 @@ class ConnectionScanner:
                     tweet_id=conn['tweet_id'],
                     tag=conn['tag'],
                     account_username=conn['username'],
-                    display_name=conn.get('display_name'),
                     referral_code=conn.get('referral_code'),
                     referred_by=conn.get('referred_by')
                 )
@@ -261,7 +257,6 @@ class ConnectionScanner:
                     'tweet_id': conn['tweet_id'],
                     'tag': conn['tag'],
                     'username': conn['username'],
-                    'display_name': conn.get('display_name'),
                 })
             except Exception as e:
                 bt.logging.error(f"Error storing connection: {e}")
@@ -334,7 +329,6 @@ class ConnectionScanner:
                     'tweet_id': conn['tweet_id'],
                     'tag': conn['tag'],
                     'username': conn['account_username'],
-                    'display_name': conn.get('display_name'),
                 }
                 for conn in all_db_connections
             ]

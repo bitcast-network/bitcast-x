@@ -329,18 +329,15 @@ class RapidAPIProvider(TwitterProvider):
             # Extract actual author from core.user_results
             # Different structure for search results vs user timeline
             author = None
-            author_display_name = None
             try:
                 user_result = tweet_result['core']['user_results']['result']
                 
                 # Try search results structure first (has nested 'core')
                 if 'core' in user_result:
                     author = user_result['core']['screen_name'].lower()
-                    author_display_name = user_result['core'].get('name') or None
                 # Fall back to user timeline structure (has 'legacy')
                 elif 'legacy' in user_result:
                     author = user_result['legacy']['screen_name'].lower()
-                    author_display_name = user_result['legacy'].get('name') or None
                     
             except (KeyError, AttributeError, TypeError):
                 # Author extraction failed - leave as None
@@ -375,7 +372,6 @@ class RapidAPIProvider(TwitterProvider):
                 'created_at': legacy.get('created_at', ''),
                 'text': text,
                 'author': author,  # Actual tweet author (None if not found)
-                'author_display_name': author_display_name,
                 'tagged_accounts': tagged_accounts,
                 'retweeted_user': retweeted_user,
                 'retweeted_tweet_id': retweeted_tweet_id,
