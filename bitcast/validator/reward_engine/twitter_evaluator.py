@@ -332,7 +332,10 @@ class TwitterEvaluator(ScanBasedEvaluator):
                         'retweets': tweet.get('retweets', []),
                         'quotes': tweet.get('quotes', []),
                         'created_at': tweet.get('created_at', ''),
-                        'lang': tweet.get('lang', 'und')
+                        'lang': tweet.get('lang', 'und'),
+                        'author_influence': tweet.get('author_influence'),
+                        'baseline_score': tweet.get('baseline_score'),
+                        'score_breakdown': tweet.get('score_breakdown')
                     })
                     
                     # Track contributing accounts
@@ -624,7 +627,10 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 'retweets': tweet_reward.get('retweets', []),
                 'quotes': tweet_reward.get('quotes', []),
                 'created_at': tweet_reward.get('created_at', ''),
-                'lang': tweet_reward.get('lang', 'und')
+                'lang': tweet_reward.get('lang', 'und'),
+                'author_influence': tweet_reward.get('author_influence'),
+                'baseline_score': tweet_reward.get('baseline_score'),
+                'score_breakdown': tweet_reward.get('score_breakdown')
             })
         
         return tweets_with_targets

@@ -140,6 +140,9 @@ def create_tweet_payload(
                 "score": tweet.get("score", 0.0),
                 "retweets": tweet.get("retweets", []),
                 "quotes": tweet.get("quotes", []),
+                "author_influence": tweet.get("author_influence"),
+                "baseline_score": tweet.get("baseline_score"),
+                "score_breakdown": tweet.get("score_breakdown"),
                 
                 # Brief evaluation
                 "meets_brief": True,
