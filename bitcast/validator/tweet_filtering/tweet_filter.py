@@ -327,7 +327,11 @@ def filter_tweets_for_brief(
             # Scoring engagement lists (who retweeted/quoted from considered accounts)
             'retweets': tweet.get('retweets', []),
             'quotes': tweet.get('quotes', []),
-            'quoted_tweet_id': tweet.get('quoted_tweet_id')  # For QRT transparency
+            'quoted_tweet_id': tweet.get('quoted_tweet_id'),  # For QRT transparency
+            # Score breakdown (for transparency UI)
+            'author_influence': tweet.get('author_influence'),
+            'baseline_score': tweet.get('baseline_score'),
+            'score_breakdown': tweet.get('score_breakdown')
         }
         for tweet in passed_tweets + failed_tweets
     ]
