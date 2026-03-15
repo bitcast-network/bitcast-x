@@ -47,10 +47,10 @@ def calculate_performance_bonus(
     bonuses = _compute_bonuses(metrics)
 
     for tweet, bonus in zip(tweets, bonuses):
-        tweet['performance_bonus_pct'] = round(bonus * 100, 1)
+        tweet['performance_bonus_pct'] = round(bonus * 100, 2)
         tweet['score'] = tweet.get('score', 0.0) * (1.0 + bonus)
 
-    _save_bonus_results(tweets, pool_name, brief_id)
+    _save_bonus_results(tweets, metrics, pool_name, brief_id)
 
     bt.logging.info(
         f"Applied performance bonus to {len(tweets)} tweets for brief {brief_id} "
@@ -106,7 +106,7 @@ def _compute_bonuses(metrics: List[Dict]) -> List[float]:
     return bonuses
 
 
-def _save_bonus_results(tweets: List[Dict], pool_name: str, brief_id: str) -> None:
+def _save_bonus_results(tweets: List[Dict], metrics: List[Dict], pool_name: str, brief_id: str) -> None:
     """Save bonus results to disk for auditing."""
     output_dir = Path(__file__).parent / "tweet_bonus" / pool_name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,8 +120,14 @@ def _save_bonus_results(tweets: List[Dict], pool_name: str, brief_id: str) -> No
             'author': t.get('author'),
             'score': t.get('score', 0.0),
             'performance_bonus_pct': t.get('performance_bonus_pct', 0.0),
+            'metrics': {
+                'views': m['views'],
+                'views_per_follower': round(m['views_per_follower'], 4),
+                'total_engagements': m['total_engagements'],
+                'engagement_per_view': round(m['engagement_per_view'], 4),
+            },
         }
-        for t in tweets
+        for t, m in zip(tweets, metrics)
     ]
 
     with open(output_file, 'w') as f:
