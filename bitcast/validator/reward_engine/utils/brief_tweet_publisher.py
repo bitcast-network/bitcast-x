@@ -138,6 +138,7 @@ def create_tweet_payload(
                 
                 # Scoring data
                 "score": tweet.get("score", 0.0),
+                "performance_bonus_pct": tweet.get("performance_bonus_pct", 0.0),
                 "retweets": tweet.get("retweets", []),
                 "quotes": tweet.get("quotes", []),
                 "author_influence": tweet.get("author_influence"),

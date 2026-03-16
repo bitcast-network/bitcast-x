@@ -33,6 +33,8 @@ from bitcast.validator.reward_engine.utils import (
     save_reward_snapshot,
     load_reward_snapshot
 )
+from bitcast.validator.tweet_bonus.performance_bonus import calculate_performance_bonus
+from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social_map
 
 
 class TwitterEvaluator(ScanBasedEvaluator):
@@ -108,12 +110,17 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     max_tweets=brief.get('max_tweets')
                 )
                 
+                # Step 3: Apply performance bonus
+                filtered_tweets = self._apply_performance_bonus(
+                    filtered_tweets, pool_name, brief_id
+                )
+
                 bt.logging.info(
                     f"✓ Brief {brief_id}: {len(scored_tweets)} scored, "
                     f"{len(filtered_tweets)} passed filtering"
                 )
-                
-                # Step 3: Publish for monitoring (per BA requirement)
+
+                # Step 4: Publish for monitoring (per BA requirement)
                 await self._publish_brief_tweets(
                     brief_id=brief_id,
                     brief=brief,
@@ -286,8 +293,13 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     continue
                 
                 bt.logging.info(f"  → {len(filtered_tweets)} tweets passed filtering")
-                
-                # Step 3: Calculate USD/alpha targets per tweet
+
+                # Step 3: Apply performance bonus
+                filtered_tweets = self._apply_performance_bonus(
+                    filtered_tweets, pool_name, brief_id
+                )
+
+                # Step 4: Calculate USD/alpha targets per tweet
                 daily_budget = budget / EMISSIONS_PERIOD
                 tweets_with_targets = self._calculate_tweet_targets(
                     filtered_tweets=filtered_tweets,
@@ -321,6 +333,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                         'author': author,
                         'uid': uid,
                         'score': tweet.get('score', 0.0),
+                        'performance_bonus_pct': tweet.get('performance_bonus_pct', 0.0),
                         'total_usd': tweet.get('total_usd_target', 0.0),
                         'text': tweet.get('text', ''),
                         'favorite_count': tweet.get('favorite_count', 0),
@@ -614,6 +627,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 'author': tweet_reward.get('author'),
                 'text': tweet_reward.get('text', ''),
                 'score': tweet_reward.get('score', 0.0),
+                'performance_bonus_pct': tweet_reward.get('performance_bonus_pct', 0.0),
                 'usd_target': daily_usd,
                 'total_usd_target': tweet_reward.get('total_usd', 0.0),
                 'alpha_target': daily_usd / alpha_price,
@@ -635,6 +649,25 @@ class TwitterEvaluator(ScanBasedEvaluator):
         
         return tweets_with_targets
     
+    def _apply_performance_bonus(
+        self,
+        filtered_tweets: List[Dict],
+        pool_name: str,
+        brief_id: str,
+    ) -> List[Dict]:
+        """Load follower counts from social map and apply performance bonus."""
+        try:
+            social_map, _ = load_latest_social_map(pool_name)
+            follower_counts = {
+                username: account_data.get('followers_count', 0)
+                for username, account_data in social_map.get('accounts', {}).items()
+            }
+        except (FileNotFoundError, ValueError) as e:
+            bt.logging.warning(f"Could not load social map for bonus: {e}")
+            follower_counts = {}
+
+        return calculate_performance_bonus(filtered_tweets, follower_counts, pool_name, brief_id)
+
     def _log_usd_rewards_by_account(
         self,
         tweet_rewards: List[Dict],
