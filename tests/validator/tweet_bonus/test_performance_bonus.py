@@ -70,11 +70,15 @@ class TestComputeBonuses:
             'engagement_per_view': 0.07,
         }]
 
-        bonuses = _compute_bonuses(metrics)
+        results = _compute_bonuses(metrics)
 
         # Single tweet is max in all metrics: 4 * 2.5% = 10%
-        assert len(bonuses) == 1
-        assert bonuses[0] == pytest.approx(0.10)
+        assert len(results) == 1
+        assert results[0]['total'] == pytest.approx(0.10)
+        assert results[0]['breakdown'] == {
+            'views': 2.5, 'views_per_follower': 2.5,
+            'total_engagements': 2.5, 'engagement_per_view': 2.5,
+        }
 
     def test_two_tweets_proportional(self):
         metrics = [
@@ -82,13 +86,14 @@ class TestComputeBonuses:
             {'views': 500, 'views_per_follower': 1.0, 'total_engagements': 50, 'engagement_per_view': 0.1},
         ]
 
-        bonuses = _compute_bonuses(metrics)
+        results = _compute_bonuses(metrics)
 
         # Tweet 1 is max in all metrics except engagement_per_view (tied)
-        assert bonuses[0] == pytest.approx(0.10)
+        assert results[0]['total'] == pytest.approx(0.10)
         # Tweet 2: views=500/1000*2.5% + vpf=1/2*2.5% + eng=50/100*2.5% + epv=0.1/0.1*2.5%
         # = 1.25% + 1.25% + 1.25% + 2.5% = 6.25%
-        assert bonuses[1] == pytest.approx(0.0625)
+        assert results[1]['total'] == pytest.approx(0.0625)
+        assert results[1]['breakdown']['engagement_per_view'] == 2.5
 
     def test_all_identical_tweets_get_full_bonus(self):
         metrics = [
@@ -97,10 +102,10 @@ class TestComputeBonuses:
             {'views': 500, 'views_per_follower': 1.0, 'total_engagements': 50, 'engagement_per_view': 0.1},
         ]
 
-        bonuses = _compute_bonuses(metrics)
+        results = _compute_bonuses(metrics)
 
-        for bonus in bonuses:
-            assert bonus == pytest.approx(0.10)
+        for result in results:
+            assert result['total'] == pytest.approx(0.10)
 
     def test_all_zero_metrics(self):
         metrics = [
@@ -108,10 +113,11 @@ class TestComputeBonuses:
             {'views': 0, 'views_per_follower': 0.0, 'total_engagements': 0, 'engagement_per_view': 0.0},
         ]
 
-        bonuses = _compute_bonuses(metrics)
+        results = _compute_bonuses(metrics)
 
-        for bonus in bonuses:
-            assert bonus == 0.0
+        for result in results:
+            assert result['total'] == 0.0
+            assert all(v == 0.0 for v in result['breakdown'].values())
 
 
 class TestCalculatePerformanceBonus:
@@ -128,6 +134,10 @@ class TestCalculatePerformanceBonus:
         assert len(result) == 1
         assert result[0]['score'] == pytest.approx(2.2)
         assert result[0]['performance_bonus_pct'] == 10.0
+        assert result[0]['performance_bonus_breakdown'] == {
+            'views': 2.5, 'views_per_follower': 2.5,
+            'total_engagements': 2.5, 'engagement_per_view': 2.5,
+        }
 
     @patch('bitcast.validator.tweet_bonus.performance_bonus._save_bonus_results')
     def test_bonus_pct_field_added(self, mock_save):
@@ -140,7 +150,9 @@ class TestCalculatePerformanceBonus:
         result = calculate_performance_bonus(tweets, follower_counts, 'test_pool', 'brief_1')
 
         assert 'performance_bonus_pct' in result[0]
+        assert 'performance_bonus_breakdown' in result[0]
         assert 'performance_bonus_pct' in result[1]
+        assert 'performance_bonus_breakdown' in result[1]
         # Alice has higher views, should have higher bonus
         assert result[0]['performance_bonus_pct'] >= result[1]['performance_bonus_pct']
 

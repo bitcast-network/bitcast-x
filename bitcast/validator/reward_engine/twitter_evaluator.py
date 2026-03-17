@@ -34,7 +34,8 @@ from bitcast.validator.reward_engine.utils import (
     load_reward_snapshot
 )
 from bitcast.validator.tweet_bonus.performance_bonus import calculate_performance_bonus
-from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social_map
+from bitcast.validator.tweet_bonus.featured_tweet import select_featured_tweet, apply_featured_tweet_bonus
+from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social_map, get_considered_accounts, get_active_members
 
 
 class TwitterEvaluator(ScanBasedEvaluator):
@@ -114,6 +115,15 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 filtered_tweets = self._apply_performance_bonus(
                     filtered_tweets, pool_name, brief_id
                 )
+
+                # Step 3b: Apply featured tweet bonus
+                featured_selection = select_featured_tweet(filtered_tweets, brief, pool_name)
+                if featured_selection:
+                    tweet_discovery = self._create_tweet_discovery(pool_name, connected_accounts)
+                    if tweet_discovery:
+                        filtered_tweets = apply_featured_tweet_bonus(
+                            filtered_tweets, featured_selection, tweet_discovery, pool_name, brief_id
+                        )
 
                 bt.logging.info(
                     f"✓ Brief {brief_id}: {len(scored_tweets)} scored, "
@@ -299,6 +309,15 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     filtered_tweets, pool_name, brief_id
                 )
 
+                # Step 3b: Apply featured tweet bonus
+                featured_selection = select_featured_tweet(filtered_tweets, brief, pool_name)
+                if featured_selection:
+                    tweet_discovery = self._create_tweet_discovery(pool_name, connected_accounts)
+                    if tweet_discovery:
+                        filtered_tweets = apply_featured_tweet_bonus(
+                            filtered_tweets, featured_selection, tweet_discovery, pool_name, brief_id
+                        )
+
                 # Step 4: Calculate USD/alpha targets per tweet
                 daily_budget = budget / EMISSIONS_PERIOD
                 tweets_with_targets = self._calculate_tweet_targets(
@@ -334,6 +353,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                         'uid': uid,
                         'score': tweet.get('score', 0.0),
                         'performance_bonus_pct': tweet.get('performance_bonus_pct', 0.0),
+                        'performance_bonus_breakdown': tweet.get('performance_bonus_breakdown'),
+                        'featured_tweet_bonus': tweet.get('featured_tweet_bonus', False),
                         'total_usd': tweet.get('total_usd_target', 0.0),
                         'text': tweet.get('text', ''),
                         'favorite_count': tweet.get('favorite_count', 0),
@@ -628,6 +649,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 'text': tweet_reward.get('text', ''),
                 'score': tweet_reward.get('score', 0.0),
                 'performance_bonus_pct': tweet_reward.get('performance_bonus_pct', 0.0),
+                'performance_bonus_breakdown': tweet_reward.get('performance_bonus_breakdown'),
+                'featured_tweet_bonus': tweet_reward.get('featured_tweet_bonus', False),
                 'usd_target': daily_usd,
                 'total_usd_target': tweet_reward.get('total_usd', 0.0),
                 'alpha_target': daily_usd / alpha_price,
@@ -667,6 +690,28 @@ class TwitterEvaluator(ScanBasedEvaluator):
             follower_counts = {}
 
         return calculate_performance_bonus(filtered_tweets, follower_counts, pool_name, brief_id)
+
+    def _create_tweet_discovery(self, pool_name: str, connected_accounts: set):
+        """Create a TweetDiscovery instance for engagement lookups."""
+        from bitcast.validator.clients import TwitterClient
+        from bitcast.validator.tweet_scoring.tweet_discovery import TweetDiscovery
+
+        try:
+            social_map, _ = load_latest_social_map(pool_name)
+            active_members = get_active_members(social_map)
+            active_members = [m for m in active_members if m in connected_accounts]
+            considered_list = get_considered_accounts(social_map, 300)
+            considered_dict = dict(considered_list)
+
+            client = TwitterClient(posts_only=False)
+            return TweetDiscovery(
+                client=client,
+                active_accounts=set(active_members),
+                considered_accounts=considered_dict,
+            )
+        except Exception as e:
+            bt.logging.warning(f"Could not create TweetDiscovery for featured bonus: {e}")
+            return None
 
     def _log_usd_rewards_by_account(
         self,
