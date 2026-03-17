@@ -44,17 +44,19 @@ def calculate_performance_bonus(
         return tweets
 
     metrics = _compute_metrics(tweets, follower_counts)
-    bonuses = _compute_bonuses(metrics)
+    bonus_results = _compute_bonuses(metrics)
 
-    for tweet, bonus in zip(tweets, bonuses):
-        tweet['performance_bonus_pct'] = round(bonus * 100, 2)
-        tweet['score'] = tweet.get('score', 0.0) * (1.0 + bonus)
+    for tweet, result in zip(tweets, bonus_results):
+        tweet['performance_bonus_pct'] = round(result['total'] * 100, 2)
+        tweet['performance_bonus_breakdown'] = result['breakdown']
+        tweet['score'] = tweet.get('score', 0.0) * (1.0 + result['total'])
 
     _save_bonus_results(tweets, metrics, pool_name, brief_id)
 
+    totals = [r['total'] for r in bonus_results]
     bt.logging.info(
         f"Applied performance bonus to {len(tweets)} tweets for brief {brief_id} "
-        f"(avg bonus: {sum(b for b in bonuses) / len(bonuses) * 100:.1f}%)"
+        f"(avg bonus: {sum(totals) / len(totals) * 100:.1f}%)"
     )
 
     return tweets
@@ -85,8 +87,11 @@ def _compute_metrics(tweets: List[Dict], follower_counts: Dict[str, int]) -> Lis
     return metrics
 
 
-def _compute_bonuses(metrics: List[Dict]) -> List[float]:
-    """Compute proportional bonus for each tweet across all 4 metrics."""
+def _compute_bonuses(metrics: List[Dict]) -> List[Dict]:
+    """Compute proportional bonus for each tweet across all 4 metrics.
+
+    Returns list of dicts with 'total' (float fraction) and 'breakdown' (metric -> pct).
+    """
     metric_names = ['views', 'views_per_follower', 'total_engagements', 'engagement_per_view']
 
     maxes = {
@@ -94,16 +99,18 @@ def _compute_bonuses(metrics: List[Dict]) -> List[float]:
         for name in metric_names
     }
 
-    bonuses = []
+    results = []
     for m in metrics:
-        bonus = 0.0
+        total = 0.0
+        breakdown = {}
         for name in metric_names:
             max_val = maxes[name]
-            if max_val > 0:
-                bonus += (m[name] / max_val) * MAX_BONUS_PER_METRIC
-        bonuses.append(bonus)
+            metric_bonus = (m[name] / max_val) * MAX_BONUS_PER_METRIC if max_val > 0 else 0.0
+            breakdown[name] = round(metric_bonus * 100, 2)
+            total += metric_bonus
+        results.append({'total': total, 'breakdown': breakdown})
 
-    return bonuses
+    return results
 
 
 def _save_bonus_results(tweets: List[Dict], metrics: List[Dict], pool_name: str, brief_id: str) -> None:
