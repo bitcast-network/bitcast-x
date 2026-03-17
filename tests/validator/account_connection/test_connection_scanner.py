@@ -313,6 +313,38 @@ class TestConnectionScanner:
             if db_path.exists():
                 db_path.unlink()
 
+    def test_extract_connections_stitch3_tags(self, temp_db_path, mock_twitter_client):
+        """Test extracting Stitch3 format tags from replies."""
+        scanner = ConnectionScanner(
+            db_path=temp_db_path,
+            twitter_client=mock_twitter_client,
+            tweet_ids=['999']
+        )
+
+        pool_accounts = {'alice', 'bob'}
+
+        tweets = [
+            {
+                'tweet_id': '111',
+                'author': 'alice',
+                'text': 'Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq',
+            },
+            {
+                'tweet_id': '222',
+                'author': 'bob',
+                'text': 'Stitch3-abc123',
+            },
+        ]
+
+        connections = scanner._extract_connections_from_tweets(tweets, pool_accounts)
+
+        assert len(connections) == 2
+        alice_conn = next(c for c in connections if c['username'] == 'alice')
+        assert alice_conn['tag'] == 'Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq'
+
+        bob_conn = next(c for c in connections if c['username'] == 'bob')
+        assert bob_conn['tag'] == 'Stitch3-abc123'
+
     def test_store_connection_duplicate(self, mock_twitter_client):
         with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as f:
             db_path = Path(f.name)

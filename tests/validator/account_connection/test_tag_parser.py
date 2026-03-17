@@ -107,3 +107,72 @@ class TestTagParser:
         tags = TagParser.extract_tags(text)
         assert len(tags) == 2
         assert all(t.tag_type == "HK" for t in tags)
+
+    # --- Stitch3 format tests ---
+
+    def test_extract_stitch3_hk_tag(self):
+        """Test extraction of Stitch-hk tags."""
+        text = "Check out Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq for more info"
+        tags = TagParser.extract_tags(text)
+        assert len(tags) == 1
+        assert tags[0].tag_type == "HK"
+        assert tags[0].full_tag == "Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
+        assert tags[0].referred_by is None
+
+    def test_extract_stitch3_x_tag(self):
+        """Test extraction of Stitch3- no-code tags."""
+        text = "Visit Stitch3-xyz78900"
+        tags = TagParser.extract_tags(text)
+        assert len(tags) == 1
+        assert tags[0].tag_type == "X"
+        assert tags[0].full_tag == "Stitch3-xyz78900"
+        assert tags[0].referred_by is None
+
+    def test_extract_stitch3_hk_tag_with_referral(self):
+        """Test extraction of Stitch-hk tag with a referral code suffix."""
+        referral_code = encode_referral_code("dreadbong0")
+        text = f"Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq-{referral_code}"
+        tags = TagParser.extract_tags(text)
+        assert len(tags) == 1
+        assert tags[0].tag_type == "HK"
+        assert tags[0].referred_by == "dreadbong0"
+        assert tags[0].referral_code == referral_code
+
+    def test_extract_stitch3_x_tag_with_referral(self):
+        """Test extraction of Stitch3- tag with a referral code suffix."""
+        referral_code = encode_referral_code("yumagroup")
+        text = f"Stitch3-abc123-{referral_code}"
+        tags = TagParser.extract_tags(text)
+        assert len(tags) == 1
+        assert tags[0].tag_type == "X"
+        assert tags[0].full_tag == f"Stitch3-abc123-{referral_code}"
+        assert tags[0].referred_by == "yumagroup"
+        assert tags[0].referral_code == referral_code
+
+    def test_stitch3_case_insensitive_matching(self):
+        """Test that Stitch3 tags are matched case-insensitively."""
+        text1 = "Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
+        text2 = "STITCH-HK:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
+        text3 = "stitch3-abc123"
+        text4 = "STITCH3-ABC123"
+
+        assert len(TagParser.extract_tags(text1)) == 1
+        assert len(TagParser.extract_tags(text2)) == 1
+        assert len(TagParser.extract_tags(text3)) == 1
+        assert len(TagParser.extract_tags(text4)) == 1
+
+    def test_is_valid_tag_stitch3(self):
+        """Test is_valid_tag with Stitch3 format tags."""
+        assert TagParser.is_valid_tag("Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq") is True
+        assert TagParser.is_valid_tag("Stitch3-xyz78900") is True
+        assert TagParser.is_valid_tag("Stitch-hk:abc") is False
+
+    def test_mixed_stitch3_and_legacy_tags(self):
+        """Test extraction of both Stitch3 and legacy tags from one tweet."""
+        text = "Stitch-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq bitcast-xabc123"
+        tags = TagParser.extract_tags(text)
+        assert len(tags) == 2
+        assert tags[0].tag_type == "HK"
+        assert tags[0].full_tag.startswith("Stitch-hk:")
+        assert tags[1].tag_type == "X"
+        assert tags[1].full_tag.startswith("bitcast-x")

@@ -82,8 +82,9 @@ def fasttrack_tweet(tweet_id: str) -> Dict[str, Any]:
     1. Checks the TweetStore -- returns immediately if already present.
     2. Fetches the tweet by ID from the desearch API.
     3. Stores it in the TweetStore.
-    4. If the tweet contains connection tags (bitcast-hk: / bitcast-x) and
-       the author is in any pool's social map, stores the connections.
+    4. If the tweet contains connection tags (Stitch-hk: / Stitch3- or
+       legacy bitcast-hk: / bitcast-x) and the author is in any pool's
+       social map, stores the connections.
 
     Idempotent -- safe to call multiple times for the same tweet_id.
 

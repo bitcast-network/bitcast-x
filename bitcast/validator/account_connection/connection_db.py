@@ -418,8 +418,8 @@ class ConnectionDatabase:
         """
         Get account-to-UID mappings for a pool.
         
-        For bitcast-x<code> tags (e.g., bitcast-xabc123), uses NOCODE_UID (68).
-        For bitcast-hk:{hotkey} tags, looks up UID in metagraph.
+        For no-code tags (Stitch3-{code} or legacy bitcast-x{code}), uses NOCODE_UID (68).
+        For hotkey tags (Stitch-hk:{hotkey} or legacy bitcast-hk:{hotkey}), looks up UID in metagraph.
         Connections with unresolvable hotkeys have uid=None.
         
         If an account has multiple connections, only the most recent one (by updated timestamp) is returned.
@@ -449,15 +449,15 @@ class ConnectionDatabase:
             updated = conn['updated']
             uid = None
             
-            if tag.startswith('bitcast-x'):
-                # No-code mining tag
+            if tag.startswith('Stitch3-') or tag.startswith('bitcast-x'):
+                # No-code mining tag (Stitch3 or legacy)
                 uid = NOCODE_UID
                 bt.logging.debug(f"Tag {tag} mapped to NOCODE_UID {NOCODE_UID}")
-                
-            elif tag.startswith('bitcast-hk:'):
+
+            elif tag.startswith('Stitch-hk:') or tag.startswith('bitcast-hk:'):
                 # Hotkey tag - extract and look up
-                # Strip any referral code suffix before looking up hotkey
-                hotkey_part = tag.split('bitcast-hk:', 1)[1]
+                # Split on ":" to handle both Stitch-hk: and bitcast-hk: prefixes
+                hotkey_part = tag.split(':', 1)[1]
                 hotkey = hotkey_part.split('-')[0]  # Remove referral code suffix if present
                 try:
                     uid = metagraph.hotkeys.index(hotkey)
