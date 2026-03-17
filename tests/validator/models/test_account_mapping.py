@@ -127,6 +127,20 @@ class TestAccountMappingToDict:
         assert data['connection_tag'] == "bitcast-xabc12345"
         assert data['hotkey'] is None
     
+    def test_to_dict_stitch3_tag(self):
+        """to_dict works with Stitch3 format tags."""
+        mapping = AccountMapping(
+            account_username="stitch_user",
+            uid=99,
+            pool="tao",
+            connection_tag="Stitch3-abc12345",
+            hotkey=None
+        )
+
+        data = mapping.to_dict()
+
+        assert data['connection_tag'] == "Stitch3-abc12345"
+
     def test_round_trip_dict_conversion(self):
         """Can convert AccountMapping to dict and back."""
         original = AccountMapping(

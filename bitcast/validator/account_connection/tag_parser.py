@@ -2,8 +2,10 @@
 Tag parser for extracting connection tags from tweet text.
 
 Supports two tag types, each with an optional referral code suffix:
-- bitcast-hk:{substrate_hotkey}[-{referral_code}]
-- bitcast-x{identifier}[-{referral_code}]
+- Stitch-hk:{substrate_hotkey}[-{referral_code}]   (new Stitch3 format)
+- Stitch3-{identifier}[-{referral_code}]            (new Stitch3 format)
+- bitcast-hk:{substrate_hotkey}[-{referral_code}]   (legacy)
+- bitcast-x{identifier}[-{referral_code}]           (legacy)
 
 Tags are case-insensitive.
 """
@@ -24,10 +26,16 @@ class ParsedTag(NamedTuple):
 class TagParser:
     """Extract and validate connection tags from tweet text."""
     
-    # Hotkey pattern: substrate address (base58, 47-48 chars) with optional referral code
+    # Stitch3 hotkey pattern (new format)
+    STITCH3_HK_PATTERN = re.compile(r'Stitch-hk:([1-9A-HJ-NP-Za-km-z]{47,48})(?:-([a-z0-9_-]+))?', re.IGNORECASE)
+
+    # Stitch3 no-code pattern (new format)
+    STITCH3_PATTERN = re.compile(r'Stitch3-([a-z0-9]+)(?:-([a-z0-9_-]+))?', re.IGNORECASE)
+
+    # Legacy hotkey pattern
     BITCAST_HK_PATTERN = re.compile(r'bitcast-hk:([1-9A-HJ-NP-Za-km-z]{47,48})(?:-([a-z0-9_-]+))?', re.IGNORECASE)
-    
-    # X pattern: alphanumeric identifier with optional referral code
+
+    # Legacy X pattern
     BITCAST_X_PATTERN = re.compile(r'bitcast-x([a-z0-9]+)(?:-([a-z0-9_-]+))?', re.IGNORECASE)
     
     @staticmethod
@@ -45,29 +53,55 @@ class TagParser:
             return []
         
         tags = []
-        
+
+        # Stitch3 hotkey tags (new format)
+        for match in TagParser.STITCH3_HK_PATTERN.finditer(tweet_text):
+            hotkey = match.group(1)
+            raw_referral = match.group(2)
+
+            full_tag = f"Stitch-hk:{hotkey}"
+            if raw_referral:
+                full_tag = f"{full_tag}-{raw_referral}"
+
+            referred_by = decode_referral_code(raw_referral) if raw_referral else None
+            tags.append(ParsedTag('HK', full_tag, referred_by, raw_referral))
+
+        # Stitch3 no-code tags (new format)
+        for match in TagParser.STITCH3_PATTERN.finditer(tweet_text):
+            identifier = match.group(1)
+            raw_referral = match.group(2)
+
+            full_tag = f"Stitch3-{identifier}"
+            if raw_referral:
+                full_tag = f"{full_tag}-{raw_referral}"
+
+            referred_by = decode_referral_code(raw_referral) if raw_referral else None
+            tags.append(ParsedTag('X', full_tag, referred_by, raw_referral))
+
+        # Legacy bitcast-hk: tags
         for match in TagParser.BITCAST_HK_PATTERN.finditer(tweet_text):
             hotkey = match.group(1)
             raw_referral = match.group(2)
-            
+
             full_tag = f"bitcast-hk:{hotkey}"
             if raw_referral:
                 full_tag = f"{full_tag}-{raw_referral}"
-            
+
             referred_by = decode_referral_code(raw_referral) if raw_referral else None
             tags.append(ParsedTag('HK', full_tag, referred_by, raw_referral))
-        
+
+        # Legacy bitcast-x tags
         for match in TagParser.BITCAST_X_PATTERN.finditer(tweet_text):
             identifier = match.group(1)
             raw_referral = match.group(2)
-            
+
             full_tag = f"bitcast-x{identifier}"
             if raw_referral:
                 full_tag = f"{full_tag}-{raw_referral}"
-            
+
             referred_by = decode_referral_code(raw_referral) if raw_referral else None
             tags.append(ParsedTag('X', full_tag, referred_by, raw_referral))
-        
+
         return tags
     
     @staticmethod
@@ -76,8 +110,12 @@ class TagParser:
         if not tag:
             return False
         
-        hk_match = TagParser.BITCAST_HK_PATTERN.fullmatch(tag)
-        x_match = TagParser.BITCAST_X_PATTERN.fullmatch(tag)
-        
-        return hk_match is not None or x_match is not None
+        return any(
+            pattern.fullmatch(tag) for pattern in (
+                TagParser.STITCH3_HK_PATTERN,
+                TagParser.STITCH3_PATTERN,
+                TagParser.BITCAST_HK_PATTERN,
+                TagParser.BITCAST_X_PATTERN,
+            )
+        )
 
