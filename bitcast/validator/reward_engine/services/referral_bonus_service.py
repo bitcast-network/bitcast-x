@@ -4,17 +4,33 @@ Referral bonus service for managing and paying referral bonuses.
 Referral bonuses are paid when:
 1. A referee participates in a brief (has tweets passing filter)
 2. Their payout date is scheduled (set to tomorrow when first detected)
-3. On the payout date, referee and referrer receive their configured bonus amounts
+3. On the payout date, referee and referrer receive a dynamic bonus based on
+   the referee's follower count and influence score
 """
 
 from datetime import date, timedelta
+from math import log10
 from typing import Dict, List, NamedTuple, Set
 import bittensor as bt
 
 from bitcast.validator.account_connection.connection_db import ConnectionDatabase
 
-DEFAULT_REFEREE_AMOUNT = 50.0
-DEFAULT_REFERRER_AMOUNT = 50.0
+
+def compute_referral_reward(followers: int, influence: float) -> float:
+    """
+    Compute the referral bonus (USD) from the referee's followers and influence score.
+
+    Followers component (80% weight): log-scales from 1,000 to 25,000 followers.
+    Influence component (20% weight): log-scales from 1 to 1,000 influence score.
+    Result is in the range [$0, $100].
+    """
+    follower_raw = 100 * log10(max(followers, 1000) / 1000) / log10(25000 / 1000)
+    follower_score = 0.8 * max(0.0, min(follower_raw, 100.0))
+
+    influence_raw = 100 * log10(max(influence, 1)) / log10(1000)
+    influence_score = 0.2 * max(0.0, min(influence_raw, 100.0))
+
+    return round(follower_score + influence_score, 2)
 
 
 class ReferralBonusResult(NamedTuple):
@@ -33,52 +49,70 @@ class ReferralBonusService:
         self,
         payout_date: date,
         account_to_uid: Dict[str, int],
+        account_data: Dict[str, Dict] = None,
     ) -> ReferralBonusResult:
         """
         Get referral bonuses to add to rewards for a specific payout date.
-        
-        Returns a ReferralBonusResult containing the {uid: bonus_usd} mapping
-        and the raw referral records (for publishing).
-        
+
+        The bonus amount is computed dynamically from the referee's follower
+        count and influence score (via ``account_data``).  Both referee and
+        referrer receive the same computed amount.
+
         Args:
             payout_date: The date to pay out bonuses
             account_to_uid: Mapping of account_username -> uid
-            
+            account_data: Mapping of username -> {"followers_count": int, "score": float}
+                          from the social map.  If *None*, every bonus will be $0.
+
         Returns:
-            ReferralBonusResult with bonuses dict and referral records
+            ReferralBonusResult with bonuses dict and enriched referral records
         """
         referrals = self.connection_db.get_referrals_for_payout(payout_date)
-        
+
         if not referrals:
             return ReferralBonusResult(bonuses={}, referrals=[])
-        
+
         bt.logging.info(f"Processing {len(referrals)} referrals for payout on {payout_date}")
-        
+
+        if account_data is None:
+            account_data = {}
+
         bonuses: Dict[int, float] = {}
-        
+
         for referral in referrals:
             referee_username = referral['account_username']
             referrer_username = referral.get('referred_by')
-            referee_amount = referral.get('referee_amount') or DEFAULT_REFEREE_AMOUNT
-            referrer_amount = referral.get('referrer_amount') or DEFAULT_REFERRER_AMOUNT
-            
+
+            referee_info = account_data.get(referee_username, {})
+            followers = referee_info.get('followers_count', 0)
+            influence = referee_info.get('score', 0.0)
+            amount = compute_referral_reward(followers, influence)
+
+            referral['computed_amount'] = amount
+
             # Referee bonus
             referee_uid = account_to_uid.get(referee_username)
             if referee_uid is not None:
-                bonuses[referee_uid] = bonuses.get(referee_uid, 0.0) + referee_amount
-                bt.logging.info(f"Referee bonus: @{referee_username} (UID {referee_uid}) +${referee_amount}")
+                bonuses[referee_uid] = bonuses.get(referee_uid, 0.0) + amount
+                bt.logging.info(
+                    f"Referee bonus: @{referee_username} (UID {referee_uid}) "
+                    f"+${amount:.2f} (followers={followers}, influence={influence:.2f})"
+                )
             else:
                 bt.logging.warning(f"No UID mapping for referee @{referee_username}")
-            
-            # Referrer bonus
+
+            # Referrer bonus (same amount)
             if referrer_username:
                 referrer_uid = account_to_uid.get(referrer_username)
                 if referrer_uid is not None:
-                    bonuses[referrer_uid] = bonuses.get(referrer_uid, 0.0) + referrer_amount
-                    bt.logging.info(f"Referrer bonus: @{referrer_username} (UID {referrer_uid}) +${referrer_amount}")
+                    bonuses[referrer_uid] = bonuses.get(referrer_uid, 0.0) + amount
+                    bt.logging.info(
+                        f"Referrer bonus: @{referrer_username} (UID {referrer_uid}) "
+                        f"+${amount:.2f}"
+                    )
                 else:
                     bt.logging.warning(f"No UID mapping for referrer @{referrer_username}")
-        
+
         return ReferralBonusResult(bonuses=bonuses, referrals=referrals)
     
     def check_and_activate_referrals(

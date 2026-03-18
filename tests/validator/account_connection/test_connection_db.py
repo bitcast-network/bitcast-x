@@ -236,6 +236,24 @@ class TestConnectionDatabase:
         assert accounts[2] == {'account_username': 'user2', 'uid': NOCODE_UID}
         assert accounts[3] == {'account_username': 'user4', 'uid': None}
 
+    def test_get_accounts_with_uids_stitch3_tags(self, temp_db):
+        """Test account-to-UID mapping with Stitch3 tag formats."""
+        db = ConnectionDatabase(db_path=temp_db)
+
+        hotkey1 = "5DNmHotkey1"
+
+        db.upsert_connection("test", 123, f"Stitch-hk:{hotkey1}", "user1")
+        db.upsert_connection("test", 456, "Stitch3-abc12345", "user2")
+
+        mock_metagraph = MagicMock()
+        mock_metagraph.hotkeys = [hotkey1]
+
+        accounts = db.get_accounts_with_uids("test", mock_metagraph)
+
+        assert len(accounts) == 2
+        assert accounts[0] == {'account_username': 'user1', 'uid': 0}
+        assert accounts[1] == {'account_username': 'user2', 'uid': NOCODE_UID}
+
     def test_get_accounts_with_uids_deduplication(self, temp_db):
         """Test that only the most recent connection per account is returned."""
         import time

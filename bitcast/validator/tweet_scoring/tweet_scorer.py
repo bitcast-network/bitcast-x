@@ -360,7 +360,14 @@ def score_tweets_for_pool(
             'reply_count': tweet.get('reply_count', 0),
             'quote_count': tweet.get('quote_count', 0),
             'bookmark_count': tweet.get('bookmark_count', 0),
-            'views_count': tweet.get('views_count', 0)
+            'views_count': tweet.get('views_count', 0),
+            'author_influence': round(author_influence, 6),
+            'baseline_score': round(author_influence * BASELINE_TWEET_SCORE_FACTOR, 6),
+            'score_breakdown': [
+                {'u': d['username'], 't': 'rt' if d['engagement_type'] == 'retweet' else 'qt', 'i': d['influence_score'],
+                 's': d['scale_factor'], 'c': d['weighted_contribution']}
+                for d in details
+            ]
         }
         
         if tweet.get('quoted_tweet_id'):
