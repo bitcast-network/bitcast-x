@@ -18,7 +18,7 @@ from typing import Dict, List
 
 import bittensor as bt
 
-MAX_BONUS_PER_METRIC = 0.025  # 2.5%
+MAX_BONUS_PER_METRIC = 0.05  # 5%
 
 
 def calculate_performance_bonus(
