@@ -102,37 +102,40 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     continue
                 
                 # Step 2: Filter tweets by brief criteria (includes max_tweets)
-                filtered_tweets = self._filter_tweets_for_brief(
+                all_evaluated_tweets = self._filter_tweets_for_brief(
                     scored_tweets=scored_tweets,
                     brief=brief,
                     run_id=run_id,
                     max_tweets=brief.get('max_tweets')
                 )
-                
-                # Step 3: Apply performance bonus
-                filtered_tweets = self._apply_performance_bonus(
-                    filtered_tweets, pool_name, brief_id
+                passed_tweets = [t for t in all_evaluated_tweets if t.get('meets_brief', False)]
+
+                # Step 3: Apply performance bonus (passed tweets only)
+                passed_tweets = self._apply_performance_bonus(
+                    passed_tweets, pool_name, brief_id
                 )
 
                 # Step 3b: Apply featured tweet bonus
-                featured_selection = select_featured_tweet(filtered_tweets, brief, pool_name)
+                featured_selection = select_featured_tweet(passed_tweets, brief, pool_name)
                 if featured_selection:
                     tweet_discovery = self._create_tweet_discovery(pool_name, connected_accounts)
                     if tweet_discovery:
-                        filtered_tweets = apply_featured_tweet_bonus(
-                            filtered_tweets, featured_selection, tweet_discovery, pool_name, brief_id
+                        passed_tweets = apply_featured_tweet_bonus(
+                            passed_tweets, featured_selection, tweet_discovery, pool_name, brief_id
                         )
 
                 bt.logging.info(
                     f"✓ Brief {brief_id}: {len(scored_tweets)} scored, "
-                    f"{len(filtered_tweets)} passed filtering"
+                    f"{len(passed_tweets)} passed filtering"
                 )
 
-                # Step 4: Publish for monitoring (per BA requirement)
+                # Step 4: Publish all evaluated tweets for monitoring (per BA requirement)
+                failed_tweets = [t for t in all_evaluated_tweets if not t.get('meets_brief', False)]
+                all_tweets_for_publish = passed_tweets + failed_tweets
                 await self._publish_brief_tweets(
                     brief_id=brief_id,
                     brief=brief,
-                    tweets_with_targets=filtered_tweets,  # No targets yet
+                    tweets_with_targets=all_tweets_for_publish,
                     usd_targets={},  # Empty - no rewards in scoring phase
                     run_id=run_id
                 )
@@ -287,20 +290,21 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 bt.logging.debug(f"Scored {len(scored_tweets)} tweets for brief {brief_id}")
                 
                 # Step 2: Filter tweets by brief criteria (includes max_tweets)
-                filtered_tweets = self._filter_tweets_for_brief(
+                all_evaluated_tweets = self._filter_tweets_for_brief(
                     scored_tweets=scored_tweets,
                     brief=brief,
                     run_id=run_id,
                     max_tweets=brief.get('max_tweets')
                 )
-                
+                filtered_tweets = [t for t in all_evaluated_tweets if t.get('meets_brief', False)]
+
                 if not filtered_tweets:
                     bt.logging.warning(f"No tweets passed filtering for brief {brief_id}")
                     continue
-                
+
                 bt.logging.info(f"  → {len(filtered_tweets)} tweets passed filtering")
 
-                # Step 3: Apply performance bonus
+                # Step 3: Apply performance bonus (passed tweets only)
                 filtered_tweets = self._apply_performance_bonus(
                     filtered_tweets, pool_name, brief_id
                 )
@@ -398,11 +402,13 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 # Log top 3 tweets by score for this brief
                 self._log_top_tweets(tweets_with_targets, brief_id)
                 
-                # Step 5: Publish tweet data
+                # Step 5: Publish all evaluated tweets (passed with targets + failed with 0 targets)
+                failed_tweets = [t for t in all_evaluated_tweets if not t.get('meets_brief', False)]
+                all_tweets_for_publish = tweets_with_targets + failed_tweets
                 await self._publish_brief_tweets(
                     brief_id=brief_id,
                     brief=brief,
-                    tweets_with_targets=tweets_with_targets,
+                    tweets_with_targets=all_tweets_for_publish,
                     usd_targets=usd_targets,
                     run_id=run_id
                 )
@@ -510,21 +516,21 @@ class TwitterEvaluator(ScanBasedEvaluator):
     ) -> List[Dict]:
         """
         Filter scored tweets using existing tweet_filtering module.
-        
+
         Args:
             scored_tweets: List of scored tweets from score_tweets_for_pool()
             brief: Brief dict with id, brief text, start_date, end_date
             run_id: Run identifier
             max_tweets: Maximum tweets per account (passed to filter module)
-            
+
         Returns:
-            List of filtered tweets (only those meeting brief)
+            List of all evaluated tweets (passed and failed) with meets_brief and reasoning fields
         """
         try:
             brief_id = brief['id']
             brief_text = brief.get('brief', '')
             prompt_version = brief.get('prompt_version', 1)
-            
+
             # Filter tweets using LLM evaluation (includes max_tweets filtering)
             filtered_results = filter_tweets_for_brief(
                 brief_id=brief_id,
@@ -533,11 +539,9 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 run_id=run_id,
                 max_tweets=max_tweets
             )
-            
-            # Filter to only tweets that meet brief
-            passed_tweets = [t for t in filtered_results if t.get('meets_brief', False)]
-            return passed_tweets
-            
+
+            return filtered_results
+
         except Exception as e:
             bt.logging.error(f"Error filtering tweets for brief {brief.get('id')}: {e}")
             return []
@@ -805,7 +809,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             
             if success:
                 tweet_count = len(tweets_with_targets)
-                bt.logging.debug(f"Published {tweet_count} filtered tweets for brief {brief_id}")
+                bt.logging.debug(f"Published {tweet_count} evaluated tweets for brief {brief_id}")
             else:
                 bt.logging.debug(f"Tweet publishing failed for brief {brief_id} (continuing...)")
                 
