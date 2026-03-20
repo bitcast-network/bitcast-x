@@ -148,7 +148,9 @@ def create_tweet_payload(
                 "score_breakdown": tweet.get("score_breakdown"),
                 
                 # Brief evaluation
-                "meets_brief": True,
+                "meets_brief": tweet.get("meets_brief", True),
+                "reasoning": tweet.get("reasoning", ""),
+                "prescreen_passed": True,
                 
                 # Financial targets (pre-calculated)
                 "usd_target": tweet.get("usd_target", 0.0),

@@ -312,6 +312,7 @@ def filter_tweets_for_brief(
             'author': tweet['author'],
             'tweet_id': tweet['tweet_id'],
             'meets_brief': tweet['meets_brief'],
+            'reasoning': tweet.get('reasoning', ''),
             'score': tweet.get('score', 0.0),
             'text': tweet.get('text', ''),
             'url': tweet.get('url', ''),
