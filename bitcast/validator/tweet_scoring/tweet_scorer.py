@@ -120,7 +120,6 @@ def score_tweets_for_pool(
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     max_members: Optional[int] = None,
-    considered_accounts_limit: Optional[int] = None,
     thorough: bool = False,
 ) -> List[Dict]:
     """
@@ -152,7 +151,6 @@ def score_tweets_for_pool(
         start_date: Start date for brief window (inclusive, REQUIRED)
         end_date: End date for brief window (inclusive, REQUIRED)
         max_members: Optional limit on active members
-        considered_accounts_limit: Optional limit on considered accounts
         thorough: If True, use timeline-based discovery instead of search API
         
     Returns:
@@ -219,10 +217,8 @@ def score_tweets_for_pool(
         social_map, map_file = load_latest_social_map(pool_name)
         active_members = get_active_members(social_map, limit=max_members)
     
-    # Get considered accounts
-    DEFAULT_CONSIDERED = 300
-    considered_limit = considered_accounts_limit or DEFAULT_CONSIDERED
-    considered_accounts_list = get_considered_accounts(social_map, considered_limit)
+    # Get all considered accounts (no limit)
+    considered_accounts_list = get_considered_accounts(social_map)
     considered_accounts_dict = dict(considered_accounts_list)
     
     # Load relationship scores for cabal protection
@@ -428,7 +424,6 @@ def score_tweets_for_pool(
         'active_members_count': len(active_members),
         'max_members_limit': max_members,
         'considered_accounts_count': len(considered_accounts_dict),
-        'considered_accounts_limit': considered_limit,
         'pool_language': pool_config.get('lang'),
         'social_map_file': map_file,
         'scoring_method': 'search_based',
@@ -532,8 +527,7 @@ if __name__ == "__main__":
         
         # Extract brief-level configuration
         brief_max_members = brief_data.get('max_members')
-        brief_max_considered = brief_data.get('max_considered')
-        
+
         # Generate run_id for CLI execution
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"tweet_scoring_cli_{timestamp}"
@@ -567,7 +561,6 @@ if __name__ == "__main__":
             start_date=start_date,
             end_date=end_date,
             max_members=brief_max_members,
-            considered_accounts_limit=brief_max_considered,
             thorough=config.thorough
         )
         

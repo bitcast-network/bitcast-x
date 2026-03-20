@@ -81,8 +81,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             
             # Extract brief-level configuration
             brief_max_members = brief.get('max_members')
-            brief_considered = brief.get('max_considered')
-            
+
             try:
                 # Step 1: Score tweets (always fresh)
                 scored_tweets = self._score_tweets_for_brief(
@@ -95,7 +94,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     start_date=start_date,
                     end_date=end_date,
                     max_members=brief_max_members,
-                    considered_accounts=brief_considered,
                     thorough=thorough,
                 )
                 
@@ -267,8 +265,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             try:
                 # Extract brief-level configuration
                 brief_max_members = brief.get('max_members')
-                brief_considered = brief.get('max_considered')
-                
+
                 # Step 1: Score tweets
                 scored_tweets = self._score_tweets_for_brief(
                     pool_name=pool_name,
@@ -280,7 +277,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     start_date=start_date,
                     end_date=end_date,
                     max_members=brief_max_members,
-                    considered_accounts=brief_considered,
                     thorough=thorough,
                 )
                 
@@ -458,7 +454,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         max_members: Optional[int] = None,
-        considered_accounts: Optional[int] = None,
         thorough: bool = False,
     ) -> List[Dict]:
         """
@@ -477,7 +472,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
             start_date: Brief start date (inclusive)
             end_date: Brief end date (inclusive)
             max_members: Optional brief-level max members limit
-            considered_accounts: Optional brief-level considered accounts limit
             thorough: If True, use timeline-based discovery instead of search API
         
         Returns:
@@ -495,7 +489,6 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 start_date=start_date,
                 end_date=end_date,
                 max_members=max_members,
-                considered_accounts_limit=considered_accounts,
                 thorough=thorough,
             )
             
@@ -700,7 +693,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             social_map, _ = load_latest_social_map(pool_name)
             active_members = get_active_members(social_map)
             active_members = [m for m in active_members if m in connected_accounts]
-            considered_list = get_considered_accounts(social_map, 300)
+            considered_list = get_considered_accounts(social_map)
             considered_dict = dict(considered_list)
 
             client = TwitterClient(posts_only=False)
