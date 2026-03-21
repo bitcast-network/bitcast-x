@@ -42,9 +42,9 @@ MECHID = int(os.getenv('MECHID', '1'))
 # =============================================================================
 
 # Bitcast server
-BITCAST_SERVER_URL = os.getenv('BITCAST_SERVER_URL', 'http://44.227.253.127')
-BITCAST_BRIEFS_ENDPOINT = f"{BITCAST_SERVER_URL}:8013/x-briefs"
-POOLS_API_URL = os.getenv('POOLS_API_URL', f"{BITCAST_SERVER_URL}:8013/pools")
+BITCAST_API_URL = os.getenv('BITCAST_API_URL', 'https://bitcast-api.bitcast.network')
+BITCAST_BRIEFS_ENDPOINT = os.getenv('BITCAST_BRIEFS_ENDPOINT', f"{BITCAST_API_URL}/api/v2/validator/x-briefs")
+POOLS_API_URL = os.getenv('POOLS_API_URL', f"{BITCAST_API_URL}/api/v2/validator/pools")
 
 # Data publishing configuration
 ENABLE_DATA_PUBLISH = os.getenv('ENABLE_DATA_PUBLISH', 'False').lower() == 'true'

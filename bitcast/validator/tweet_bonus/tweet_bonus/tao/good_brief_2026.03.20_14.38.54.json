@@ -1,0 +1,18 @@
+{
+  "brief_id": "good_brief",
+  "pool_name": "tao",
+  "results": [
+    {
+      "tweet_id": "123",
+      "author": "test_user",
+      "score": 0.5,
+      "performance_bonus_pct": 0.0,
+      "metrics": {
+        "views": 0,
+        "views_per_follower": 0.0,
+        "total_engagements": 0,
+        "engagement_per_view": 0.0
+      }
+    }
+  ]
+}
