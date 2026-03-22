@@ -10,7 +10,7 @@ How to add a new prompt version:
 3. Update tests to validate the new version
 4. Briefs can then specify "prompt_version": X to use the new format
 
-Currently supported versions: v1 (default: v1)
+Currently supported versions: v1, v2, v3 (default: v1)
 """
 
 def generate_brief_evaluation_prompt_v1(brief, tweet):
@@ -108,10 +108,61 @@ def generate_brief_evaluation_prompt_v2(brief, tweet):
         "Be concise and remember: fabricated evidence = Not Met."
     )
 
+
+def generate_brief_evaluation_prompt_v3(brief, tweet):
+    """
+    Evaluation prompt for unsponsored/conversational briefs (e.g. prediction markets).
+
+    Designed for briefs that:
+    - Have no specific sponsor
+    - Are single-sentence topic prompts rather than numbered requirements
+    - Encourage debate, comparison, or opinion
+
+    Features:
+    - No sponsor language - evaluates topic engagement
+    - Substance check replaces 80% sponsor rule
+    - Works with single-sentence briefs (no auto-numbering needed)
+    - Permits critical/comparative takes
+    """
+    backticks = "```"
+    return (
+        "///// TOPIC BRIEF /////\n"
+        f"{brief['brief']}\n\n"
+        "///// TWEET /////\n"
+        f"{tweet}\n\n"
+        "///// YOUR TASK /////\n"
+        "Decide whether this tweet **genuinely engages** with the topic described in the brief.\n\n"
+        "**Evaluation criteria**\n"
+        "1. **On-topic**: The tweet must substantively address the topic \u2014 not just a passing mention or tangential reference.\n"
+        "2. **Substance**: The tweet adds value \u2014 an opinion, analysis, data, comparison, prediction, or informed take on the topic.\n\n"
+        "**What is allowed**\n"
+        "\u2022 Critical or contrarian takes are acceptable, as long as they engage with the topic\n"
+        "\u2022 Going deeper into a subtopic within the brief\u2019s scope\n\n"
+        "**Step-by-step instructions**\n"
+        "1. Check each evaluation criterion above.\n"
+        "2. For each, mark **Met** or **Not Met** with a brief explanation.\n"
+        "3. If any criterion fails \u2192 Verdict = NO.\n\n"
+        "**Important accuracy rules**\n"
+        "\u2022 Fabricated quotes automatically fail.\n"
+        "\u2022 When in doubt, choose **NO**.\n\n"
+        "**Response format (exactly):**\n"
+        f"{backticks}\n"
+        "## Evaluation\n"
+        "- On-topic: Met / Not Met \u2014 brief explanation\n"
+        "- Substance: Met / Not Met \u2014 brief explanation\n"
+        "## Verdict\n"
+        "YES or NO\n"
+        "## Summary\n"
+        "One sentence explaining why the tweet did or did not meet the brief.\n"
+        f"{backticks}\n"
+    )
+
+
 # Registry of available prompt generators
 PROMPT_GENERATORS = {
     1: generate_brief_evaluation_prompt_v1,
-    2: generate_brief_evaluation_prompt_v2
+    2: generate_brief_evaluation_prompt_v2,
+    3: generate_brief_evaluation_prompt_v3,
 }
 
 def get_prompt_generator(version):
