@@ -68,10 +68,34 @@ class ConnectionScanner:
         self.database = ConnectionDatabase(db_path=db_path)
         self.tag_parser = TagParser()
         self.tweet_ids = tweet_ids if tweet_ids is not None else CONNECTION_TWEET_IDS
+        self._all_known_accounts: Optional[Set[str]] = None
 
         bt.logging.info(
             f"ConnectionScanner initialized: {len(self.tweet_ids)} tweet(s) to scan"
         )
+
+    def _get_all_known_accounts(self) -> Set[str]:
+        """
+        Return the union of all account usernames across every pool's latest
+        social map. Cached for the lifetime of this scanner instance so we
+        only hit disk once per scan run.
+        """
+        if self._all_known_accounts is not None:
+            return self._all_known_accounts
+
+        all_accounts: Set[str] = set()
+        try:
+            pool_manager = PoolManager()
+            for pool_name in pool_manager.get_pools():
+                try:
+                    all_accounts |= get_social_map_accounts(pool_name)
+                except (ValueError, FileNotFoundError):
+                    pass
+        except Exception as e:
+            bt.logging.warning(f"Could not load pool list for referral validation: {e}")
+
+        self._all_known_accounts = all_accounts
+        return all_accounts
 
     def _extract_connections_from_tweets(
         self,
@@ -107,13 +131,26 @@ class ConnectionScanner:
             tags = self.tag_parser.extract_tags(text)
 
             for parsed in tags:
+                referred_by = parsed.referred_by
+                referral_code = parsed.referral_code
+
+                if referred_by:
+                    all_known = self._get_all_known_accounts()
+                    if all_known and referred_by.lower() not in all_known:
+                        bt.logging.info(
+                            f"Ignoring referral code '{referral_code}' (decoded to "
+                            f"'{referred_by}') — handle not found in any social map"
+                        )
+                        referred_by = None
+                        referral_code = None
+
                 connections.append({
                     'tweet_id': tweet_id,
                     'username': author,
                     'tag_type': parsed.tag_type,
                     'tag': parsed.full_tag,
-                    'referral_code': parsed.referral_code,
-                    'referred_by': parsed.referred_by,
+                    'referral_code': referral_code,
+                    'referred_by': referred_by,
                 })
 
         return connections

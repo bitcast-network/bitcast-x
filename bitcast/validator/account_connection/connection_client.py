@@ -72,12 +72,13 @@ class ConnectionClient:
                             error_count += 1
                             continue
                         
-                        # Store connection (upsert handles duplicates)
                         db.upsert_connection(
                             pool_name=conn["pool_name"],
                             tweet_id=conn["tweet_id"],
                             tag=conn["tag"],
-                            account_username=conn["account_username"]
+                            account_username=conn["account_username"],
+                            referral_code=conn.get("referral_code"),
+                            referred_by=conn.get("referred_by"),
                         )
                         stored_count += 1
                         

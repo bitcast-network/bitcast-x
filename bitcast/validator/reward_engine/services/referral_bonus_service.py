@@ -78,10 +78,21 @@ class ReferralBonusService:
             account_data = {}
 
         bonuses: Dict[int, float] = {}
+        paid_pairs: Set[tuple] = set()
 
         for referral in referrals:
             referee_username = referral['account_username']
             referrer_username = referral.get('referred_by')
+
+            pair = (referee_username, referrer_username)
+            if pair in paid_pairs:
+                referral['computed_amount'] = 0.0
+                bt.logging.debug(
+                    f"Skipping duplicate referral for @{referee_username} "
+                    f"referred by @{referrer_username} (already paid in another pool)"
+                )
+                continue
+            paid_pairs.add(pair)
 
             referee_info = account_data.get(referee_username, {})
             followers = referee_info.get('followers_count', 0)
@@ -135,14 +146,30 @@ class ReferralBonusService:
         
         if not pending:
             return 0
+
+        already_paid = {
+            (r['account_username'], r.get('referred_by'))
+            for r in all_referrals
+            if r.get('payout_date') is not None
+        }
         
         tomorrow = date.today() + timedelta(days=1)
         activated = 0
+        activated_pairs: Set[tuple] = set()
         
         for referral in pending:
             referee_username = referral['account_username']
+            referrer = referral.get('referred_by')
+            pair = (referee_username, referrer)
             
             if referee_username not in participating_accounts:
+                continue
+
+            if pair in already_paid or pair in activated_pairs:
+                bt.logging.debug(
+                    f"Skipping duplicate referral activation for @{referee_username} "
+                    f"referred by @{referrer} (already activated in another pool)"
+                )
                 continue
             
             success = self.connection_db.set_payout_date(
@@ -152,7 +179,7 @@ class ReferralBonusService:
             
             if success:
                 activated += 1
-                referrer = referral.get('referred_by', 'unknown')
+                activated_pairs.add(pair)
                 bt.logging.info(
                     f"Activated referral: @{referee_username} referred by @{referrer}, "
                     f"payout on {tomorrow}"
