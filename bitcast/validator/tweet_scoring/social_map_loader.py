@@ -138,35 +138,36 @@ def get_active_members(
     return members
 
 
-def get_considered_accounts(social_map: Dict, limit: int) -> List[Tuple[str, float]]:
+def get_considered_accounts(social_map: Dict, limit: Optional[int] = None) -> List[Tuple[str, float]]:
     """
-    Get top N accounts by score for engagement consideration.
-    
+    Get accounts by score for engagement consideration.
+
     Args:
         social_map: Social map data dictionary
-        limit: Number of top accounts to return
-        
+        limit: Optional number of top accounts to return. If None, returns all.
+
     Returns:
         List of (username, score) tuples sorted by score descending
     """
     accounts = social_map.get('accounts', {})
-    
+
     # Get all accounts with scores
     account_scores = [
         (username, data.get('score', 0.0))
         for username, data in accounts.items()
     ]
-    
-    # Sort by score descending and take top N
+
+    # Sort by score descending
     account_scores.sort(key=lambda x: x[1], reverse=True)
-    considered = account_scores[:limit]
-    
+
+    if limit is not None:
+        account_scores = account_scores[:limit]
+
     bt.logging.info(
-        f"Selected top {len(considered)} considered accounts "
-        f"(requested: {limit}, available: {len(account_scores)})"
+        f"Selected {len(account_scores)} considered accounts"
     )
-    
-    return considered
+
+    return account_scores
 
 
 def get_active_members_for_brief(

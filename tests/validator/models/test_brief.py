@@ -261,10 +261,10 @@ class TestBriefEligibilityConfig:
     """Tests for brief-level eligibility configuration."""
     
     def test_brief_with_eligibility_config(self):
-        """Can create Brief with max_members and max_considered."""
+        """Can create Brief with max_members."""
         start = datetime.now(timezone.utc)
         end = start + timedelta(days=7)
-        
+
         brief = Brief(
             id="test_003",
             pool="tao",
@@ -273,18 +273,16 @@ class TestBriefEligibilityConfig:
             end_date=end,
             brief_text="Test campaign",
             tag="#test",
-            max_members=100,
-            max_considered=250
+            max_members=100
         )
-        
+
         assert brief.max_members == 100
-        assert brief.max_considered == 250
     
     def test_brief_eligibility_config_optional(self):
-        """max_members and max_considered are optional."""
+        """max_members is optional."""
         start = datetime.now(timezone.utc)
         end = start + timedelta(days=7)
-        
+
         brief = Brief(
             id="test_004",
             pool="tao",
@@ -294,12 +292,11 @@ class TestBriefEligibilityConfig:
             brief_text="Test campaign",
             tag="#test"
         )
-        
+
         assert brief.max_members is None
-        assert brief.max_considered is None
     
     def test_from_dict_with_eligibility_config(self):
-        """from_dict parses max_members and max_considered."""
+        """from_dict parses max_members."""
         data = {
             'id': 'api_003',
             'pool': 'tao',
@@ -308,14 +305,12 @@ class TestBriefEligibilityConfig:
             'end_date': '2025-11-08T00:00:00Z',
             'brief': 'API test with config',
             'tag': '#test',
-            'max_members': 75,
-            'max_considered': 200
+            'max_members': 75
         }
-        
+
         brief = Brief.from_dict(data)
-        
+
         assert brief.max_members == 75
-        assert brief.max_considered == 200
     
     def test_from_dict_without_eligibility_config(self):
         """from_dict handles missing eligibility config (defaults to None)."""
@@ -328,17 +323,16 @@ class TestBriefEligibilityConfig:
             'brief': 'API test without config',
             'qrt': '123456789'  # Using qrt instead of tag
         }
-        
+
         brief = Brief.from_dict(data)
-        
+
         assert brief.max_members is None
-        assert brief.max_considered is None
     
     def test_to_dict_includes_eligibility_config(self):
-        """to_dict includes max_members and max_considered."""
+        """to_dict includes max_members."""
         start = datetime(2025, 11, 1, tzinfo=timezone.utc)
         end = datetime(2025, 11, 8, tzinfo=timezone.utc)
-        
+
         brief = Brief(
             id="test_005",
             pool="tao",
@@ -347,20 +341,18 @@ class TestBriefEligibilityConfig:
             end_date=end,
             brief_text="Test campaign",
             tag="#test",
-            max_members=150,
-            max_considered=300
+            max_members=150
         )
-        
+
         data = brief.to_dict()
-        
+
         assert data['max_members'] == 150
-        assert data['max_considered'] == 300
     
     def test_to_dict_includes_none_eligibility_config(self):
-        """to_dict includes max_members and max_considered even when None."""
+        """to_dict includes max_members even when None."""
         start = datetime(2025, 11, 1, tzinfo=timezone.utc)
         end = datetime(2025, 11, 8, tzinfo=timezone.utc)
-        
+
         brief = Brief(
             id="test_006",
             pool="tao",
@@ -370,11 +362,9 @@ class TestBriefEligibilityConfig:
             brief_text="Test campaign",
             tag="#test"
         )
-        
+
         data = brief.to_dict()
-        
+
         assert 'max_members' in data
-        assert 'max_considered' in data
         assert data['max_members'] is None
-        assert data['max_considered'] is None
 
