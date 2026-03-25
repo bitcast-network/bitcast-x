@@ -1,6 +1,6 @@
 # Bittensor core dependencies
 bittensor==9.12.2
-bittensor-cli==9.15.2
+bittensor-cli==9.18.1
 bittensor-commit-reveal==0.4.0
 bittensor-wallet==4.0.0
 requests==2.32.4
