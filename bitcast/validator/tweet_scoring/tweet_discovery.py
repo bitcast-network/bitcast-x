@@ -361,14 +361,26 @@ class TweetDiscovery:
             rt_result = self.client.get_retweeters(tweet_id)
             if rt_result['api_succeeded']:
                 self.store.store_retweeters(tweet_id, rt_result['retweeters'])
-        
+
         def fetch_quoters():
             qrt_query = build_search_query(quoted_tweet_id=tweet_id)
             qrt_result = self.client.search_tweets(query=qrt_query, max_results=100)
             if qrt_result['api_succeeded']:
-                self.store.store_tweets(qrt_result['tweets'])
-                self.store.store_quoters(tweet_id, qrt_result['tweets'])
-        
+                # Filter to only tweets that actually quote the target tweet.
+                # Search APIs (e.g. Desearch) may ignore the quoted_tweet_id
+                # operator and return unrelated tweets.
+                valid_qrts = [
+                    t for t in qrt_result['tweets']
+                    if t.get('quoted_tweet_id') == tweet_id
+                ]
+                if len(valid_qrts) != len(qrt_result['tweets']):
+                    bt.logging.warning(
+                        f"QRT search for {tweet_id}: {len(qrt_result['tweets'])} results, "
+                        f"only {len(valid_qrts)} actually quote this tweet"
+                    )
+                self.store.store_tweets(valid_qrts)
+                self.store.store_quoters(tweet_id, valid_qrts)
+
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(fetch_retweeters), executor.submit(fetch_quoters)]
             for future in as_completed(futures):
