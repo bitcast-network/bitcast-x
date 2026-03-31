@@ -24,9 +24,6 @@ reward_snapshots/
 *.sqlite3
 cache_tools/
 
-# Stability analysis output
-bitcast/validator/social_discovery/stability/output/bitcast/validator/tweet_bonus/tweet_bonus/
-
 # Tweet bonus output files
-tweet_bonus/tweet_bonus/
-tweets_bonus/
+**/tweet_bonus/tweet_bonus/
+**/tweet_bonus/featured/
