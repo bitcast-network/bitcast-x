@@ -74,6 +74,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             pool_name = brief['pool']
             tag = brief.get('tag')
             qrt = brief.get('qrt')
+            inclusion_keywords = brief.get('inclusion_keywords')
             
             # Parse brief dates
             start_date = parse_brief_date(brief.get('start_date'))
@@ -90,6 +91,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     connected_accounts=connected_accounts,
                     tag=tag,
                     qrt=qrt,
+                    inclusion_keywords=inclusion_keywords,
                     run_id=run_id,
                     start_date=start_date,
                     end_date=end_date,
@@ -211,6 +213,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             pool_name = brief['pool']
             tag = brief.get('tag')  # Optional
             qrt = brief.get('qrt')  # Optional
+            inclusion_keywords = brief.get('inclusion_keywords')  # Optional
             budget = brief.get('budget', 0)
             
             # Parse brief dates
@@ -276,6 +279,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     connected_accounts=connected_accounts,
                     tag=tag,
                     qrt=qrt,
+                    inclusion_keywords=inclusion_keywords,
                     run_id=run_id,
                     start_date=start_date,
                     end_date=end_date,
@@ -456,7 +460,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
         connected_accounts: set,
         tag: Optional[str],
         qrt: Optional[str],
-        run_id: Optional[str],
+        inclusion_keywords: Optional[str] = None,
+        run_id: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         max_members: Optional[int] = None,
@@ -474,6 +479,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             connected_accounts: Set of connected account usernames to filter scoring
             tag: Optional tag filter
             qrt: Optional quote tweet filter
+            inclusion_keywords: Optional comma-separated secondary keyword filter
             run_id: Run identifier
             start_date: Brief start date (inclusive)
             end_date: Brief end date (inclusive)
@@ -492,6 +498,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 run_id=run_id,
                 tag=tag,
                 qrt=qrt,
+                inclusion_keywords=inclusion_keywords,
                 start_date=start_date,
                 end_date=end_date,
                 max_members=max_members,
@@ -794,6 +801,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 brief_metadata={
                     "tag": brief.get('tag'),
                     "qrt": brief.get('qrt'),
+                    "inclusion_keywords": brief.get('inclusion_keywords'),
                     "budget": brief.get('budget', 0.0),
                     "daily_budget": brief.get('budget', 0.0) / EMISSIONS_PERIOD
                 },

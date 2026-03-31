@@ -364,7 +364,7 @@ class TweetDiscovery:
 
         def fetch_quoters():
             qrt_query = build_search_query(quoted_tweet_id=tweet_id)
-            qrt_result = self.client.search_tweets(query=qrt_query, max_results=100)
+            qrt_result = self.client.search_tweets(query=qrt_query, max_results=50)
             if qrt_result['api_succeeded']:
                 # Filter to only tweets that actually quote the target tweet.
                 # Search APIs (e.g. Desearch) may ignore the quoted_tweet_id
