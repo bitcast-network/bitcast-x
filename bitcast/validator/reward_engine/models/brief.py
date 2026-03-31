@@ -23,6 +23,7 @@ class Brief:
     brief_text: str
     tag: Optional[str] = None
     qrt: Optional[str] = None
+    inclusion_keywords: Optional[str] = None
     prompt_version: int = 1
     boost: float = 1.0
     max_tweets: Optional[int] = None
@@ -89,6 +90,7 @@ class Brief:
             brief_text=data.get('brief', ''),
             tag=data.get('tag'),
             qrt=data.get('qrt'),
+            inclusion_keywords=data.get('inclusion_keywords'),
             prompt_version=int(data.get('prompt_version', 1)),
             boost=float(data.get('boost', 1.0)),
             max_tweets=data.get('max_tweets'),
@@ -106,6 +108,7 @@ class Brief:
             'brief': self.brief_text,
             'tag': self.tag,
             'qrt': self.qrt,
+            'inclusion_keywords': self.inclusion_keywords,
             'prompt_version': self.prompt_version,
             'boost': self.boost,
             'max_tweets': self.max_tweets,

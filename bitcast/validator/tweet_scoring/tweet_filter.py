@@ -9,9 +9,9 @@ import bittensor as bt
 
 
 class TweetFilter:
-    """Filters tweets by language, type, optional tag, and optional quoted tweet ID."""
+    """Filters tweets by language, type, optional tag, optional quoted tweet ID, and optional inclusion keywords."""
     
-    def __init__(self, language: Optional[str] = None, tag: Optional[str] = None, qrt: Optional[str] = None):
+    def __init__(self, language: Optional[str] = None, tag: Optional[str] = None, qrt: Optional[str] = None, inclusion_keywords: Optional[str] = None):
         """
         Initialize filter with pool configuration.
         
@@ -23,15 +23,22 @@ class TweetFilter:
             qrt: Optional quoted tweet ID to filter by (e.g., '1983210945288569177')
                  If None or empty string, all tweets accepted
                  If specified, only tweets that quote this specific tweet ID are accepted
+            inclusion_keywords: Optional comma-separated keyword list for secondary filtering.
+                 If None or empty, all tweets accepted. If provided, tweet must contain
+                 at least one keyword (case-insensitive substring match).
         """
         self.language = language
         self.tag = tag.lower() if tag else None
         self.qrt = qrt
+        self.inclusion_keywords = [
+            kw.strip().lower() for kw in inclusion_keywords.split(',') if kw.strip()
+        ] if inclusion_keywords else None
         
         bt.logging.debug(
             f"TweetFilter initialized: language={'any' if language is None else language}, "
             f"tag={'any' if tag is None else tag}, "
-            f"qrt={'any' if qrt is None else qrt}"
+            f"qrt={'any' if qrt is None else qrt}, "
+            f"inclusion_keywords={'any' if self.inclusion_keywords is None else self.inclusion_keywords}"
         )
     
     def matches_tag(self, tweet_text: str) -> bool:
@@ -52,6 +59,25 @@ class TweetFilter:
         
         # Check if tag appears in tweet (case-insensitive)
         return self.tag in tweet_text.lower()
+    
+    def matches_inclusion_keywords(self, tweet_text: str) -> bool:
+        """
+        Check if tweet contains at least one inclusion keyword.
+        
+        Case-insensitive substring matching. If no inclusion keywords
+        are configured, all tweets pass.
+        
+        Args:
+            tweet_text: Tweet text content
+            
+        Returns:
+            True if any keyword matches or no keyword requirement
+        """
+        if not self.inclusion_keywords:
+            return True
+        
+        text_lower = tweet_text.lower()
+        return any(kw in text_lower for kw in self.inclusion_keywords)
     
     def matches_qrt(self, tweet: Dict) -> bool:
         """
@@ -159,6 +185,10 @@ class TweetFilter:
             if not self.matches_qrt(tweet):
                 continue
             
+            # Filter 5: Inclusion keywords (secondary keyword filter)
+            if not self.matches_inclusion_keywords(tweet.get('text', '')):
+                continue
+            
             filtered.append(tweet)
         
         filter_desc = "type + language"
@@ -166,6 +196,8 @@ class TweetFilter:
             filter_desc += f" + tag({self.tag})"
         if self.qrt:
             filter_desc += f" + qrt({self.qrt})"
+        if self.inclusion_keywords:
+            filter_desc += f" + inclusion_keywords({','.join(self.inclusion_keywords)})"
         bt.logging.info(f"Filtered {len(tweets)} → {len(filtered)} tweets ({filter_desc})")
         
         return filtered

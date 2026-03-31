@@ -117,6 +117,7 @@ def score_tweets_for_pool(
     run_id: Optional[str] = None,
     tag: Optional[str] = None,
     qrt: Optional[str] = None,
+    inclusion_keywords: Optional[str] = None,
     start_date: Optional[datetime] = None,
     end_date: Optional[datetime] = None,
     max_members: Optional[int] = None,
@@ -148,6 +149,8 @@ def score_tweets_for_pool(
              At least one of tag or qrt is REQUIRED
         qrt: Quoted tweet ID to filter by (e.g., '1983210945288569177')
              At least one of tag or qrt is REQUIRED
+        inclusion_keywords: Optional comma-separated keyword list for secondary filtering.
+             Applied after search/discovery, before scoring. Tweet must contain at least one keyword.
         start_date: Start date for brief window (inclusive, REQUIRED)
         end_date: End date for brief window (inclusive, REQUIRED)
         max_members: Optional limit on active members
@@ -199,7 +202,7 @@ def score_tweets_for_pool(
         raise ValueError(f"Brief '{brief_id}' must specify both start_date and end_date")
     
     bt.logging.debug(f"Brief window: {start_date.date()} to {end_date.date()}")
-    bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}")
+    bt.logging.debug(f"Filters: tag={tag}, qrt={qrt}, inclusion_keywords={inclusion_keywords}")
     
     # Step 2: Load social map and determine active members
     bt.logging.debug("Loading social map")
@@ -297,7 +300,7 @@ def score_tweets_for_pool(
         return []
     
     # Step 4: Filter by content (language, type)
-    tweet_filter = TweetFilter(language=pool_config.get('lang'), tag=tag, qrt=qrt)
+    tweet_filter = TweetFilter(language=pool_config.get('lang'), tag=tag, qrt=qrt, inclusion_keywords=inclusion_keywords)
     filtered_tweets = tweet_filter.filter_tweets(discovered_tweets)
     
     bt.logging.debug(f"After content filter: {len(filtered_tweets)} tweets")
@@ -516,10 +519,12 @@ if __name__ == "__main__":
         pool_name = brief_data.get('pool', 'tao')
         tag = brief_data.get('tag')
         qrt = brief_data.get('qrt')
+        inclusion_keywords = brief_data.get('inclusion_keywords')
         
         bt.logging.info(f"  → Brief: pool={pool_name}, "
                        f"dates={brief_data.get('start_date')} to {brief_data.get('end_date')}, "
-                       f"tag={tag or 'none'}, qrt={qrt or 'none'}")
+                       f"tag={tag or 'none'}, qrt={qrt or 'none'}, "
+                       f"inclusion_keywords={inclusion_keywords or 'none'}")
         
         # Parse dates from brief
         start_date = parse_brief_date(brief_data.get('start_date'))
@@ -558,6 +563,7 @@ if __name__ == "__main__":
             run_id=run_id,
             tag=tag,
             qrt=qrt,
+            inclusion_keywords=inclusion_keywords,
             start_date=start_date,
             end_date=end_date,
             max_members=brief_max_members,
