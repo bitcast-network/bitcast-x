@@ -6,7 +6,7 @@ import numpy as np
 import bittensor as bt
 from bitcast.validator.reward_engine.utils import get_briefs
 from ..utils.run_manager import generate_current_run_id
-from ..utils.config import ENABLE_DATA_PUBLISH, TWEETS_SUBMIT_ENDPOINT
+from ..utils.config import ENABLE_DATA_PUBLISH, REFERRAL_BONUSES_ENDPOINT
 
 from .services.platform_registry import PlatformRegistry
 from .services.score_aggregation_service import ScoreAggregationService
@@ -253,7 +253,7 @@ class RewardOrchestrator:
                 payload_type="referral_bonuses",
                 run_id=run_id,
                 payload_data=payload,
-                endpoint=TWEETS_SUBMIT_ENDPOINT
+                endpoint=REFERRAL_BONUSES_ENDPOINT
             )
             
             if success:
