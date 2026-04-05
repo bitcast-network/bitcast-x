@@ -139,7 +139,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     brief=brief,
                     tweets_with_targets=all_tweets_for_publish,
                     usd_targets={},  # Empty - no rewards in scoring phase
-                    run_id=run_id
+                    run_id=run_id,
+                    featured_selection=featured_selection,
                 )
                 
             except Exception as e:
@@ -253,12 +254,14 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 
                 # Convert snapshot to publishing format and publish
                 tweets_with_targets = self._convert_snapshot_to_tweets_with_targets(tweet_rewards)
+                featured_selection = select_featured_tweet([], brief, pool_name)
                 await self._publish_brief_tweets(
                     brief_id=brief_id,
                     brief=brief,
                     tweets_with_targets=tweets_with_targets,
                     usd_targets=usd_targets,
-                    run_id=run_id
+                    run_id=run_id,
+                    featured_selection=featured_selection,
                 )
                 
                 continue
@@ -414,7 +417,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     brief=brief,
                     tweets_with_targets=all_tweets_for_publish,
                     usd_targets=usd_targets,
-                    run_id=run_id
+                    run_id=run_id,
+                    featured_selection=featured_selection,
                 )
                 
             except Exception as e:
@@ -778,7 +782,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
         brief: Dict[str, Any],
         tweets_with_targets: List[Dict[str, Any]],
         usd_targets: Dict[int, float],
-        run_id: str
+        run_id: str,
+        featured_selection: Optional[Dict] = None,
     ) -> None:
         """
         Publish tweet data with pre-calculated USD/alpha targets.
@@ -789,6 +794,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             tweets_with_targets: Tweets with usd_target and alpha_target fields
             usd_targets: UID-level USD targets (for summary)
             run_id: Validation run identifier
+            featured_selection: Optional featured tweet selection metadata
         """
         if not ENABLE_DATA_PUBLISH:
             return
@@ -805,7 +811,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     "budget": brief.get('budget', 0.0),
                     "daily_budget": brief.get('budget', 0.0) / EMISSIONS_PERIOD
                 },
-                uid_targets=usd_targets
+                uid_targets=usd_targets,
+                featured_tweet=featured_selection,
             )
             
             # Publish with fire-and-forget pattern
