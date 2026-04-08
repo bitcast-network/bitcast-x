@@ -2,7 +2,7 @@
 
 import bittensor as bt
 from datetime import datetime, timezone
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from bitcast.validator.utils.data_publisher import get_global_publisher
 
 
@@ -89,7 +89,8 @@ def create_tweet_payload(
     pool_name: str,
     tweets_with_targets: List[Dict[str, Any]],
     brief_metadata: Dict[str, Any],
-    uid_targets: Dict[int, float]
+    uid_targets: Dict[int, float],
+    featured_tweet: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Create payload for tweet publishing.
@@ -100,6 +101,7 @@ def create_tweet_payload(
         tweets_with_targets: Tweets with pre-calculated usd_target and alpha_target
         brief_metadata: Brief configuration (tag, qrt, budget, daily_budget)
         uid_targets: UID-level USD targets for summary
+        featured_tweet: Optional featured tweet selection metadata
         
     Returns:
         Payload dict ready for publishing
@@ -162,6 +164,7 @@ def create_tweet_payload(
         payload = {
             "brief_id": brief_id,
             "tweets": processed_tweets,
+            "featured_tweet": featured_tweet,
             "summary": {
                 "total_tweets": len(processed_tweets),
                 "total_usd_target": sum(uid_targets.values()),

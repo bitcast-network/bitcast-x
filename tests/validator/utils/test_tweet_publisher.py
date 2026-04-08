@@ -281,6 +281,45 @@ class TestCreateTweetPayload:
         assert tweet["lang"] == "es"
         assert "url" not in tweet  # URL removed from payload
     
+    def test_featured_tweet_included_in_payload(self):
+        """Test that featured tweet selection is included in payload."""
+        filtered_tweets = [
+            {"tweet_id": "123", "author": "user1", "text": "Tweet", "score": 0.5}
+        ]
+        featured = {
+            "brief_id": "test_brief",
+            "tweet_id": "123",
+            "author": "user1",
+            "views_count": 5000,
+            "selection_pool": ["123", "456"],
+            "selection_method": "sha256_mod",
+        }
+        
+        payload = create_tweet_payload(
+            brief_id="test_brief",
+            pool_name="tao",
+            tweets_with_targets=filtered_tweets,
+            brief_metadata={},
+            uid_targets={},
+            featured_tweet=featured,
+        )
+        
+        assert payload["featured_tweet"] == featured
+        assert payload["featured_tweet"]["tweet_id"] == "123"
+        assert payload["featured_tweet"]["author"] == "user1"
+    
+    def test_featured_tweet_none_when_not_provided(self):
+        """Test that featured_tweet is None when no selection exists."""
+        payload = create_tweet_payload(
+            brief_id="test_brief",
+            pool_name="tao",
+            tweets_with_targets=[],
+            brief_metadata={},
+            uid_targets={},
+        )
+        
+        assert payload["featured_tweet"] is None
+    
     def test_unique_creators_counting(self):
         """Test unique creators counting in summary."""
         filtered_tweets = [
