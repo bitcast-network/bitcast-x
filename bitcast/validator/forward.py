@@ -10,6 +10,8 @@ from bitcast.validator.reward_engine.twitter_evaluator import TwitterEvaluator
 from bitcast.validator.account_connection.connection_scanner import ConnectionScanner
 from bitcast.validator.social_discovery.social_discovery import run_discovery_for_stale_pools
 
+from bitcast.validator.tweet_scoring.tweet_fasttrack import poll_fast_track
+
 from bitcast.utils.uids import get_all_uids
 from bitcast.validator.utils.config import (
     VALIDATOR_WAIT, SCORING_INTERVAL_MINUTES, THOROUGH_SCORING_INTERVAL_MINUTES
@@ -80,6 +82,10 @@ async def forward(self):
         
         # Account connection scan
         bt.logging.info("Starting account connection scan...")
+
+        # Poll stitch3 fast-track endpoint
+        poll_fast_track()
+
         scanner = ConnectionScanner()
         summary = await scanner.scan_all_pools()
         bt.logging.info(
