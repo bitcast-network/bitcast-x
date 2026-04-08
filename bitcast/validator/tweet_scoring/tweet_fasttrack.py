@@ -10,8 +10,9 @@ engagement stats. Re-processing connections is safe due to the UNIQUE
 constraint on (pool_name, account_username, tag) in the connection DB.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 import bittensor as bt
+import requests
 
 from bitcast.validator.clients.twitter_client import TwitterClient
 from bitcast.validator.tweet_scoring.tweet_store import TweetStore
@@ -135,6 +136,62 @@ def fasttrack_tweet(tweet_id: str) -> Dict[str, Any]:
         'is_new': is_new,
         'connection': _process_connections_all_pools(tweet),
     }
+
+
+FAST_TRACK_URL = "https://www.stitch3.ai/api/fast-track"
+FAST_TRACK_MAX_IDS = 1000
+
+
+def poll_fast_track() -> Dict[str, Any]:
+    """
+    Poll the stitch3 fast-track endpoint and fasttrack all returned tweet IDs.
+
+    Called once per validator scoring cycle. Fetches tweet IDs from the
+    stitch3 API and passes each to fasttrack_tweet(). Capped at
+    FAST_TRACK_MAX_IDS to prevent runaway batches.
+
+    Returns:
+        Dict with summary: polled, fast_tracked, already_in_store, failed, total
+    """
+    try:
+        resp = requests.get(FAST_TRACK_URL, timeout=10)
+        resp.raise_for_status()
+        body = resp.json()
+    except Exception as e:
+        bt.logging.warning(f"Fast-track poll failed: {e}")
+        return {"polled": 0, "error": str(e)}
+
+    tweet_ids: List[str] = body.get("data", [])
+    if not tweet_ids:
+        bt.logging.debug("Fast-track: no tweets to process")
+        return {"polled": 0, "total": 0}
+
+    if len(tweet_ids) > FAST_TRACK_MAX_IDS:
+        bt.logging.warning(
+            f"Fast-track: received {len(tweet_ids)} IDs, capping to {FAST_TRACK_MAX_IDS}"
+        )
+        tweet_ids = tweet_ids[:FAST_TRACK_MAX_IDS]
+
+    stats = {"polled": len(tweet_ids), "fast_tracked": 0, "already_in_store": 0, "failed": 0}
+
+    for tid in tweet_ids:
+        result = fasttrack_tweet(tid)
+        status = result.get("status")
+        if status == "fetched_and_stored":
+            stats["fast_tracked"] += 1
+        elif status == "already_in_store":
+            stats["already_in_store"] += 1
+        else:
+            stats["failed"] += 1
+            bt.logging.debug(f"Fast-track tweet {tid}: {status}")
+
+    bt.logging.info(
+        f"Fast-track poll: {stats['polled']} polled, "
+        f"{stats['fast_tracked']} new, "
+        f"{stats['already_in_store']} cached, "
+        f"{stats['failed']} failed"
+    )
+    return stats
 
 
 if __name__ == "__main__":
