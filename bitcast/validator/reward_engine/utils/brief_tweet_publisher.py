@@ -157,7 +157,8 @@ def create_tweet_payload(
                 # Financial targets (pre-calculated)
                 "usd_target": tweet.get("usd_target", 0.0),
                 "total_usd_target": tweet.get("total_usd_target", 0.0),
-                "alpha_target": tweet.get("alpha_target", 0.0)
+                "alpha_target": tweet.get("alpha_target", 0.0),
+                "weight": tweet.get("weight", 0.0)
             })
         
         # Create complete payload

@@ -26,7 +26,7 @@ from bitcast.validator.utils.config import (
     NOCODE_UID, SIMULATE_CONNECTIONS, REWARD_SMOOTHING_EXPONENT
 )
 from bitcast.validator.utils.date_utils import parse_brief_date
-from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price
+from bitcast.validator.utils.token_pricing import get_bitcast_alpha_price, get_total_miner_emissions
 from bitcast.validator.reward_engine.utils import (
     publish_brief_tweets,
     create_tweet_payload,
@@ -588,6 +588,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             return filtered_tweets
         
         alpha_price = get_bitcast_alpha_price()
+        total_daily_alpha = get_total_miner_emissions()
+        total_daily_usd = alpha_price * total_daily_alpha
         
         bt.logging.debug(f"Applied power law smoothing (exponent={REWARD_SMOOTHING_EXPONENT}) to {len(filtered_tweets)} tweets")
         
@@ -596,6 +598,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             tweet['usd_target'] = daily_budget * proportion
             tweet['total_usd_target'] = tweet['usd_target'] * EMISSIONS_PERIOD
             tweet['alpha_target'] = tweet['usd_target'] / alpha_price
+            tweet['weight'] = tweet['usd_target'] / total_daily_usd if total_daily_usd > 0 else 0.0
         
         bt.logging.debug(f"Calculated targets for {len(filtered_tweets)} tweets (${daily_budget:.2f} total)")
         return filtered_tweets
