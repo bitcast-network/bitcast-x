@@ -650,6 +650,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
             List of tweets in tweets_with_targets format with daily USD/alpha targets
         """
         alpha_price = get_bitcast_alpha_price()
+        total_daily_alpha = get_total_miner_emissions()
+        total_daily_usd = alpha_price * total_daily_alpha
         tweets_with_targets = []
         
         for tweet_reward in tweet_rewards:
@@ -665,6 +667,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
                 'usd_target': daily_usd,
                 'total_usd_target': tweet_reward.get('total_usd', 0.0),
                 'alpha_target': daily_usd / alpha_price,
+                'weight': daily_usd / total_daily_usd if total_daily_usd > 0 else 0.0,
                 # Include engagement metrics from snapshot
                 'favorite_count': tweet_reward.get('favorite_count', 0),
                 'retweet_count': tweet_reward.get('retweet_count', 0),
