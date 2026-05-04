@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import bittensor as bt
 
+from bitcast.validator.utils.config import STALE_INFLUENCE_DECAY
+
 
 def parse_social_map_filename(filename: str) -> Optional[datetime]:
     """
@@ -170,6 +172,67 @@ def get_considered_accounts(social_map: Dict, limit: Optional[int] = None) -> Li
     return account_scores
 
 
+def _find_relevant_maps(pool_name: str, start_date: datetime, end_date: datetime) -> List[Tuple[Path, datetime]]:
+    """
+    Find all social maps that were active during a brief window.
+    
+    A map is "active" from its creation until the next map is created.
+    Returns maps sorted chronologically.
+    
+    Args:
+        pool_name: Pool name
+        start_date: Brief start date (UTC)
+        end_date: Brief end date (UTC)
+        
+    Returns:
+        List of (map_file_path, timestamp) tuples, sorted chronologically
+    """
+    social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
+    
+    if not social_maps_dir.exists():
+        raise FileNotFoundError(f"No social maps found for pool '{pool_name}'")
+    
+    all_maps = [
+        f for f in social_maps_dir.glob("*.json")
+        if not f.name.endswith(('_adjacency.json', '_metadata.json'))
+        and not f.name.startswith('recursive_summary_')
+    ]
+    
+    if not all_maps:
+        raise FileNotFoundError(f"No social maps found for pool '{pool_name}'")
+    
+    maps_with_times = sorted(
+        [(f, ts) for f in all_maps if (ts := parse_social_map_filename(f.name))],
+        key=lambda x: x[1]
+    )
+    
+    # Find maps whose active period overlaps the brief window
+    relevant = []
+    for i, (map_file, map_time) in enumerate(maps_with_times):
+        next_map_time = maps_with_times[i + 1][1] if i + 1 < len(maps_with_times) else datetime.now(timezone.utc)
+        if map_time <= end_date and next_map_time >= start_date:
+            relevant.append((map_file, map_time))
+    
+    if not relevant:
+        bt.logging.warning(f"No maps found in brief window, using latest")
+        relevant = [maps_with_times[-1]]
+    
+    bt.logging.info(
+        f"Brief {start_date.date()} to {end_date.date()} spans "
+        f"{len(relevant)} social map(s)"
+    )
+    
+    return relevant
+
+
+def _accounts_dict_from_map(social_map: Dict) -> Dict[str, float]:
+    """Extract {lowercase_username: score} from a social map."""
+    return {
+        username.lower(): data.get('score', 0.0)
+        for username, data in social_map.get('accounts', {}).items()
+    }
+
+
 def get_active_members_for_brief(
     pool_name: str,
     start_date: Optional[datetime] = None,
@@ -193,117 +256,88 @@ def get_active_members_for_brief(
         
     Returns:
         List of eligible account usernames, sorted by score in latest map
-        
-    Example:
-        Brief Nov 20-25, max_members=150
-        - Map from Nov 9: Takes top 150
-        - Map from Nov 23 (mid-brief): Takes top 150
-        - Merges to ~160-200 unique accounts (some overlap)
     """
-    # If no date range provided, just return active members from latest map
     if start_date is None or end_date is None:
         social_map, _ = load_latest_social_map(pool_name)
         return get_active_members(social_map, limit=max_members)
     
-    social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
-    
-    if not social_maps_dir.exists():
-        raise FileNotFoundError(f"No social maps found for pool '{pool_name}'")
-    
-    # Get all social map files
-    all_maps = [
-        f for f in social_maps_dir.glob("*.json")
-        if not f.name.endswith(('_adjacency.json', '_metadata.json'))
-        and not f.name.startswith('recursive_summary_')
-    ]
-    
-    if not all_maps:
-        raise FileNotFoundError(f"No social maps found for pool '{pool_name}'")
-    
-    # Parse timestamps and sort chronologically
-    maps_with_times = []
-    for map_file in all_maps:
-        timestamp = parse_social_map_filename(map_file.name)
-        if timestamp:
-            maps_with_times.append((map_file, timestamp))
-    
-    maps_with_times.sort(key=lambda x: x[1])
-    
-    # Find maps that were "active" during the brief window
-    # A map is active from its creation until the next map is created
-    relevant_maps = []
-    
-    for i, (map_file, map_time) in enumerate(maps_with_times):
-        # Determine when this map stopped being active
-        if i + 1 < len(maps_with_times):
-            next_map_time = maps_with_times[i + 1][1]
-        else:
-            next_map_time = datetime.now(timezone.utc)
-        
-        # Check if this map was active during any part of the brief window
-        # Map overlaps brief if: map_time <= brief_end AND next_map_time >= brief_start
-        if map_time <= end_date and next_map_time >= start_date:
-            relevant_maps.append((map_file, map_time))
-    
-    if not relevant_maps:
-        # Fallback: use latest map
-        bt.logging.warning(f"No maps found in brief window, using latest")
-        relevant_maps = [maps_with_times[-1]]
-    
-    bt.logging.info(
-        f"Brief {start_date.date()} to {end_date.date()} spans "
-        f"{len(relevant_maps)} social map(s)"
-    )
+    relevant_maps = _find_relevant_maps(pool_name, start_date, end_date)
     
     # Collect top N from each relevant map
     all_eligible = set()
-    
     for map_file, map_time in relevant_maps:
         with open(map_file, 'r') as f:
             social_map = json.load(f)
         
-        # Get all accounts sorted by score
-        account_scores = [
-            (username, data.get('score', 0.0))
-            for username, data in social_map['accounts'].items()
-        ]
-        account_scores.sort(key=lambda x: x[1], reverse=True)
-        
-        # Take top max_members (or all if not specified)
-        if max_members:
-            top_from_map = [username for username, _ in account_scores[:max_members]]
-        else:
-            top_from_map = [username for username, _ in account_scores]
-        
-        all_eligible.update(top_from_map)
-        
-        bt.logging.info(
-            f"  → {len(top_from_map)} accounts from {map_file.name} "
-            f"(created {map_time.date()})"
+        account_scores = sorted(
+            [(u, d.get('score', 0.0)) for u, d in social_map['accounts'].items()],
+            key=lambda x: x[1], reverse=True
         )
+        
+        top = [u for u, _ in (account_scores[:max_members] if max_members else account_scores)]
+        all_eligible.update(top)
+        
+        bt.logging.info(f"  → {len(top)} accounts from {map_file.name} (created {map_time.date()})")
     
-    # Load latest map to get current scores for sorting
-    latest_map_file = relevant_maps[-1][0]
-    with open(latest_map_file, 'r') as f:
+    # Sort by score in latest map
+    with open(relevant_maps[-1][0], 'r') as f:
         latest_map = json.load(f)
+    scores_dict = _accounts_dict_from_map(latest_map)
     
-    # Sort merged accounts by their score in latest map
-    # Use username as secondary sort key for consistent ordering when scores are equal
-    scores_dict = {
-        username: data.get('score', 0.0)
-        for username, data in latest_map['accounts'].items()
-    }
+    eligible_list = sorted(list(all_eligible), key=lambda x: (-scores_dict.get(x, 0.0), x))
     
-    eligible_list = sorted(
-        list(all_eligible),
-        key=lambda x: (-scores_dict.get(x, 0.0), x)  # Sort by score desc, then username asc
-    )
-    
-    bt.logging.info(
-        f"Merged to {len(eligible_list)} unique eligible accounts across all maps"
-    )
-    
+    bt.logging.info(f"Merged to {len(eligible_list)} unique eligible accounts across all maps")
     return eligible_list
+
+
+def get_considered_accounts_for_brief(
+    pool_name: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Dict[str, float]:
+    """
+    Build a merged influence-score dict for a brief window.
+
+    Accounts present in the latest map keep their current score.
+    Accounts only in older maps (i.e. dropped off mid-brief) get
+    ``STALE_INFLUENCE_DECAY`` × their last known score.
+
+    If no date range is given, returns accounts from the latest map only.
+
+    Args:
+        pool_name: Pool name.
+        start_date: Brief start date (UTC).
+        end_date: Brief end date (UTC).
+
+    Returns:
+        Dict mapping lowercase username → influence score.
+    """
+    if start_date is None or end_date is None:
+        social_map, _ = load_latest_social_map(pool_name)
+        return _accounts_dict_from_map(social_map)
+
+    relevant_maps = _find_relevant_maps(pool_name, start_date, end_date)
+
+    # Latest map at full score
+    with open(relevant_maps[-1][0], 'r') as f:
+        latest_map = json.load(f)
+    merged = _accounts_dict_from_map(latest_map)
+
+    # Layer in older maps with decay
+    stale_count = 0
+    for map_file, _ in relevant_maps[:-1]:
+        with open(map_file, 'r') as f:
+            older_map = json.load(f)
+        for username, score in _accounts_dict_from_map(older_map).items():
+            if username not in merged:
+                merged[username] = score * STALE_INFLUENCE_DECAY
+                stale_count += 1
+
+    bt.logging.info(
+        f"Merged considered accounts: {len(merged)} total, "
+        f"{stale_count} stale (decayed ×{STALE_INFLUENCE_DECAY})"
+    )
+    return merged
 
 
 def load_relationship_scores(pool_name: str) -> Tuple[Optional[Any], List[str], Dict[str, int]]:
