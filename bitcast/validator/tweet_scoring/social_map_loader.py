@@ -306,6 +306,100 @@ def get_active_members_for_brief(
     return eligible_list
 
 
+# Decay factor for influence scores of accounts that are in older social maps
+# but not in the latest one (e.g. dropped off the map mid-brief).
+STALE_INFLUENCE_DECAY = 0.5
+
+
+def get_considered_accounts_for_brief(
+    pool_name: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Dict[str, float]:
+    """
+    Build a merged influence-score dict for a brief window.
+
+    Accounts present in the latest map keep their current score.
+    Accounts only in older maps (i.e. dropped off mid-brief) get
+    ``STALE_INFLUENCE_DECAY`` × their last known score.
+
+    If no date range is given, returns accounts from the latest map only
+    (identical to ``get_considered_accounts`` but as a dict).
+
+    Args:
+        pool_name: Pool name.
+        start_date: Brief start date (UTC).
+        end_date: Brief end date (UTC).
+
+    Returns:
+        Dict mapping lowercase username → influence score.
+    """
+    # No date range → just return latest map scores
+    if start_date is None or end_date is None:
+        social_map, _ = load_latest_social_map(pool_name)
+        return _accounts_dict_from_map(social_map)
+
+    social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
+    if not social_maps_dir.exists():
+        raise FileNotFoundError(f"No social maps found for pool '{pool_name}'")
+
+    # Collect all map files with timestamps
+    all_maps = [
+        f for f in social_maps_dir.glob("*.json")
+        if not f.name.endswith(('_adjacency.json', '_metadata.json'))
+        and not f.name.startswith('recursive_summary_')
+    ]
+    if not all_maps:
+        raise FileNotFoundError(f"No social maps found for pool '{pool_name}'")
+
+    maps_with_times = []
+    for map_file in all_maps:
+        ts = parse_social_map_filename(map_file.name)
+        if ts:
+            maps_with_times.append((map_file, ts))
+    maps_with_times.sort(key=lambda x: x[1])
+
+    # Find maps active during the brief window
+    relevant_maps = []
+    for i, (map_file, map_time) in enumerate(maps_with_times):
+        next_map_time = maps_with_times[i + 1][1] if i + 1 < len(maps_with_times) else datetime.now(timezone.utc)
+        if map_time <= end_date and next_map_time >= start_date:
+            relevant_maps.append((map_file, map_time))
+    if not relevant_maps:
+        relevant_maps = [maps_with_times[-1]]
+
+    # Build the merged dict
+    # Start with the latest map at full score
+    latest_map_file = relevant_maps[-1][0]
+    with open(latest_map_file, 'r') as f:
+        latest_map = json.load(f)
+    merged = _accounts_dict_from_map(latest_map)
+
+    # Layer in older maps with decay
+    stale_count = 0
+    for map_file, map_time in relevant_maps[:-1]:
+        with open(map_file, 'r') as f:
+            older_map = json.load(f)
+        for username, score in _accounts_dict_from_map(older_map).items():
+            if username not in merged:
+                merged[username] = score * STALE_INFLUENCE_DECAY
+                stale_count += 1
+
+    bt.logging.info(
+        f"Merged considered accounts: {len(merged)} total, "
+        f"{stale_count} stale (decayed ×{STALE_INFLUENCE_DECAY})"
+    )
+    return merged
+
+
+def _accounts_dict_from_map(social_map: Dict) -> Dict[str, float]:
+    """Extract {lowercase_username: score} from a social map."""
+    return {
+        username.lower(): data.get('score', 0.0)
+        for username, data in social_map.get('accounts', {}).items()
+    }
+
+
 def load_relationship_scores(pool_name: str) -> Tuple[Optional[Any], List[str], Dict[str, int]]:
     """
     Load the latest relationship scores matrix for cabal protection.

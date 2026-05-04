@@ -207,8 +207,9 @@ def score_tweets_for_pool(
     # Step 2: Load social map and determine active members
     bt.logging.debug("Loading social map")
     
+    from .social_map_loader import get_active_members_for_brief, get_considered_accounts_for_brief
+    
     if start_date and end_date and max_members:
-        from .social_map_loader import get_active_members_for_brief
         active_members = get_active_members_for_brief(
             pool_name=pool_name,
             start_date=start_date,
@@ -216,13 +217,19 @@ def score_tweets_for_pool(
             max_members=max_members
         )
         social_map, map_file = load_latest_social_map(pool_name)
+        # Merge considered accounts across all maps in the brief window
+        # Accounts dropped from latest map get 50% of their previous score
+        considered_accounts_dict = get_considered_accounts_for_brief(
+            pool_name=pool_name,
+            start_date=start_date,
+            end_date=end_date,
+        )
     else:
         social_map, map_file = load_latest_social_map(pool_name)
         active_members = get_active_members(social_map, limit=max_members)
-    
-    # Get all considered accounts (no limit)
-    considered_accounts_list = get_considered_accounts(social_map)
-    considered_accounts_dict = dict(considered_accounts_list)
+        # Get all considered accounts (no limit) from latest map only
+        considered_accounts_list = get_considered_accounts(social_map)
+        considered_accounts_dict = dict(considered_accounts_list)
     
     # Load relationship scores for cabal protection
     relationship_scores, scores_usernames, scores_username_to_idx = load_relationship_scores(pool_name)
