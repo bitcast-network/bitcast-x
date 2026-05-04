@@ -27,3 +27,4 @@ cache_tools/
 # Tweet bonus output files
 **/tweet_bonus/tweet_bonus/
 **/tweet_bonus/featured/
+.venv/

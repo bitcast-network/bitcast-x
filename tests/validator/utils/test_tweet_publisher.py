@@ -216,7 +216,7 @@ class TestCreateTweetPayload:
         assert "alpha_target" in tweet
         # Fields that were removed
         assert "url" not in tweet
-        assert "reasoning" not in tweet
+        # reasoning is now included in payload
     
     def test_empty_tweets_handling(self):
         """Test handling of empty filtered tweets."""
@@ -421,4 +421,4 @@ class TestIntegration:
             assert "alpha_target" in tweet
             # Removed fields should not be present
             assert "url" not in tweet
-            assert "reasoning" not in tweet
+            # reasoning is now included in payload
