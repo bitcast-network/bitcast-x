@@ -173,7 +173,7 @@ class TestTwitterClientUsernameValidation:
     
     def test_fetch_user_tweets_rejects_numeric_username(self):
         """Test that fetch_user_tweets rejects numeric user IDs (suspended/deleted accounts)."""
-        client = TwitterClient()
+        client = TwitterClient(api_key='test_key')
         
         result = client.fetch_user_tweets('911245230426525697')
         
