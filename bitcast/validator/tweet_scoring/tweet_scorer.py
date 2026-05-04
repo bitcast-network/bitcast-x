@@ -29,6 +29,8 @@ from .social_map_loader import (
     load_latest_social_map,
     get_active_members,
     get_considered_accounts,
+    get_active_members_for_brief,
+    get_considered_accounts_for_brief,
     load_relationship_scores
 )
 from .tweet_filter import TweetFilter
@@ -206,8 +208,6 @@ def score_tweets_for_pool(
     
     # Step 2: Load social map and determine active members
     bt.logging.debug("Loading social map")
-    
-    from .social_map_loader import get_active_members_for_brief, get_considered_accounts_for_brief
     
     if start_date and end_date and max_members:
         active_members = get_active_members_for_brief(
