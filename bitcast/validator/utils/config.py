@@ -86,6 +86,7 @@ PAGERANK_RETWEET_WEIGHT = 1.0
 PAGERANK_MENTION_WEIGHT = 2.0
 PAGERANK_QUOTE_WEIGHT = 3.0
 BASELINE_TWEET_SCORE_FACTOR = 2
+STALE_INFLUENCE_DECAY = 0.5  # Influence multiplier for accounts dropped from social map mid-brief
 PAGERANK_ALPHA = 0.85
 
 # =============================================================================

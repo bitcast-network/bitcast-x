@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import bittensor as bt
 
+from bitcast.validator.utils.config import STALE_INFLUENCE_DECAY
+
 
 def parse_social_map_filename(filename: str) -> Optional[datetime]:
     """
@@ -306,9 +308,8 @@ def get_active_members_for_brief(
     return eligible_list
 
 
-# Decay factor for influence scores of accounts that are in older social maps
-# but not in the latest one (e.g. dropped off the map mid-brief).
-STALE_INFLUENCE_DECAY = 0.5
+# Decay factor imported from config (bitcast.validator.utils.config)
+# STALE_INFLUENCE_DECAY = 0.5
 
 
 def get_considered_accounts_for_brief(
