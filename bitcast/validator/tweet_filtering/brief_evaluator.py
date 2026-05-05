@@ -14,7 +14,7 @@ from typing import Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import bittensor as bt
 
-from bitcast.validator.clients.ChuteClient import evaluate_content_against_brief
+from bitcast.validator.clients import evaluate_content_against_brief
 from bitcast.validator.utils.config import SOCIAL_DISCOVERY_MAX_WORKERS
 
 NUM_LLM_CHECKS = 3
