@@ -382,7 +382,16 @@ class ConnectionScanner:
     async def _publish_connections(self, connections: List[Dict]) -> None:
         """Publish connections to data API."""
         try:
-            run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            try:
+                from ..utils.run_manager import get_run_manager
+                hotkey = get_run_manager().wallet.hotkey.ss58_address
+            except (ValueError, RuntimeError):
+                hotkey = None
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            if hotkey:
+                run_id = f"vali_x_connection_{hotkey}_{timestamp}"
+            else:
+                run_id = f"vali_x_connection_{timestamp}"
             success = await publish_account_connections(
                 connections=connections,
                 run_id=run_id
