@@ -503,6 +503,61 @@ class TestTweetDiscoveryEngagements:
         assert engagements['bob'] == 'quote'
 
 
+class TestMetricsRefresh:
+    """Test that _refresh_metrics_batch fetches and stores updated tweet metrics."""
+
+    def setup_method(self):
+        self.mock_client = Mock()
+        self.mock_store = MagicMock()
+        with patch('bitcast.validator.tweet_scoring.tweet_discovery.TweetStore') as mock_store_cls:
+            mock_store_cls.get_instance.return_value = self.mock_store
+            self.discovery = TweetDiscovery(
+                client=self.mock_client,
+                active_accounts={"alice"},
+            )
+
+    def test_refresh_metrics_fetches_and_stores(self):
+        """_refresh_metrics_batch calls fetch_tweet_by_id and merges into store."""
+        self.mock_client.fetch_tweet_by_id.return_value = (
+            {'tweet_id': 't1', 'views_count': 99999, 'favorite_count': 500},
+            True
+        )
+
+        tweets = [{'tweet_id': 't1'}]
+        self.discovery._refresh_metrics_batch(tweets)
+
+        self.mock_client.fetch_tweet_by_id.assert_called_once_with('t1')
+        self.mock_store.store_tweet.assert_called_once()
+        stored = self.mock_store.store_tweet.call_args[0][0]
+        assert stored['views_count'] == 99999
+        assert stored['favorite_count'] == 500
+
+    def test_refresh_metrics_handles_api_failure(self):
+        """API failure is caught, doesn't raise."""
+        self.mock_client.fetch_tweet_by_id.return_value = (None, False)
+
+        tweets = [{'tweet_id': 't1'}]
+        # Should not raise
+        self.discovery._refresh_metrics_batch(tweets)
+
+        self.mock_store.store_tweet.assert_not_called()
+
+    def test_refresh_metrics_handles_exception(self):
+        """Exception during fetch is caught."""
+        self.mock_client.fetch_tweet_by_id.side_effect = Exception("timeout")
+
+        tweets = [{'tweet_id': 't1'}]
+        # Should not raise
+        self.discovery._refresh_metrics_batch(tweets)
+
+        self.mock_store.store_tweet.assert_not_called()
+
+    def test_refresh_metrics_empty_list(self):
+        """No-op when given empty tweet list."""
+        self.discovery._refresh_metrics_batch([])
+        self.mock_client.fetch_tweet_by_id.assert_not_called()
+
+
 class TestBriefValidation:
     """Test Brief model validation for tag/qrt requirement."""
     
