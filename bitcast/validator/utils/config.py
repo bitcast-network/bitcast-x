@@ -67,8 +67,12 @@ DESEARCH_API_KEY = os.getenv('DESEARCH_API_KEY')  # Required for Desearch.ai pro
 # Example: RAPID_API_KEY=key1,key2,key3 (distributes requests across all keys)
 RAPID_API_KEY = os.getenv('RAPID_API_KEY')  # Optional: Required only if using RapidAPI provider
 
+# LLM Provider
+LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'chutes').lower()  # Options: 'chutes' or 'openrouter'
+
 # Other API Keys
 CHUTES_API_KEY = os.getenv('CHUTES_API_KEY')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 WANDB_API_KEY = os.getenv('WANDB_API_KEY')
 WANDB_PROJECT = os.getenv('WANDB_PROJECT', 'bitcast-X_vali_logs')
 
@@ -164,6 +168,7 @@ bt.logging.info(f"ENABLE_DATA_PUBLISH: {ENABLE_DATA_PUBLISH}")
 bt.logging.info(f"X_SOCIAL_MAP_ENDPOINT: {X_SOCIAL_MAP_ENDPOINT}")
 bt.logging.info(f"X_ACCOUNT_CONNECTIONS_ENDPOINT: {X_ACCOUNT_CONNECTIONS_ENDPOINT}")
 bt.logging.info(f"DISABLE_LLM_CACHING: {DISABLE_LLM_CACHING}")
+bt.logging.info(f"LLM_PROVIDER: {LLM_PROVIDER}")
 bt.logging.info(f"TWITTER_API_PROVIDER: {TWITTER_API_PROVIDER}")
 bt.logging.info(f"SOCIAL_DISCOVERY_FETCH_DAYS: {SOCIAL_DISCOVERY_FETCH_DAYS}")
 bt.logging.info(f"MAX_TWEETS_PER_FETCH: {MAX_TWEETS_PER_FETCH}")

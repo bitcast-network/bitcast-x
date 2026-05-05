@@ -389,6 +389,36 @@ class TweetDiscovery:
                 except Exception as e:
                     bt.logging.warning(f"Error fetching engagements for {tweet_id}: {e}")
     
+    def _refresh_metrics_batch(self, tweets: List[Dict]) -> None:
+        """
+        Refresh tweet metrics (views, likes, etc.) by fetching each tweet by ID.
+
+        Only called for tweets already passing the tiered interval check,
+        so no extra scheduling logic needed. Runs concurrently with engagement fetches
+        to minimize wall-clock time.
+        """
+        if not tweets:
+            return
+
+        def refresh_one(tweet_id: str) -> None:
+            try:
+                fresh_tweet, ok = self.client.fetch_tweet_by_id(tweet_id)
+                if ok and fresh_tweet:
+                    self.store.store_tweet(fresh_tweet)
+                    bt.logging.debug(f"Refreshed metrics for tweet {tweet_id}")
+            except Exception as e:
+                bt.logging.warning(f"Failed to refresh metrics for {tweet_id}: {e}")
+
+        with ThreadPoolExecutor(max_workers=ENGAGEMENT_MAX_WORKERS) as executor:
+            futures = {executor.submit(refresh_one, t['tweet_id']): t for t in tweets if t.get('tweet_id')}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+        bt.logging.info(f"Refreshed metrics for {len(tweets)} tweets")
+
     def _build_engagements_from_store(
         self,
         tweet_id: str,
@@ -490,7 +520,7 @@ class TweetDiscovery:
         elif age_hours < 24:
             required_interval = ENGAGEMENT_FETCH_INTERVAL_RECENT  # 4 hours
         else:
-            required_interval = ENGAGEMENT_FETCH_INTERVAL_OLD  # 8 hours
+            required_interval = ENGAGEMENT_FETCH_INTERVAL_OLD  # 24 hours
         
         # Check if enough time has passed since last fetch
         if last_fetch is None:
@@ -533,6 +563,9 @@ class TweetDiscovery:
                 f"({skipped_count} skipped - cached) ({ENGAGEMENT_MAX_WORKERS} workers)"
             )
             
+            # Refresh tweet metrics (views, likes, etc.) for tweets being fetched
+            self._refresh_metrics_batch(tweets_needing_fetch)
+
             with ThreadPoolExecutor(max_workers=ENGAGEMENT_MAX_WORKERS) as executor:
                 futures = {
                     executor.submit(self._fetch_engagements, t['tweet_id']): t
