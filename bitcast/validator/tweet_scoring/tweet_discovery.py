@@ -400,24 +400,29 @@ class TweetDiscovery:
         if not tweets:
             return
 
-        def refresh_one(tweet_id: str) -> None:
+        def refresh_one(tweet_id: str) -> bool:
             try:
-                fresh_tweet, ok = self.client.fetch_tweet_by_id(tweet_id)
-                if ok and fresh_tweet:
+                result = self.client.fetch_tweet_by_id(tweet_id)
+                fresh_tweet = result.get('tweet') if result.get('api_succeeded') else None
+                if fresh_tweet:
                     self.store.store_tweet(fresh_tweet)
                     bt.logging.debug(f"Refreshed metrics for tweet {tweet_id}")
+                    return True
             except Exception as e:
                 bt.logging.warning(f"Failed to refresh metrics for {tweet_id}: {e}")
+            return False
 
+        refreshed_count = 0
         with ThreadPoolExecutor(max_workers=ENGAGEMENT_MAX_WORKERS) as executor:
             futures = {executor.submit(refresh_one, t['tweet_id']): t for t in tweets if t.get('tweet_id')}
             for future in as_completed(futures):
                 try:
-                    future.result()
+                    if future.result():
+                        refreshed_count += 1
                 except Exception:
                     pass
 
-        bt.logging.info(f"Refreshed metrics for {len(tweets)} tweets")
+        bt.logging.info(f"Refreshed metrics for {refreshed_count}/{len(tweets)} tweets")
 
     def _build_engagements_from_store(
         self,
