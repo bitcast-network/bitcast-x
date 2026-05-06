@@ -79,6 +79,40 @@ class TestConnectionDatabase:
         # Verify tweet_id was updated
         connections = db.get_all_connections(pool_name="test")
         assert connections[0]['tweet_id'] == 987654321
+
+    def test_upsert_existing_connection_preserves_referral_amounts(self, temp_db):
+        """Test that locked referral amounts are not changed by duplicate upserts."""
+        db = ConnectionDatabase(db_path=temp_db)
+
+        is_new1 = db.upsert_connection(
+            pool_name="test",
+            tweet_id=123456789,
+            tag="Stitch3-abc123-refcode",
+            account_username="testuser",
+            referral_code="refcode",
+            referred_by="referrer",
+            referee_amount=12.5,
+            referrer_amount=12.5,
+        )
+
+        is_new2 = db.upsert_connection(
+            pool_name="test",
+            tweet_id=987654321,
+            tag="Stitch3-abc123-refcode",
+            account_username="testuser",
+            referral_code="refcode",
+            referred_by="referrer",
+            referee_amount=99.0,
+            referrer_amount=99.0,
+        )
+
+        assert is_new1 is True
+        assert is_new2 is False
+
+        connections = db.get_all_connections(pool_name="test")
+        assert connections[0]['tweet_id'] == 987654321
+        assert connections[0]['referee_amount'] == 12.5
+        assert connections[0]['referrer_amount'] == 12.5
     
     def test_multiple_accounts_same_tag(self, temp_db):
         """Test that multiple accounts can use the same tag."""

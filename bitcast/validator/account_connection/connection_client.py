@@ -79,6 +79,8 @@ class ConnectionClient:
                             account_username=conn["account_username"],
                             referral_code=conn.get("referral_code"),
                             referred_by=conn.get("referred_by"),
+                            referee_amount=conn.get("referee_amount", 50.0),
+                            referrer_amount=conn.get("referrer_amount", 50.0),
                         )
                         stored_count += 1
                         

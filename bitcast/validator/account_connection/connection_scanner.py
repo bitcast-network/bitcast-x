@@ -17,6 +17,7 @@ from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social
 from bitcast.validator.utils.config import (
     ENABLE_DATA_PUBLISH, WALLET_NAME, HOTKEY_NAME, CONNECTION_TWEET_IDS
 )
+from bitcast.validator.utils.referral_rewards import compute_referral_reward_from_account
 from .connection_db import ConnectionDatabase
 from .tag_parser import TagParser
 from .connection_publisher import publish_account_connections
@@ -69,10 +70,48 @@ class ConnectionScanner:
         self.tag_parser = TagParser()
         self.tweet_ids = tweet_ids if tweet_ids is not None else CONNECTION_TWEET_IDS
         self._all_known_accounts: Optional[Set[str]] = None
+        self._social_maps_by_pool: Dict[str, Dict[str, Any]] = {}
 
         bt.logging.info(
             f"ConnectionScanner initialized: {len(self.tweet_ids)} tweet(s) to scan"
         )
+
+    def _get_social_map(self, pool_name: str) -> Dict[str, Any]:
+        """Load and cache the latest social map for a pool."""
+        pool_name = pool_name.lower()
+        if pool_name not in self._social_maps_by_pool:
+            social_map, _ = load_latest_social_map(pool_name)
+            self._social_maps_by_pool[pool_name] = social_map
+        return self._social_maps_by_pool[pool_name]
+
+    def _compute_locked_referral_amount(self, pool_name: str, username: str, referred_by: Optional[str]) -> float:
+        """Compute the referral amount to lock at registration scan time."""
+        if not referred_by:
+            return 50.0
+
+        try:
+            accounts = self._get_social_map(pool_name).get('accounts', {})
+        except Exception as e:
+            bt.logging.warning(
+                f"Could not load social map for referral amount lock "
+                f"({pool_name}/@{username}): {e}"
+            )
+            return 0.0
+
+        username_key = username.lower()
+        account_info = accounts.get(username) or accounts.get(username_key)
+        if account_info is None:
+            account_info = next(
+                (data for account, data in accounts.items() if account.lower() == username_key),
+                None,
+            )
+        amount = compute_referral_reward_from_account(account_info)
+        if account_info is None:
+            bt.logging.warning(
+                f"Could not lock referral amount for @{username}: account not found "
+                f"in latest social map for pool '{pool_name}'"
+            )
+        return amount
 
     def _get_all_known_accounts(self) -> Set[str]:
         """
@@ -177,6 +216,9 @@ class ConnectionScanner:
 
         for conn in found_connections:
             try:
+                locked_amount = self._compute_locked_referral_amount(
+                    pool_name, conn['username'], conn.get('referred_by')
+                )
                 is_new = self.database.upsert_connection(
                     pool_name=pool_name,
                     tweet_id=conn['tweet_id'],
@@ -184,6 +226,8 @@ class ConnectionScanner:
                     account_username=conn['username'],
                     referral_code=conn.get('referral_code'),
                     referred_by=conn.get('referred_by'),
+                    referee_amount=locked_amount,
+                    referrer_amount=locked_amount,
                 )
                 if is_new:
                     stats['new_connections'] += 1
@@ -275,13 +319,18 @@ class ConnectionScanner:
 
         for conn in found_connections:
             try:
+                locked_amount = self._compute_locked_referral_amount(
+                    pool_name, conn['username'], conn.get('referred_by')
+                )
                 is_new = self.database.upsert_connection(
                     pool_name=pool_name,
                     tweet_id=conn['tweet_id'],
                     tag=conn['tag'],
                     account_username=conn['username'],
                     referral_code=conn.get('referral_code'),
-                    referred_by=conn.get('referred_by')
+                    referred_by=conn.get('referred_by'),
+                    referee_amount=locked_amount,
+                    referrer_amount=locked_amount,
                 )
                 if is_new:
                     stats['new_connections'] += 1

@@ -12,6 +12,7 @@ from bitcast.validator.account_connection.connection_scanner import (
     ConnectionScanner,
     get_social_map_accounts
 )
+from bitcast.validator.account_connection.referral_code import encode_referral_code
 
 
 class TestGetSocialMapAccounts:
@@ -312,6 +313,43 @@ class TestConnectionScanner:
         finally:
             if db_path.exists():
                 db_path.unlink()
+
+    @patch('bitcast.validator.account_connection.connection_scanner.load_latest_social_map')
+    def test_process_tweet_locks_referral_amount(self, mock_load_social_map, temp_db_path, mock_twitter_client):
+        """Test that referral amount is locked from the pool social map on insert."""
+        mock_load_social_map.return_value = (
+            {
+                'accounts': {
+                    'alice': {'followers_count': 25_000, 'score': 1_000.0},
+                    'referrer': {'followers_count': 1_000, 'score': 1.0},
+                }
+            },
+            '/tmp/social_map.json',
+        )
+
+        scanner = ConnectionScanner(
+            db_path=temp_db_path,
+            twitter_client=mock_twitter_client,
+            tweet_ids=['999']
+        )
+        scanner._get_all_known_accounts = Mock(return_value={'alice', 'referrer'})
+
+        referral_code = encode_referral_code('referrer')
+        stats = scanner.process_tweet(
+            {
+                'tweet_id': '111',
+                'author': 'alice',
+                'text': f'Stitch3-abc123-{referral_code}',
+            },
+            pool_name='test',
+            pool_accounts={'alice'},
+        )
+
+        assert stats['new_connections'] == 1
+        connection = scanner.database.get_connections_by_account('alice', pool_name='test')[0]
+        assert connection['referred_by'] == 'referrer'
+        assert connection['referee_amount'] == 100.0
+        assert connection['referrer_amount'] == 100.0
 
     def test_extract_connections_stitch3_tags(self, temp_db_path, mock_twitter_client):
         """Test extracting Stitch3 format tags from replies."""

@@ -229,16 +229,17 @@ class RewardOrchestrator:
             for ref in referrals:
                 referee = ref['account_username']
                 referrer = ref.get('referred_by')
-                amount = ref.get('computed_amount', 0.0)
+                referee_amount = ref.get('computed_referee_amount', ref.get('computed_amount', 0.0))
+                referrer_amount = ref.get('computed_referrer_amount', ref.get('computed_amount', 0.0))
                 bonuses.append({
                     "referee": referee,
                     "referrer": referrer,
                     "referee_uid": account_to_uid.get(referee),
                     "referrer_uid": account_to_uid.get(referrer) if referrer else None,
-                    "referee_amount_usd": amount,
-                    "referrer_amount_usd": amount,
+                    "referee_amount_usd": referee_amount,
+                    "referrer_amount_usd": referrer_amount,
                 })
-                total_usd += amount * (2 if referrer else 1)
+                total_usd += referee_amount + (referrer_amount if referrer else 0.0)
             
             payload = {
                 "payout_date": payout_date.isoformat(),

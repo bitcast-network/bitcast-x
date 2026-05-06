@@ -4,33 +4,19 @@ Referral bonus service for managing and paying referral bonuses.
 Referral bonuses are paid when:
 1. A referee participates in a brief (has tweets passing filter)
 2. Their payout date is scheduled (set to tomorrow when first detected)
-3. On the payout date, referee and referrer receive a dynamic bonus based on
-   the referee's follower count and influence score
+3. On the payout date, referee and referrer receive the bonus amount that was
+   locked when the referral was registered
 """
 
 from datetime import date, timedelta
-from math import log10
 from typing import Dict, List, NamedTuple, Set
 import bittensor as bt
 
 from bitcast.validator.account_connection.connection_db import ConnectionDatabase
-
-
-def compute_referral_reward(followers: int, influence: float) -> float:
-    """
-    Compute the referral bonus (USD) from the referee's followers and influence score.
-
-    Followers component (80% weight): log-scales from 1,000 to 25,000 followers.
-    Influence component (20% weight): log-scales from 1 to 1,000 influence score.
-    Result is in the range [$0, $100].
-    """
-    follower_raw = 100 * log10(max(followers, 1000) / 1000) / log10(25000 / 1000)
-    follower_score = 0.8 * max(0.0, min(follower_raw, 100.0))
-
-    influence_raw = 100 * log10(max(influence, 1)) / log10(1000)
-    influence_score = 0.2 * max(0.0, min(influence_raw, 100.0))
-
-    return round(follower_score + influence_score, 2)
+from bitcast.validator.utils.referral_rewards import (
+    compute_referral_reward,
+    compute_referral_reward_from_account,
+)
 
 
 class ReferralBonusResult(NamedTuple):
@@ -44,6 +30,11 @@ class ReferralBonusService:
     
     def __init__(self, connection_db: ConnectionDatabase):
         self.connection_db = connection_db
+
+    @staticmethod
+    def _locked_referral_total(referral: Dict) -> float:
+        """Return the locked total USD value for a referral row."""
+        return float(referral.get('referee_amount') or 0.0) + float(referral.get('referrer_amount') or 0.0)
     
     def get_referral_bonuses(
         self,
@@ -54,15 +45,15 @@ class ReferralBonusService:
         """
         Get referral bonuses to add to rewards for a specific payout date.
 
-        The bonus amount is computed dynamically from the referee's follower
-        count and influence score (via ``account_data``).  Both referee and
-        referrer receive the same computed amount.
+        The bonus amount is read from the referral row. Amounts are locked when
+        the referral is registered; ``account_data`` is only used as a fallback
+        for legacy rows with missing amounts.
 
         Args:
             payout_date: The date to pay out bonuses
             account_to_uid: Mapping of account_username -> uid
-            account_data: Mapping of username -> {"followers_count": int, "score": float}
-                          from the social map.  If *None*, every bonus will be $0.
+            account_data: Optional mapping used only as a fallback for legacy
+                          rows with missing locked amounts.
 
         Returns:
             ReferralBonusResult with bonuses dict and enriched referral records
@@ -94,20 +85,33 @@ class ReferralBonusService:
                 continue
             paid_pairs.add(pair)
 
-            referee_info = account_data.get(referee_username, {})
-            followers = referee_info.get('followers_count', 0)
-            influence = referee_info.get('score', 0.0)
-            amount = compute_referral_reward(followers, influence)
+            referee_amount = referral.get('referee_amount')
+            referrer_amount = referral.get('referrer_amount')
+            if referee_amount is None or referrer_amount is None:
+                fallback_amount = compute_referral_reward_from_account(
+                    account_data.get(referee_username, {})
+                )
+                referee_amount = fallback_amount if referee_amount is None else referee_amount
+                referrer_amount = fallback_amount if referrer_amount is None else referrer_amount
+                bt.logging.warning(
+                    f"Referral @{referee_username} had missing locked amount; "
+                    f"using fallback ${fallback_amount:.2f}"
+                )
 
-            referral['computed_amount'] = amount
+            referee_amount = float(referee_amount)
+            referrer_amount = float(referrer_amount)
+
+            referral['computed_referee_amount'] = referee_amount
+            referral['computed_referrer_amount'] = referrer_amount
+            referral['computed_amount'] = referee_amount
 
             # Referee bonus
             referee_uid = account_to_uid.get(referee_username)
             if referee_uid is not None:
-                bonuses[referee_uid] = bonuses.get(referee_uid, 0.0) + amount
+                bonuses[referee_uid] = bonuses.get(referee_uid, 0.0) + referee_amount
                 bt.logging.info(
                     f"Referee bonus: @{referee_username} (UID {referee_uid}) "
-                    f"+${amount:.2f} (followers={followers}, influence={influence:.2f})"
+                    f"+${referee_amount:.2f} (locked at registration)"
                 )
             else:
                 bt.logging.warning(f"No UID mapping for referee @{referee_username}")
@@ -116,10 +120,10 @@ class ReferralBonusService:
             if referrer_username:
                 referrer_uid = account_to_uid.get(referrer_username)
                 if referrer_uid is not None:
-                    bonuses[referrer_uid] = bonuses.get(referrer_uid, 0.0) + amount
+                    bonuses[referrer_uid] = bonuses.get(referrer_uid, 0.0) + referrer_amount
                     bt.logging.info(
                         f"Referrer bonus: @{referrer_username} (UID {referrer_uid}) "
-                        f"+${amount:.2f}"
+                        f"+${referrer_amount:.2f} (locked at registration)"
                     )
                 else:
                     bt.logging.warning(f"No UID mapping for referrer @{referrer_username}")
@@ -154,9 +158,7 @@ class ReferralBonusService:
         }
         
         tomorrow = date.today() + timedelta(days=1)
-        activated = 0
-        activated_pairs: Set[tuple] = set()
-        
+        eligible_by_pair: Dict[tuple, Dict] = {}
         for referral in pending:
             referee_username = referral['account_username']
             referrer = referral.get('referred_by')
@@ -165,13 +167,23 @@ class ReferralBonusService:
             if referee_username not in participating_accounts:
                 continue
 
-            if pair in already_paid or pair in activated_pairs:
+            if pair in already_paid:
                 bt.logging.debug(
                     f"Skipping duplicate referral activation for @{referee_username} "
-                    f"referred by @{referrer} (already activated in another pool)"
+                    f"referred by @{referrer} (already paid in another pool)"
                 )
                 continue
-            
+
+            current = eligible_by_pair.get(pair)
+            if current is None or self._locked_referral_total(referral) > self._locked_referral_total(current):
+                eligible_by_pair[pair] = referral
+
+        tomorrow = date.today() + timedelta(days=1)
+        activated = 0
+
+        for referral in eligible_by_pair.values():
+            referee_username = referral['account_username']
+            referrer = referral.get('referred_by')
             success = self.connection_db.set_payout_date(
                 connection_id=referral['connection_id'],
                 payout_date=tomorrow
@@ -179,10 +191,10 @@ class ReferralBonusService:
             
             if success:
                 activated += 1
-                activated_pairs.add(pair)
                 bt.logging.info(
                     f"Activated referral: @{referee_username} referred by @{referrer}, "
-                    f"payout on {tomorrow}"
+                    f"payout on {tomorrow} "
+                    f"(${self._locked_referral_total(referral):.2f} locked total)"
                 )
         
         if activated > 0:

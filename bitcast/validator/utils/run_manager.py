@@ -5,6 +5,8 @@ This module provides functionality to generate unique run IDs based on validator
 and timestamp, ensuring each 4-hour validation cycle has a unique identifier.
 """
 
+from __future__ import annotations
+
 import bittensor as bt
 from datetime import datetime
 from typing import Optional
