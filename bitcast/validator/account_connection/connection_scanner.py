@@ -415,6 +415,9 @@ class ConnectionScanner:
                     'tweet_id': conn['tweet_id'],
                     'tag': conn['tag'],
                     'username': conn['account_username'],
+                    'referred_by': conn.get('referred_by'),
+                    'referee_amount': conn.get('referee_amount'),
+                    'referrer_amount': conn.get('referrer_amount'),
                 }
                 for conn in all_db_connections
             ]
