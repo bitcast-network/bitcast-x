@@ -87,7 +87,17 @@ class ConnectionScanner:
     def _compute_locked_referral_amount(self, pool_name: str, username: str, referred_by: Optional[str]) -> float:
         """Compute the referral amount to lock at registration scan time."""
         if not referred_by:
-            return 50.0
+            return 0.0
+
+        # Get max_referral_amount from pool config if available
+        max_amount = 100.0  # default
+        try:
+            pool_manager = PoolManager()
+            pool_config = pool_manager.get_pool(pool_name)
+            if pool_config:
+                max_amount = float(pool_config.get('max_referral_amount', 100.0))
+        except Exception:
+            pass
 
         try:
             accounts = self._get_social_map(pool_name).get('accounts', {})
@@ -105,7 +115,7 @@ class ConnectionScanner:
                 (data for account, data in accounts.items() if account.lower() == username_key),
                 None,
             )
-        amount = compute_referral_reward_from_account(account_info)
+        amount = compute_referral_reward_from_account(account_info, max_amount=max_amount)
         if account_info is None:
             bt.logging.warning(
                 f"Could not lock referral amount for @{username}: account not found "
