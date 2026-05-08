@@ -171,8 +171,11 @@ class TestTwitterClientCaching:
 class TestTwitterClientUsernameValidation:
     """Test username validation at TwitterClient entry point."""
     
-    def test_fetch_user_tweets_rejects_numeric_username(self):
+    @mock.patch('bitcast.validator.clients.twitter_client.TwitterClient._create_provider')
+    def test_fetch_user_tweets_rejects_numeric_username(self, mock_create_provider):
         """Test that fetch_user_tweets rejects numeric user IDs (suspended/deleted accounts)."""
+        mock_provider = mock.Mock()
+        mock_create_provider.return_value = mock_provider
         client = TwitterClient(api_key='test_key')
         
         result = client.fetch_user_tweets('911245230426525697')
@@ -180,6 +183,7 @@ class TestTwitterClientUsernameValidation:
         assert result['tweets'] == []
         assert result['user_info']['username'] == '911245230426525697'
         assert result['cache_info']['provider_used'] == 'none'
+        mock_provider.fetch_user_tweets.assert_not_called()
     
     def test_fetch_user_tweets_accepts_valid_username(self):
         """Test that fetch_user_tweets accepts valid usernames."""

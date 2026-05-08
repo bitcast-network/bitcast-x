@@ -113,6 +113,28 @@ class TestConnectionDatabase:
         assert connections[0]['tweet_id'] == 987654321
         assert connections[0]['referee_amount'] == 12.5
         assert connections[0]['referrer_amount'] == 12.5
+
+    def test_upsert_connection_drops_self_referral(self, temp_db):
+        """Test that self-referrals are stored as plain connections."""
+        db = ConnectionDatabase(db_path=temp_db)
+
+        is_new = db.upsert_connection(
+            pool_name="test",
+            tweet_id=123456789,
+            tag="Stitch3-abc123-refcode",
+            account_username="testuser",
+            referral_code="refcode",
+            referred_by="@TestUser",
+            referee_amount=99.0,
+            referrer_amount=99.0,
+        )
+
+        assert is_new is True
+
+        connections = db.get_all_connections(pool_name="test")
+        assert connections[0]['account_username'] == "testuser"
+        assert connections[0]['referral_code'] is None
+        assert connections[0]['referred_by'] is None
     
     def test_multiple_accounts_same_tag(self, temp_db):
         """Test that multiple accounts can use the same tag."""

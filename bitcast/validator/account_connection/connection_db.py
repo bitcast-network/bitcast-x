@@ -138,6 +138,10 @@ class ConnectionDatabase:
         """
         pool_name = pool_name.lower()
         account_username = account_username.lower()
+        if referred_by and referred_by.strip().lower().lstrip("@") == account_username:
+            bt.logging.info(f"Ignoring self-referral for @{account_username}")
+            referral_code = None
+            referred_by = None
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
