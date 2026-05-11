@@ -321,11 +321,10 @@ class ConnectionDatabase:
         """
         connections = self.get_all_connections(pool_name=pool_name)
 
-        account_map: Dict[str, Dict[str, Any]] = {}
+        accounts: List[Dict[str, Any]] = []
         for conn in connections:
             tag = conn['tag']
             username = conn['account_username'].lower()
-            updated = conn['updated']
             uid: Optional[int] = None
 
             if tag.startswith('Stitch3-') or tag.startswith('bitcast-x'):
@@ -338,23 +337,11 @@ class ConnectionDatabase:
                     uid = metagraph.hotkeys.index(hotkey)
                     bt.logging.debug(f"Hotkey {hotkey} found at UID {uid}")
                 except ValueError:
-                    uid = None
                     bt.logging.warning(f"Hotkey {hotkey} not found in metagraph")
             else:
-                uid = None
                 bt.logging.warning(f"Unknown tag format: {tag}")
 
-            if username not in account_map or updated > account_map[username]['updated']:
-                account_map[username] = {
-                    'account_username': username,
-                    'uid': uid,
-                    'updated': updated,
-                }
-
-        accounts = [
-            {'account_username': acc['account_username'], 'uid': acc['uid']}
-            for acc in account_map.values()
-        ]
+            accounts.append({'account_username': username, 'uid': uid})
 
         if SIMULATE_CONNECTIONS:
             try:
