@@ -69,8 +69,11 @@ class TestReferralBonusService:
         assert result.referrals[0]["computed_referee_amount"] == 12.5
         assert result.referrals[0]["computed_referrer_amount"] == 7.25
 
-    def test_activation_chooses_highest_locked_amount_for_duplicate_pair(self, temp_db):
+    def test_activation_dedupes_by_referee_picks_first_registered(self, temp_db):
+        """When a referee has referrals across multiple pools, only the
+        first-registered referral (earliest `added`) should be activated."""
         db = ConnectionDatabase(db_path=temp_db)
+        # First registered (lower amount, but earlier)
         db.upsert_connection(
             pool_name="prediction_markets",
             tweet_id=123,
@@ -81,6 +84,7 @@ class TestReferralBonusService:
             referee_amount=10.0,
             referrer_amount=10.0,
         )
+        # Second registered (higher amount, but later)
         db.upsert_connection(
             pool_name="ai_agents",
             tweet_id=456,
@@ -97,5 +101,40 @@ class TestReferralBonusService:
 
         connections = db.get_all_connections_with_referrals()
         by_pool = {conn["pool_name"]: conn for conn in connections}
-        assert by_pool["ai_agents"]["payout_date"] is not None
-        assert by_pool["prediction_markets"]["payout_date"] is None
+        # First registered (prediction_markets) wins, not highest amount
+        assert by_pool["prediction_markets"]["payout_date"] is not None
+        assert by_pool["ai_agents"]["payout_date"] is None
+
+    def test_activation_dedupes_across_different_referrers(self, temp_db):
+        """Same referee with two different referrers — only first-registered activates."""
+        db = ConnectionDatabase(db_path=temp_db)
+        db.upsert_connection(
+            pool_name="tao",
+            tweet_id=100,
+            tag="Stitch3-abc123",
+            account_username="referee",
+            referral_code="alice_code",
+            referred_by="alice",
+            referee_amount=80.0,
+            referrer_amount=80.0,
+        )
+        db.upsert_connection(
+            pool_name="tao",
+            tweet_id=101,
+            tag="Stitch3-def456",
+            account_username="referee",
+            referral_code="bob_code",
+            referred_by="bob",
+            referee_amount=90.0,
+            referrer_amount=90.0,
+        )
+
+        service = ReferralBonusService(db)
+        assert service.check_and_activate_referrals({"referee"}) == 1
+
+        activated = [
+            c for c in db.get_all_connections_with_referrals()
+            if c.get("payout_date") is not None
+        ]
+        assert len(activated) == 1
+        assert activated[0]["referred_by"] == "alice"  # first registered

@@ -69,21 +69,20 @@ class ReferralBonusService:
             account_data = {}
 
         bonuses: Dict[int, float] = {}
-        paid_pairs: Set[tuple] = set()
+        paid_referees: Set[str] = set()
 
         for referral in referrals:
             referee_username = referral['account_username']
             referrer_username = referral.get('referred_by')
 
-            pair = (referee_username, referrer_username)
-            if pair in paid_pairs:
+            if referee_username in paid_referees:
                 referral['computed_amount'] = 0.0
                 bt.logging.debug(
                     f"Skipping duplicate referral for @{referee_username} "
-                    f"referred by @{referrer_username} (already paid in another pool)"
+                    f"referred by @{referrer_username} (already paid)"
                 )
                 continue
-            paid_pairs.add(pair)
+            paid_referees.add(referee_username)
 
             referee_amount = referral.get('referee_amount')
             referrer_amount = referral.get('referrer_amount')
@@ -151,37 +150,35 @@ class ReferralBonusService:
         if not pending:
             return 0
 
-        already_paid = {
-            (r['account_username'], r.get('referred_by'))
+        already_paid_referees = {
+            r['account_username']
             for r in all_referrals
             if r.get('payout_date') is not None
         }
         
         tomorrow = date.today() + timedelta(days=1)
-        eligible_by_pair: Dict[tuple, Dict] = {}
+        eligible_by_referee: Dict[str, Dict] = {}
         for referral in pending:
             referee_username = referral['account_username']
             referrer = referral.get('referred_by')
-            pair = (referee_username, referrer)
             
             if referee_username not in participating_accounts:
                 continue
 
-            if pair in already_paid:
+            if referee_username in already_paid_referees:
                 bt.logging.debug(
-                    f"Skipping duplicate referral activation for @{referee_username} "
-                    f"referred by @{referrer} (already paid in another pool)"
+                    f"Skipping referral activation for @{referee_username} "
+                    f"referred by @{referrer} (already paid)"
                 )
                 continue
 
-            current = eligible_by_pair.get(pair)
-            if current is None or self._locked_referral_total(referral) > self._locked_referral_total(current):
-                eligible_by_pair[pair] = referral
+            current = eligible_by_referee.get(referee_username)
+            if current is None or referral.get('added', '') < current.get('added', ''):
+                eligible_by_referee[referee_username] = referral
 
-        tomorrow = date.today() + timedelta(days=1)
         activated = 0
 
-        for referral in eligible_by_pair.values():
+        for referral in eligible_by_referee.values():
             referee_username = referral['account_username']
             referrer = referral.get('referred_by')
             success = self.connection_db.set_payout_date(
