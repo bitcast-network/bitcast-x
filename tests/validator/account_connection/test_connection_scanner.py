@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 from bitcast.validator.account_connection.connection_scanner import (
     ConnectionScanner,
-    get_social_map_accounts
+    get_social_map_accounts,
 )
 from bitcast.validator.account_connection.referral_code import encode_referral_code
 
@@ -57,6 +57,11 @@ class TestConnectionScanner:
     def mock_twitter_client(self):
         return Mock()
 
+    @staticmethod
+    def _patch_pools(scanner: ConnectionScanner, pool_map: dict) -> None:
+        """Bypass social-map loading by injecting a {pool: {usernames}} map."""
+        scanner._pool_accounts = {p: set(u) for p, u in pool_map.items()}
+
     def test_scanner_initialization(self, temp_db_path, mock_twitter_client):
         scanner = ConnectionScanner(
             db_path=temp_db_path,
@@ -83,8 +88,7 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['999']
         )
-
-        pool_accounts = {'alice', 'bob', 'charlie'}
+        self._patch_pools(scanner, {'tao': {'alice', 'bob', 'charlie'}})
 
         tweets = [
             {
@@ -109,7 +113,7 @@ class TestConnectionScanner:
             },
         ]
 
-        connections = scanner._extract_connections_from_tweets(tweets, pool_accounts)
+        connections = scanner._extract_connections_from_tweets(tweets, scanner._all_known_accounts())
 
         assert len(connections) == 2
         usernames = {c['username'] for c in connections}
@@ -128,6 +132,7 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['999']
         )
+        self._patch_pools(scanner, {'tao': {'alice'}})
 
         tweets = [
             {
@@ -147,6 +152,7 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['999']
         )
+        self._patch_pools(scanner, {'tao': {'alice'}})
 
         tweets = [
             {
@@ -159,12 +165,9 @@ class TestConnectionScanner:
         connections = scanner._extract_connections_from_tweets(tweets, {'alice'})
         assert len(connections) == 2
 
-    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
     @pytest.mark.asyncio
-    async def test_scan_pool(self, mock_get_accounts, temp_db_path, mock_twitter_client):
-        """Test full pool scan flow with replies."""
-        mock_get_accounts.return_value = {'alice', 'bob'}
-
+    async def test_scan_all_pools(self, temp_db_path, mock_twitter_client):
+        """End-to-end pool-agnostic scan inserts one row per author."""
         mock_twitter_client.fetch_post_replies.return_value = {
             'tweets': [
                 {
@@ -188,21 +191,18 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['9999']
         )
+        self._patch_pools(scanner, {'tao': {'alice', 'bob'}})
 
-        stats = await scanner.scan_pool('tao', publish=False)
+        stats = await scanner.scan_all_pools()
 
         assert stats['tags_found'] == 2
         assert stats['new_connections'] == 2
         assert stats['tweets_scanned'] == 2
-
         mock_twitter_client.fetch_post_replies.assert_called_once_with('9999')
 
-    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
     @pytest.mark.asyncio
-    async def test_scan_pool_multiple_tweet_ids(self, mock_get_accounts, temp_db_path, mock_twitter_client):
+    async def test_scan_multiple_tweet_ids(self, temp_db_path, mock_twitter_client):
         """Test scanning replies from multiple designated tweets."""
-        mock_get_accounts.return_value = {'alice', 'bob'}
-
         mock_twitter_client.fetch_post_replies.side_effect = [
             {
                 'tweets': [
@@ -223,18 +223,16 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['8888', '9999']
         )
+        self._patch_pools(scanner, {'tao': {'alice', 'bob'}})
 
-        stats = await scanner.scan_pool('tao', publish=False)
+        stats = await scanner.scan_all_pools()
 
         assert stats['tags_found'] == 2
         assert stats['new_connections'] == 2
         assert mock_twitter_client.fetch_post_replies.call_count == 2
 
-    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
     @pytest.mark.asyncio
-    async def test_scan_pool_no_results(self, mock_get_accounts, temp_db_path, mock_twitter_client):
-        mock_get_accounts.return_value = {'alice'}
-
+    async def test_scan_no_results(self, temp_db_path, mock_twitter_client):
         mock_twitter_client.fetch_post_replies.return_value = {
             'tweets': [],
             'api_succeeded': True,
@@ -245,17 +243,15 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['9999']
         )
+        self._patch_pools(scanner, {'tao': {'alice'}})
 
-        stats = await scanner.scan_pool('tao', publish=False)
+        stats = await scanner.scan_all_pools()
 
         assert stats['tags_found'] == 0
         assert stats['new_connections'] == 0
 
-    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
     @pytest.mark.asyncio
-    async def test_scan_pool_api_failure(self, mock_get_accounts, temp_db_path, mock_twitter_client):
-        mock_get_accounts.return_value = {'alice'}
-
+    async def test_scan_api_failure(self, temp_db_path, mock_twitter_client):
         mock_twitter_client.fetch_post_replies.return_value = {
             'tweets': [],
             'api_succeeded': False,
@@ -266,23 +262,22 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['9999']
         )
+        self._patch_pools(scanner, {'tao': {'alice'}})
 
-        stats = await scanner.scan_pool('tao', publish=False)
+        stats = await scanner.scan_all_pools()
         assert stats['tags_found'] == 0
 
-    @patch('bitcast.validator.account_connection.connection_scanner.get_social_map_accounts')
     @pytest.mark.asyncio
-    async def test_scan_pool_no_tweet_ids(self, mock_get_accounts, temp_db_path, mock_twitter_client):
+    async def test_scan_no_tweet_ids(self, temp_db_path, mock_twitter_client):
         """Scanner gracefully handles empty tweet ID list."""
-        mock_get_accounts.return_value = {'alice'}
-
         scanner = ConnectionScanner(
             db_path=temp_db_path,
             twitter_client=mock_twitter_client,
             tweet_ids=[]
         )
+        self._patch_pools(scanner, {'tao': {'alice'}})
 
-        stats = await scanner.scan_pool('tao', publish=False)
+        stats = await scanner.scan_all_pools()
         assert stats['tweets_scanned'] == 0
         assert stats['tags_found'] == 0
         mock_twitter_client.fetch_post_replies.assert_not_called()
@@ -299,23 +294,25 @@ class TestConnectionScanner:
             )
 
             is_new = scanner.database.upsert_connection(
-                pool_name="test",
                 tweet_id="123456789",
                 tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",
-                account_username="testuser"
+                account_username="testuser",
             )
 
             assert is_new is True
 
-            connections = scanner.database.get_connections_by_account("testuser", pool_name="test")
+            connections = scanner.database.get_connections_by_account("testuser")
             assert len(connections) == 1
             assert connections[0]['tag'] == "bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq"
         finally:
             if db_path.exists():
                 db_path.unlink()
 
+    @patch('bitcast.validator.account_connection.connection_scanner.PoolManager')
     @patch('bitcast.validator.account_connection.connection_scanner.load_latest_social_map')
-    def test_process_tweet_locks_referral_amount(self, mock_load_social_map, temp_db_path, mock_twitter_client):
+    def test_process_tweet_locks_referral_amount(
+        self, mock_load_social_map, mock_pool_manager_cls, temp_db_path, mock_twitter_client
+    ):
         """Test that referral amount is locked from the pool social map on insert."""
         mock_load_social_map.return_value = (
             {
@@ -326,13 +323,14 @@ class TestConnectionScanner:
             },
             '/tmp/social_map.json',
         )
+        mock_pool_manager_cls.return_value.get_pool.return_value = {'max_referral_amount': 100.0}
 
         scanner = ConnectionScanner(
             db_path=temp_db_path,
             twitter_client=mock_twitter_client,
             tweet_ids=['999']
         )
-        scanner._get_all_known_accounts = Mock(return_value={'alice', 'referrer'})
+        self._patch_pools(scanner, {'tao': {'alice', 'referrer'}})
 
         referral_code = encode_referral_code('referrer')
         stats = scanner.process_tweet(
@@ -340,16 +338,49 @@ class TestConnectionScanner:
                 'tweet_id': '111',
                 'author': 'alice',
                 'text': f'Stitch3-abc123-{referral_code}',
-            },
-            pool_name='test',
-            pool_accounts={'alice'},
+            }
         )
 
         assert stats['new_connections'] == 1
-        connection = scanner.database.get_connections_by_account('alice', pool_name='test')[0]
+        connection = scanner.database.get_connections_by_account('alice')[0]
         assert connection['referred_by'] == 'referrer'
         assert connection['referee_amount'] == 100.0
         assert connection['referrer_amount'] == 100.0
+
+    @patch('bitcast.validator.account_connection.connection_scanner.PoolManager')
+    @patch('bitcast.validator.account_connection.connection_scanner.load_latest_social_map')
+    def test_locked_referral_uses_max_across_pools(
+        self, mock_load_social_map, mock_pool_manager_cls, temp_db_path, mock_twitter_client
+    ):
+        """If a user is in multiple pools, the highest referral amount across pools wins."""
+        social_maps = {
+            'low': {
+                'accounts': {
+                    'alice': {'followers_count': 25_000, 'score': 1_000.0},
+                    'referrer': {'followers_count': 1, 'score': 1.0},
+                }
+            },
+            'high': {
+                'accounts': {
+                    'alice': {'followers_count': 25_000, 'score': 1_000.0},
+                    'referrer': {'followers_count': 1, 'score': 1.0},
+                }
+            },
+        }
+        mock_load_social_map.side_effect = lambda pool: (social_maps[pool], f'/tmp/{pool}.json')
+        pool_configs = {'low': {'max_referral_amount': 50.0}, 'high': {'max_referral_amount': 100.0}}
+        mock_pool_manager_cls.return_value.get_pool.side_effect = lambda p: pool_configs.get(p)
+
+        scanner = ConnectionScanner(
+            db_path=temp_db_path,
+            twitter_client=mock_twitter_client,
+            tweet_ids=['999']
+        )
+        self._patch_pools(scanner, {'low': {'alice', 'referrer'}, 'high': {'alice', 'referrer'}})
+
+        amount = scanner._compute_locked_referral_amount('alice', 'referrer')
+        # alice maxes out both formulas; expect the higher pool cap to win
+        assert amount == 100.0
 
     def test_extract_connections_stitch3_tags(self, temp_db_path, mock_twitter_client):
         """Test extracting Stitch3 format tags from replies."""
@@ -358,8 +389,7 @@ class TestConnectionScanner:
             twitter_client=mock_twitter_client,
             tweet_ids=['999']
         )
-
-        pool_accounts = {'alice', 'bob'}
+        self._patch_pools(scanner, {'tao': {'alice', 'bob'}})
 
         tweets = [
             {
@@ -374,7 +404,7 @@ class TestConnectionScanner:
             },
         ]
 
-        connections = scanner._extract_connections_from_tweets(tweets, pool_accounts)
+        connections = scanner._extract_connections_from_tweets(tweets, {'alice', 'bob'})
 
         assert len(connections) == 2
         alice_conn = next(c for c in connections if c['username'] == 'alice')
@@ -395,17 +425,15 @@ class TestConnectionScanner:
             )
 
             is_new1 = scanner.database.upsert_connection(
-                pool_name="test",
                 tweet_id="123456789",
                 tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",
-                account_username="testuser"
+                account_username="testuser",
             )
 
             is_new2 = scanner.database.upsert_connection(
-                pool_name="test",
                 tweet_id="987654321",
                 tag="bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq",
-                account_username="testuser"
+                account_username="testuser",
             )
 
             assert is_new1 is True

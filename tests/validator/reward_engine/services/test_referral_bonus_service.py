@@ -42,7 +42,6 @@ class TestReferralBonusService:
     def test_get_referral_bonuses_uses_locked_amounts(self, temp_db):
         db = ConnectionDatabase(db_path=temp_db)
         db.upsert_connection(
-            pool_name="prediction_markets",
             tweet_id=123,
             tag="Stitch3-abc-refcode",
             account_username="referee",
@@ -69,13 +68,10 @@ class TestReferralBonusService:
         assert result.referrals[0]["computed_referee_amount"] == 12.5
         assert result.referrals[0]["computed_referrer_amount"] == 7.25
 
-    def test_activation_dedupes_by_referee_picks_first_registered(self, temp_db):
-        """When a referee has referrals across multiple pools, only the
-        first-registered referral (earliest `added`) should be activated."""
+    def test_one_referee_one_row_after_retag(self, temp_db):
+        """A referee re-tagging collapses into a single row keyed by the referee."""
         db = ConnectionDatabase(db_path=temp_db)
-        # First registered (lower amount, but earlier)
         db.upsert_connection(
-            pool_name="prediction_markets",
             tweet_id=123,
             tag="Stitch3-low-refcode",
             account_username="referee",
@@ -84,9 +80,7 @@ class TestReferralBonusService:
             referee_amount=10.0,
             referrer_amount=10.0,
         )
-        # Second registered (higher amount, but later)
         db.upsert_connection(
-            pool_name="ai_agents",
             tweet_id=456,
             tag="Stitch3-high-refcode",
             account_username="referee",
@@ -100,16 +94,17 @@ class TestReferralBonusService:
         assert service.check_and_activate_referrals({"referee"}) == 1
 
         connections = db.get_all_connections_with_referrals()
-        by_pool = {conn["pool_name"]: conn for conn in connections}
-        # First registered (prediction_markets) wins, not highest amount
-        assert by_pool["prediction_markets"]["payout_date"] is not None
-        assert by_pool["ai_agents"]["payout_date"] is None
+        assert len(connections) == 1
+        # Higher locked amount wins, tag/tweet_id refresh to most recent
+        assert connections[0]["referee_amount"] == 30.0
+        assert connections[0]["tag"] == "Stitch3-high-refcode"
+        assert connections[0]["payout_date"] is not None
 
-    def test_activation_dedupes_across_different_referrers(self, temp_db):
-        """Same referee with two different referrers — only first-registered activates."""
+    def test_retag_with_different_referrer_takes_higher_amount(self, temp_db):
+        """When the same referee re-tags with a different referrer at a higher
+        amount, the higher-amount referrer wins (per cross-pool max policy)."""
         db = ConnectionDatabase(db_path=temp_db)
         db.upsert_connection(
-            pool_name="tao",
             tweet_id=100,
             tag="Stitch3-abc123",
             account_username="referee",
@@ -119,7 +114,6 @@ class TestReferralBonusService:
             referrer_amount=80.0,
         )
         db.upsert_connection(
-            pool_name="tao",
             tweet_id=101,
             tag="Stitch3-def456",
             account_username="referee",
@@ -137,4 +131,4 @@ class TestReferralBonusService:
             if c.get("payout_date") is not None
         ]
         assert len(activated) == 1
-        assert activated[0]["referred_by"] == "alice"  # first registered
+        assert activated[0]["referred_by"] == "bob"  # higher amount wins

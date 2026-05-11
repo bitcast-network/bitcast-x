@@ -65,15 +65,13 @@ class ConnectionClient:
                 
                 for conn in connections:
                     try:
-                        # Validate required fields
-                        required_fields = ["pool_name", "tweet_id", "tag", "account_username"]
+                        required_fields = ["tweet_id", "tag", "account_username"]
                         if not all(field in conn for field in required_fields):
                             bt.logging.warning(f"Skipping connection with missing fields: {conn}")
                             error_count += 1
                             continue
-                        
+
                         db.upsert_connection(
-                            pool_name=conn["pool_name"],
                             tweet_id=conn["tweet_id"],
                             tag=conn["tag"],
                             account_username=conn["account_username"],
