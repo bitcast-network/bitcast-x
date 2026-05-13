@@ -20,6 +20,7 @@ scored_tweets/
 filtered_tweets/
 reward_snapshots/
 *.db
+*.db.bak.*
 *.sqlite
 *.sqlite3
 cache_tools/

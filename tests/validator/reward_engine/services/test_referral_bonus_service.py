@@ -7,8 +7,8 @@ import tempfile
 import pytest
 
 from bitcast.validator.account_connection.connection_db import ConnectionDatabase
-from bitcast.validator.reward_engine.services.referral_bonus_service import compute_referral_reward
 from bitcast.validator.reward_engine.services.referral_bonus_service import ReferralBonusService
+from bitcast.validator.utils.referral_rewards import compute_referral_reward
 
 
 class TestComputeReferralReward:

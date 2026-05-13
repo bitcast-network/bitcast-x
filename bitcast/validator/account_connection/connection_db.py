@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Set
 import bittensor as bt
 
-from bitcast.validator.utils.config import NOCODE_UID, SIMULATE_CONNECTIONS  # noqa: F401
+from bitcast.validator.utils.config import NOCODE_UID, SIMULATE_CONNECTIONS
+from .migrations import run_migrations
 
 
 class ConnectionDatabase:
@@ -36,9 +37,14 @@ class ConnectionDatabase:
 
     def initialize_schema(self) -> None:
         """
-        Create the connections table and indexes if they don't exist.
+        Bring the DB up to the current schema version.
 
-        Table structure (one row per account_username):
+        Delegates to ``migrations.run_migrations``. On a fresh DB this creates
+        the pool-agnostic ``connections`` table; on a legacy pool-scoped DB
+        this collapses rows into the new schema (with a timestamped backup).
+        Idempotent — safe to call on every startup.
+
+        Table structure (one row per account_username) at schema v1:
         - connection_id: Auto-incrementing primary key
         - tweet_id: ID of the tweet containing the tag
         - tag: The connection tag (e.g., bitcast-hk:...)
@@ -51,36 +57,7 @@ class ConnectionDatabase:
         - referrer_amount: USD bonus for the referrer
         - payout_date: Date when referral bonus is paid (nullable, set once)
         """
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS connections (
-                    connection_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tweet_id BIGINT NOT NULL,
-                    tag VARCHAR(100) NOT NULL,
-                    account_username VARCHAR(100) NOT NULL UNIQUE,
-                    added DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    referral_code VARCHAR(100),
-                    referred_by VARCHAR(100),
-                    referee_amount REAL DEFAULT 50.0,
-                    referrer_amount REAL DEFAULT 50.0,
-                    payout_date DATE
-                )
-            """)
-
-            for index_sql in [
-                "CREATE INDEX IF NOT EXISTS idx_tag ON connections(tag)",
-                "CREATE INDEX IF NOT EXISTS idx_tweet_id ON connections(tweet_id)",
-                "CREATE INDEX IF NOT EXISTS idx_account ON connections(account_username)",
-                "CREATE INDEX IF NOT EXISTS idx_added ON connections(added)",
-                "CREATE INDEX IF NOT EXISTS idx_payout_date ON connections(payout_date)",
-            ]:
-                cursor.execute(index_sql)
-
-            conn.commit()
-            bt.logging.debug("Schema initialized for connections table")
+        run_migrations(self.db_path)
 
     def _load_pool_accounts(self, pool_name: str) -> Set[str]:
         """

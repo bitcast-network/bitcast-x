@@ -13,10 +13,7 @@ from typing import Dict, List, NamedTuple, Set
 import bittensor as bt
 
 from bitcast.validator.account_connection.connection_db import ConnectionDatabase
-from bitcast.validator.utils.referral_rewards import (
-    compute_referral_reward,
-    compute_referral_reward_from_account,
-)
+from bitcast.validator.utils.referral_rewards import compute_referral_reward_from_account
 
 
 class ReferralBonusResult(NamedTuple):
