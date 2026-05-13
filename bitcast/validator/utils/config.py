@@ -48,11 +48,11 @@ POOLS_API_URL = os.getenv('POOLS_API_URL', f"{BITCAST_API_URL}/api/v2/validator/
 
 # Data publishing configuration
 ENABLE_DATA_PUBLISH = os.getenv('ENABLE_DATA_PUBLISH', 'False').lower() == 'true'
-DATA_CLIENT_URL = os.getenv('DATA_CLIENT_URL', 'http://44.254.20.95')
-X_SOCIAL_MAP_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-social-map"
-X_ACCOUNT_CONNECTIONS_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/x-account-connections"
-TWEETS_SUBMIT_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/brief-tweets"
-REFERRAL_BONUSES_ENDPOINT = f"{DATA_CLIENT_URL}:7999/api/v1/referral-bonuses"
+DATA_CLIENT_URL = os.getenv('DATA_CLIENT_URL', 'https://ingestion.bitcast.network:443')
+X_SOCIAL_MAP_ENDPOINT = f"{DATA_CLIENT_URL}/api/v1/x-social-map"
+X_ACCOUNT_CONNECTIONS_ENDPOINT = f"{DATA_CLIENT_URL}/api/v1/x-account-connections"
+TWEETS_SUBMIT_ENDPOINT = f"{DATA_CLIENT_URL}/api/v1/brief-tweets"
+REFERRAL_BONUSES_ENDPOINT = f"{DATA_CLIENT_URL}/api/v1/referral-bonuses"
 
 # =============================================================================
 # API Keys and Providers
