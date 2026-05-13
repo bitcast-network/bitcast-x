@@ -69,20 +69,10 @@ class ReferralBonusService:
             account_data = {}
 
         bonuses: Dict[int, float] = {}
-        paid_referees: Set[str] = set()
 
         for referral in referrals:
             referee_username = referral['account_username']
             referrer_username = referral.get('referred_by')
-
-            if referee_username in paid_referees:
-                referral['computed_amount'] = 0.0
-                bt.logging.debug(
-                    f"Skipping duplicate referral for @{referee_username} "
-                    f"referred by @{referrer_username} (already paid)"
-                )
-                continue
-            paid_referees.add(referee_username)
 
             referee_amount = referral.get('referee_amount')
             referrer_amount = referral.get('referrer_amount')
@@ -143,54 +133,32 @@ class ReferralBonusService:
         Returns:
             Number of new referrals activated
         """
-        all_referrals = self.connection_db.get_all_connections_with_referrals()
-        
-        pending = [r for r in all_referrals if r.get('payout_date') is None]
-        
+        pending = [
+            r for r in self.connection_db.get_all_connections_with_referrals()
+            if r.get('payout_date') is None
+        ]
+
         if not pending:
             return 0
 
-        already_paid_referees = {
-            r['account_username']
-            for r in all_referrals
-            if r.get('payout_date') is not None
-        }
-        
         tomorrow = date.today() + timedelta(days=1)
-        eligible_by_referee: Dict[str, Dict] = {}
+        activated = 0
+
         for referral in pending:
             referee_username = referral['account_username']
-            referrer = referral.get('referred_by')
-            
             if referee_username not in participating_accounts:
                 continue
 
-            if referee_username in already_paid_referees:
-                bt.logging.debug(
-                    f"Skipping referral activation for @{referee_username} "
-                    f"referred by @{referrer} (already paid)"
-                )
-                continue
-
-            current = eligible_by_referee.get(referee_username)
-            if current is None or referral.get('added', '') < current.get('added', ''):
-                eligible_by_referee[referee_username] = referral
-
-        activated = 0
-
-        for referral in eligible_by_referee.values():
-            referee_username = referral['account_username']
-            referrer = referral.get('referred_by')
             success = self.connection_db.set_payout_date(
                 connection_id=referral['connection_id'],
-                payout_date=tomorrow
+                payout_date=tomorrow,
             )
-            
+
             if success:
                 activated += 1
                 bt.logging.info(
-                    f"Activated referral: @{referee_username} referred by @{referrer}, "
-                    f"payout on {tomorrow} "
+                    f"Activated referral: @{referee_username} referred by "
+                    f"@{referral.get('referred_by')}, payout on {tomorrow} "
                     f"(${self._locked_referral_total(referral):.2f} locked total)"
                 )
         

@@ -177,6 +177,14 @@ class ConnectionScanner:
                 referred_by = parsed.referred_by
                 referral_code = parsed.referral_code
 
+                if referred_by and referred_by.strip().lower().lstrip("@") == author:
+                    bt.logging.info(
+                        f"Ignoring self-referral for @{author} "
+                        f"(referral_code='{referral_code}')"
+                    )
+                    referred_by = None
+                    referral_code = None
+
                 if referred_by and all_known and referred_by.lower() not in all_known:
                     bt.logging.info(
                         f"Ignoring referral code '{referral_code}' (decoded to "

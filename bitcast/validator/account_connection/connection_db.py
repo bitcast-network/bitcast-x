@@ -129,6 +129,8 @@ class ConnectionDatabase:
             bt.logging.info(f"Ignoring self-referral for @{account_username}")
             referral_code = None
             referred_by = None
+            referee_amount = 0.0
+            referrer_amount = 0.0
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -187,8 +189,8 @@ class ConnectionDatabase:
             bt.logging.debug(f"Updated connection: {account_username} - {tag}")
             return False
 
-    def get_referrals_for_payout(self, payout_date: date, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get all referrals scheduled for payout on a specific date, optionally filtered to a pool's eligible accounts."""
+    def get_referrals_for_payout(self, payout_date: date) -> List[Dict[str, Any]]:
+        """Get all referrals scheduled for payout on a specific date."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -196,12 +198,7 @@ class ConnectionDatabase:
                 "SELECT * FROM connections WHERE payout_date = ? ORDER BY added DESC",
                 (payout_date,),
             )
-            results = [dict(row) for row in cursor.fetchall()]
-
-        if pool_name:
-            allowed = self._load_pool_accounts(pool_name)
-            results = [r for r in results if r["account_username"].lower() in allowed]
-        return results
+            return [dict(row) for row in cursor.fetchall()]
 
     def set_payout_date(self, connection_id: int, payout_date: date) -> bool:
         """Set payout date for a referral. Only sets if currently null (one-time)."""
@@ -218,23 +215,18 @@ class ConnectionDatabase:
             conn.commit()
             return cursor.rowcount > 0
 
-    def get_all_connections_with_referrals(self, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get all connections that have referral information, optionally filtered to a pool's eligible accounts."""
+    def get_all_connections_with_referrals(self) -> List[Dict[str, Any]]:
+        """Get all connections that have referral information."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM connections WHERE referred_by IS NOT NULL ORDER BY added DESC"
             )
-            results = [dict(row) for row in cursor.fetchall()]
+            return [dict(row) for row in cursor.fetchall()]
 
-        if pool_name:
-            allowed = self._load_pool_accounts(pool_name)
-            results = [r for r in results if r["account_username"].lower() in allowed]
-        return results
-
-    def get_connections_by_tag(self, tag: str, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get all connections for a specific tag, optionally filtered to a pool's eligible accounts."""
+    def get_connections_by_tag(self, tag: str) -> List[Dict[str, Any]]:
+        """Get all connections for a specific tag."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -242,12 +234,7 @@ class ConnectionDatabase:
                 "SELECT * FROM connections WHERE tag = ? ORDER BY added DESC",
                 (tag,),
             )
-            results = [dict(row) for row in cursor.fetchall()]
-
-        if pool_name:
-            allowed = self._load_pool_accounts(pool_name)
-            results = [r for r in results if r["account_username"].lower() in allowed]
-        return results
+            return [dict(row) for row in cursor.fetchall()]
 
     def get_connections_by_account(self, account_username: str) -> List[Dict[str, Any]]:
         """Get the connection row for a specific account (returns at most one row)."""
@@ -302,18 +289,21 @@ class ConnectionDatabase:
 
     def get_accounts_with_uids(
         self,
-        pool_name: str,
+        pool_name: Optional[str],
         metagraph: "bt.metagraph"
     ) -> List[Dict[str, Any]]:
         """
-        Get account-to-UID mappings for a pool.
+        Get account-to-UID mappings.
 
         For no-code tags (Stitch3-{code} or legacy bitcast-x{code}), uses NOCODE_UID (68).
         For hotkey tags (Stitch-hk:{hotkey} or legacy bitcast-hk:{hotkey}), looks up UID in metagraph.
         Connections with unresolvable hotkeys have uid=None.
 
         Args:
-            pool_name: Name of the pool to query (filters by pool's social map accounts)
+            pool_name: Pool to filter by (uses that pool's social map). Pass None
+                to get every connection's UID mapping irrespective of pool — used
+                by the referral payout path so a referrer in a pool with no
+                active brief still gets paid.
             metagraph: Bittensor metagraph for UID lookups
 
         Returns:
@@ -343,7 +333,7 @@ class ConnectionDatabase:
 
             accounts.append({'account_username': username, 'uid': uid})
 
-        if SIMULATE_CONNECTIONS:
+        if SIMULATE_CONNECTIONS and pool_name is not None:
             try:
                 from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social_map, get_active_members
                 social_map, _ = load_latest_social_map(pool_name)

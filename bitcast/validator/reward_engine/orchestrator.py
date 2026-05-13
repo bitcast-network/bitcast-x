@@ -70,10 +70,17 @@ class RewardOrchestrator:
                 for pool in all_pools
                 for m in db.get_accounts_with_uids(pool, validator_self.metagraph)
             }
-            
+
             valid_mappings = [m for m in all_accounts.values() if m['uid'] is not None]
-            account_to_uid = {m['account_username']: m['uid'] for m in valid_mappings}
             connected_usernames = set(all_accounts.keys())
+
+            # Pool-agnostic map for the referral payout path: a referrer in a
+            # pool with no active brief in this cycle must still be payable.
+            account_to_uid = {
+                m['account_username']: m['uid']
+                for m in db.get_accounts_with_uids(None, validator_self.metagraph)
+                if m['uid'] is not None
+            }
             bt.logging.info(f"📡 {len(connected_usernames)} connected accounts across {len(all_pools)} pools")
             
             # 3b. On thorough cycles, refresh all connected account timelines once
