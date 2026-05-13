@@ -518,10 +518,11 @@ class TestMetricsRefresh:
 
     def test_refresh_metrics_fetches_and_stores(self):
         """_refresh_metrics_batch calls fetch_tweet_by_id and merges into store."""
-        self.mock_client.fetch_tweet_by_id.return_value = (
-            {'tweet_id': 't1', 'views_count': 99999, 'favorite_count': 500},
-            True
-        )
+        self.mock_client.fetch_tweet_by_id.return_value = {
+            'tweet': {'tweet_id': 't1', 'views_count': 99999, 'favorite_count': 500},
+            'api_succeeded': True,
+            'provider_used': 'test',
+        }
 
         tweets = [{'tweet_id': 't1'}]
         self.discovery._refresh_metrics_batch(tweets)
@@ -534,7 +535,11 @@ class TestMetricsRefresh:
 
     def test_refresh_metrics_handles_api_failure(self):
         """API failure is caught, doesn't raise."""
-        self.mock_client.fetch_tweet_by_id.return_value = (None, False)
+        self.mock_client.fetch_tweet_by_id.return_value = {
+            'tweet': None,
+            'api_succeeded': False,
+            'provider_used': 'test',
+        }
 
         tweets = [{'tweet_id': 't1'}]
         # Should not raise

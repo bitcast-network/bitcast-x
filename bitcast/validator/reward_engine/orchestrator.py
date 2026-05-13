@@ -70,10 +70,17 @@ class RewardOrchestrator:
                 for pool in all_pools
                 for m in db.get_accounts_with_uids(pool, validator_self.metagraph)
             }
-            
+
             valid_mappings = [m for m in all_accounts.values() if m['uid'] is not None]
-            account_to_uid = {m['account_username']: m['uid'] for m in valid_mappings}
             connected_usernames = set(all_accounts.keys())
+
+            # Pool-agnostic map for the referral payout path: a referrer in a
+            # pool with no active brief in this cycle must still be payable.
+            account_to_uid = {
+                m['account_username']: m['uid']
+                for m in db.get_accounts_with_uids(None, validator_self.metagraph)
+                if m['uid'] is not None
+            }
             bt.logging.info(f"📡 {len(connected_usernames)} connected accounts across {len(all_pools)} pools")
             
             # 3b. On thorough cycles, refresh all connected account timelines once
@@ -229,16 +236,17 @@ class RewardOrchestrator:
             for ref in referrals:
                 referee = ref['account_username']
                 referrer = ref.get('referred_by')
-                amount = ref.get('computed_amount', 0.0)
+                referee_amount = ref.get('computed_referee_amount', ref.get('computed_amount', 0.0))
+                referrer_amount = ref.get('computed_referrer_amount', ref.get('computed_amount', 0.0))
                 bonuses.append({
                     "referee": referee,
                     "referrer": referrer,
                     "referee_uid": account_to_uid.get(referee),
                     "referrer_uid": account_to_uid.get(referrer) if referrer else None,
-                    "referee_amount_usd": amount,
-                    "referrer_amount_usd": amount,
+                    "referee_amount_usd": referee_amount,
+                    "referrer_amount_usd": referrer_amount,
                 })
-                total_usd += amount * (2 if referrer else 1)
+                total_usd += referee_amount + (referrer_amount if referrer else 0.0)
             
             payload = {
                 "payout_date": payout_date.isoformat(),

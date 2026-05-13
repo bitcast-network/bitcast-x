@@ -243,49 +243,45 @@ async def get_account_connections(
     """
     Get all account connections from the database.
     Rate limit: 5 requests per minute per IP.
-    
+
     Args:
-        pool_name: Optional pool name to filter connections
-        
+        pool_name: If provided, filters connections to accounts that appear
+                   in this pool's latest social map.
+
     Returns:
         {
             "timestamp": "2025-11-17T10:30:00Z",
             "total_connections": 150,
             "connections": [
                 {
-                    "pool_name": "tao",
                     "tweet_id": 1234567890,
                     "tag": "bitcast-hk:5DNm...",
                     "account_username": "user1",
                     "added": "2025-11-15T10:00:00",
-                    "updated": "2025-11-17T08:00:00"
+                    "updated": "2025-11-17T08:00:00",
+                    "referral_code": null,
+                    "referred_by": null,
+                    "referee_amount": 50.0,
+                    "referrer_amount": 50.0,
+                    "payout_date": null
                 },
                 ...
             ]
         }
     """
     try:
-        # Import here to avoid circular dependencies
         from bitcast.validator.account_connection import ConnectionDatabase
-        
-        # Load connections from database
+
         db = ConnectionDatabase()
         connections = db.get_all_connections(pool_name=pool_name)
-        
-        # Deduplicate: keep only most recent connection per account
-        account_map = {}
+
         for conn in connections:
-            username = conn['account_username']
-            if username not in account_map or conn['updated'] > account_map[username]['updated']:
-                conn.pop('connection_id', None)  # Remove internal ID
-                account_map[username] = conn
-        
-        deduplicated = list(account_map.values())
-        
+            conn.pop('connection_id', None)
+
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "total_connections": len(deduplicated),
-            "connections": deduplicated
+            "total_connections": len(connections),
+            "connections": connections,
         }
         
     except Exception as e:

@@ -5,6 +5,8 @@ This module provides abstract base classes and implementations for publishing
 Twitter/X platform data to external endpoints with message signing and error handling.
 """
 
+from __future__ import annotations
+
 import asyncio
 import gzip
 import json

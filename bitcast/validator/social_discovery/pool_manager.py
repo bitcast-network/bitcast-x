@@ -51,6 +51,7 @@ class PoolManager:
                     'extended_max_seed_accounts': pool_data.get('extended_max_seed_accounts', 300),
                     'max_discovery_iterations': pool_data.get('max_discovery_iterations', 3),
                     'convergence_threshold': pool_data.get('convergence_threshold', 0.90),
+                    'max_referral_amount': pool_data.get('max_referral_amount', 100.0),
                 }
             
             bt.logging.info(f"Loaded {len(pools)} active pools from API: {list(pools.keys())}")

@@ -6,8 +6,8 @@ TweetStore. Automatically processes connection tags if the tweet contains
 them and the author is in any pool's social map.
 
 Idempotent: re-fasttracking a tweet already in the store simply refreshes
-engagement stats. Re-processing connections is safe due to the UNIQUE
-constraint on (pool_name, account_username, tag) in the connection DB.
+engagement stats. Re-processing connections is safe -- ConnectionDatabase
+uses a single row per account_username.
 """
 
 from typing import Any, Dict, List
@@ -21,56 +21,25 @@ from bitcast.validator.account_connection.tag_parser import TagParser
 
 def _process_connections_all_pools(tweet: Dict) -> Dict[str, Any]:
     """
-    Check all pools and store connection tags where the author is in the social map.
+    Store connection tags if the tweet's author appears in any pool's social map.
 
-    Delegates to ConnectionScanner.process_tweet() for the actual extraction
-    and storage -- keeps all connection logic in the account_connection module.
+    Delegates to ConnectionScanner.process_tweet() so all connection logic
+    stays in the account_connection module.
     """
-    from bitcast.validator.social_discovery.pool_manager import PoolManager
-    from bitcast.validator.account_connection.connection_scanner import (
-        ConnectionScanner, get_social_map_accounts,
-    )
+    from bitcast.validator.account_connection.connection_scanner import ConnectionScanner
 
-    result: Dict[str, Any] = {
-        'tags_found': 0, 'new_connections': 0, 'duplicates': 0,
-        'errors': 0, 'pools_matched': [],
-    }
-
-    text = tweet.get('text', '')
-    if not text or not TagParser.extract_tags(text):
+    if not tweet.get('text') or not TagParser.extract_tags(tweet.get('text', '')):
         bt.logging.debug(f"No connection tags in tweet {tweet.get('tweet_id')}")
-        return result
-
-    try:
-        pool_manager = PoolManager()
-        pools = pool_manager.get_pools()
-    except Exception as e:
-        bt.logging.error(f"Failed to load pools: {e}")
-        result['errors'] += 1
-        return result
+        return {
+            'tags_found': 0, 'new_connections': 0, 'duplicates': 0,
+            'errors': 0, 'pools_matched': [],
+        }
 
     scanner = ConnectionScanner()
-    author = tweet.get('author', '').lower()
-
-    for pool_name in pools:
-        try:
-            pool_accounts = get_social_map_accounts(pool_name)
-        except Exception as e:
-            bt.logging.debug(f"Could not load social map for pool '{pool_name}': {e}")
-            continue
-
-        if author not in pool_accounts:
-            continue
-
-        result['pools_matched'].append(pool_name)
-        pool_stats = scanner.process_tweet(tweet, pool_name, pool_accounts)
-
-        result['tags_found'] = max(result['tags_found'], pool_stats['tags_found'])
-        result['new_connections'] += pool_stats['new_connections']
-        result['duplicates'] += pool_stats['duplicates']
-        result['errors'] += pool_stats['errors']
+    result = scanner.process_tweet(tweet)
 
     if not result['pools_matched']:
+        author = tweet.get('author', '').lower()
         bt.logging.info(f"Author @{author} not in any pool's social map, skipping connections")
 
     return result

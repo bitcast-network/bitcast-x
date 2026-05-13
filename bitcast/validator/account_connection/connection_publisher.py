@@ -24,6 +24,9 @@ async def publish_account_connections(
                     - tweet_id: ID of tweet containing tag
                     - tag: Connection tag string
                     - username: Twitter username
+                    - referred_by: (optional) Referrer X handle
+                    - referee_amount: (optional) Referee bonus USD amount
+                    - referrer_amount: (optional) Referrer bonus USD amount
         run_id: Validation cycle identifier
         
     Returns:

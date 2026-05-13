@@ -2,7 +2,7 @@
 Connection scanner for finding connection tags via reply-based scanning.
 
 Fetches replies to designated connection tweets, cross-references authors
-against social map accounts, and extracts connection tags.
+against the union of pool social maps, and extracts connection tags.
 """
 
 import asyncio
@@ -17,6 +17,7 @@ from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social
 from bitcast.validator.utils.config import (
     ENABLE_DATA_PUBLISH, WALLET_NAME, HOTKEY_NAME, CONNECTION_TWEET_IDS
 )
+from bitcast.validator.utils.referral_rewards import compute_referral_reward_from_account
 from .connection_db import ConnectionDatabase
 from .tag_parser import TagParser
 from .connection_publisher import publish_account_connections
@@ -24,16 +25,7 @@ from .connection_publisher import publish_account_connections
 
 def get_social_map_accounts(pool_name: str) -> Set[str]:
     """
-    Load latest social map for pool and return all account usernames.
-
-    Args:
-        pool_name: Name of the pool (e.g., "tao")
-
-    Returns:
-        Set of account usernames (lowercase)
-
-    Raises:
-        ValueError: If pool not found or no social map exists
+    Load latest social map for pool and return all account usernames (lowercase).
     """
     try:
         social_map, _ = load_latest_social_map(pool_name)
@@ -42,7 +34,6 @@ def get_social_map_accounts(pool_name: str) -> Set[str]:
 
     accounts = {username.lower() for username in social_map.get('accounts', {})}
     bt.logging.info(f"Found {len(accounts)} accounts in pool '{pool_name}'")
-
     return accounts
 
 
@@ -50,69 +41,121 @@ class ConnectionScanner:
     """
     Scans for connection tags by fetching replies to designated tweets.
 
-    Iterates over configured CONNECTION_TWEET_IDS, fetches replies via
-    TwitterClient, cross-references authors against the social map,
-    and extracts connection tags.
+    Cross-references authors against the union of every pool's social map.
+    Each (user, tag) is stored as a single pool-agnostic row; the locked
+    referral amount is the highest amount the user qualifies for across
+    every pool they appear in.
     """
 
     def __init__(self, db_path: Optional[Path] = None,
                  twitter_client: Optional[TwitterClient] = None,
                  tweet_ids: Optional[List[str]] = None):
-        """
-        Args:
-            db_path: Optional custom database path (for testing)
-            twitter_client: Optional TwitterClient instance (for testing)
-            tweet_ids: Optional list of tweet IDs to scan (defaults to config)
-        """
         self.twitter_client = twitter_client or TwitterClient()
         self.database = ConnectionDatabase(db_path=db_path)
         self.tag_parser = TagParser()
         self.tweet_ids = tweet_ids if tweet_ids is not None else CONNECTION_TWEET_IDS
-        self._all_known_accounts: Optional[Set[str]] = None
+        self._pool_accounts: Optional[Dict[str, Set[str]]] = None
+        self._social_maps_by_pool: Dict[str, Dict[str, Any]] = {}
 
         bt.logging.info(
             f"ConnectionScanner initialized: {len(self.tweet_ids)} tweet(s) to scan"
         )
 
-    def _get_all_known_accounts(self) -> Set[str]:
-        """
-        Return the union of all account usernames across every pool's latest
-        social map. Cached for the lifetime of this scanner instance so we
-        only hit disk once per scan run.
-        """
-        if self._all_known_accounts is not None:
-            return self._all_known_accounts
+    def _get_pool_accounts_map(self) -> Dict[str, Set[str]]:
+        """Return {pool_name: {usernames}} for every pool with a loadable social map."""
+        if self._pool_accounts is not None:
+            return self._pool_accounts
 
-        all_accounts: Set[str] = set()
+        result: Dict[str, Set[str]] = {}
         try:
-            pool_manager = PoolManager()
-            for pool_name in pool_manager.get_pools():
+            for pool_name in PoolManager().get_pools():
                 try:
-                    all_accounts |= get_social_map_accounts(pool_name)
+                    result[pool_name] = get_social_map_accounts(pool_name)
                 except (ValueError, FileNotFoundError):
                     pass
         except Exception as e:
-            bt.logging.warning(f"Could not load pool list for referral validation: {e}")
+            bt.logging.warning(f"Could not load pool list: {e}")
 
-        self._all_known_accounts = all_accounts
-        return all_accounts
+        self._pool_accounts = result
+        return result
+
+    def _all_known_accounts(self) -> Set[str]:
+        """Union of usernames across every pool's latest social map."""
+        union: Set[str] = set()
+        for accts in self._get_pool_accounts_map().values():
+            union |= accts
+        return union
+
+    def _get_social_map(self, pool_name: str) -> Dict[str, Any]:
+        pool_name = pool_name.lower()
+        if pool_name not in self._social_maps_by_pool:
+            social_map, _ = load_latest_social_map(pool_name)
+            self._social_maps_by_pool[pool_name] = social_map
+        return self._social_maps_by_pool[pool_name]
+
+    def _compute_locked_referral_amount(self, username: str, referred_by: Optional[str]) -> float:
+        """
+        Compute the referral amount to lock for a user, as the maximum across
+        every pool the user is a member of. Each pool contributes a candidate
+        amount derived from its own max_referral_amount cap and the user's
+        account data in that pool's social map.
+        """
+        if not referred_by:
+            return 0.0
+
+        username_key = username.lower()
+        pool_accounts = self._get_pool_accounts_map()
+        pool_manager: Optional[PoolManager] = None
+
+        best = 0.0
+        for pool_name, accts in pool_accounts.items():
+            if username_key not in accts:
+                continue
+
+            try:
+                if pool_manager is None:
+                    pool_manager = PoolManager()
+                pool_config = pool_manager.get_pool(pool_name) or {}
+                max_amount = float(pool_config.get('max_referral_amount', 100.0))
+            except Exception:
+                max_amount = 100.0
+
+            try:
+                accounts = self._get_social_map(pool_name).get('accounts', {})
+            except Exception as e:
+                bt.logging.warning(
+                    f"Could not load social map for referral amount lock "
+                    f"({pool_name}/@{username}): {e}"
+                )
+                continue
+
+            account_info = accounts.get(username) or accounts.get(username_key)
+            if account_info is None:
+                account_info = next(
+                    (data for account, data in accounts.items() if account.lower() == username_key),
+                    None,
+                )
+            if account_info is None:
+                continue
+
+            candidate = compute_referral_reward_from_account(account_info, max_amount=max_amount)
+            if candidate > best:
+                best = candidate
+
+        return best
 
     def _extract_connections_from_tweets(
         self,
         tweets: List[Dict],
-        pool_accounts: Set[str]
+        eligible_accounts: Set[str],
     ) -> List[Dict]:
         """
-        Extract connection tags from tweets by social map accounts.
-
-        Args:
-            tweets: List of tweet dicts from API
-            pool_accounts: Set of lowercase usernames in the social map
-
-        Returns:
-            List of connection dicts with keys: tweet_id, username, tag_type, tag, referral_code, referred_by
+        Extract connection tags from tweets whose author appears in
+        eligible_accounts. eligible_accounts should be the union of accounts
+        across every pool's social map.
         """
         connections = []
+        all_known = self._all_known_accounts()
 
         for tweet in tweets:
             author = tweet.get('author', '').lower()
@@ -122,7 +165,7 @@ class ConnectionScanner:
             if not author or not tweet_id or not text:
                 continue
 
-            if author not in pool_accounts:
+            if author not in eligible_accounts:
                 continue
 
             if tweet.get('retweeted_user'):
@@ -134,15 +177,21 @@ class ConnectionScanner:
                 referred_by = parsed.referred_by
                 referral_code = parsed.referral_code
 
-                if referred_by:
-                    all_known = self._get_all_known_accounts()
-                    if all_known and referred_by.lower() not in all_known:
-                        bt.logging.info(
-                            f"Ignoring referral code '{referral_code}' (decoded to "
-                            f"'{referred_by}') — handle not found in any social map"
-                        )
-                        referred_by = None
-                        referral_code = None
+                if referred_by and referred_by.strip().lower().lstrip("@") == author:
+                    bt.logging.info(
+                        f"Ignoring self-referral for @{author} "
+                        f"(referral_code='{referral_code}')"
+                    )
+                    referred_by = None
+                    referral_code = None
+
+                if referred_by and all_known and referred_by.lower() not in all_known:
+                    bt.logging.info(
+                        f"Ignoring referral code '{referral_code}' (decoded to "
+                        f"'{referred_by}') — handle not found in any social map"
+                    )
+                    referred_by = None
+                    referral_code = None
 
                 connections.append({
                     'tweet_id': tweet_id,
@@ -155,41 +204,51 @@ class ConnectionScanner:
 
         return connections
 
-    def process_tweet(self, tweet: Dict, pool_name: str, pool_accounts: Set[str]) -> Dict[str, Any]:
+    def _store_connection(self, conn: Dict[str, Any]) -> bool:
+        """Compute locked referral amount and upsert. Returns True if newly inserted."""
+        locked_amount = self._compute_locked_referral_amount(
+            conn['username'], conn.get('referred_by')
+        )
+        return self.database.upsert_connection(
+            tweet_id=conn['tweet_id'],
+            tag=conn['tag'],
+            account_username=conn['username'],
+            referral_code=conn.get('referral_code'),
+            referred_by=conn.get('referred_by'),
+            referee_amount=locked_amount,
+            referrer_amount=locked_amount,
+        )
+
+    def process_tweet(self, tweet: Dict) -> Dict[str, Any]:
         """
-        Process a single tweet for connection tags in a specific pool.
+        Process a single tweet for connection tags.
 
-        Extracts tags, checks author against pool_accounts, and upserts
-        any connections found.  Idempotent -- safe to call repeatedly.
-
-        Args:
-            tweet: Normalised tweet dict (must have tweet_id, author, text)
-            pool_name: Pool to store connections under
-            pool_accounts: Set of lowercase usernames in the pool's social map
-
-        Returns:
-            Dict with tags_found, new_connections, duplicates, errors
+        Idempotent. Stores connections for any author whose handle appears in
+        the union of all pool social maps. Referral amount is locked as the
+        max across pools the user belongs to.
         """
-        stats: Dict[str, Any] = {'tags_found': 0, 'new_connections': 0, 'duplicates': 0, 'errors': 0}
+        stats: Dict[str, Any] = {
+            'tags_found': 0, 'new_connections': 0, 'duplicates': 0, 'errors': 0,
+            'pools_matched': [],
+        }
 
-        found_connections = self._extract_connections_from_tweets([tweet], pool_accounts)
-        stats['tags_found'] = len(found_connections)
+        eligible = self._all_known_accounts()
+        author = tweet.get('author', '').lower()
+        if author and author in eligible:
+            stats['pools_matched'] = [
+                pool for pool, accts in self._get_pool_accounts_map().items()
+                if author in accts
+            ]
 
-        for conn in found_connections:
+        found = self._extract_connections_from_tweets([tweet], eligible)
+        stats['tags_found'] = len(found)
+
+        for conn in found:
             try:
-                is_new = self.database.upsert_connection(
-                    pool_name=pool_name,
-                    tweet_id=conn['tweet_id'],
-                    tag=conn['tag'],
-                    account_username=conn['username'],
-                    referral_code=conn.get('referral_code'),
-                    referred_by=conn.get('referred_by'),
-                )
+                is_new = self._store_connection(conn)
                 if is_new:
                     stats['new_connections'] += 1
-                    bt.logging.info(
-                        f"New connection: @{conn['username']} -> {conn['tag']} (pool: {pool_name})"
-                    )
+                    bt.logging.info(f"New connection: @{conn['username']} -> {conn['tag']}")
                 else:
                     stats['duplicates'] += 1
             except Exception as e:
@@ -219,142 +278,55 @@ class ConnectionScanner:
         bt.logging.info(f"Fetched {len(all_replies)} direct replies across {len(self.tweet_ids)} tweet(s)")
         return all_replies
 
-    async def scan_pool(self, pool_name: str, publish: bool = True,
-                        replies: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """
-        Scan for connection tags in a pool.
-
-        Args:
-            pool_name: Name of the pool to scan
-            publish: Whether to publish connections after scanning
-            replies: Pre-fetched replies (avoids redundant API calls when scanning multiple pools)
-
-        Returns:
-            Summary dict with statistics
-        """
-        pool_name = pool_name.lower()
-        start_time = datetime.now(timezone.utc)
-
-        bt.logging.info(f"Starting connection scan for pool: {pool_name}")
-
-        try:
-            pool_accounts = get_social_map_accounts(pool_name)
-        except ValueError as e:
-            bt.logging.error(f"Failed to get pool accounts: {e}")
-            raise
-
-        all_replies = replies if replies is not None else self._fetch_all_replies()
-
-        if not all_replies:
-            return {
-                'accounts_checked': len(pool_accounts),
-                'tweets_scanned': 0,
-                'tags_found': 0,
-                'new_connections': 0,
-                'duplicates_skipped': 0,
-                'errors': 0,
-                'processing_time': 0,
-            }
-
-        found_connections = self._extract_connections_from_tweets(all_replies, pool_accounts)
-
-        bt.logging.info(
-            f"Found {len(found_connections)} connection tags from "
-            f"{len({c['username'] for c in found_connections})} accounts"
-        )
-
-        stats = {
-            'accounts_checked': len(pool_accounts),
-            'tweets_scanned': len(all_replies),
-            'tags_found': len(found_connections),
-            'new_connections': 0,
-            'duplicates_skipped': 0,
-            'errors': 0,
-            'connections_data': [],
-        }
-
-        for conn in found_connections:
-            try:
-                is_new = self.database.upsert_connection(
-                    pool_name=pool_name,
-                    tweet_id=conn['tweet_id'],
-                    tag=conn['tag'],
-                    account_username=conn['username'],
-                    referral_code=conn.get('referral_code'),
-                    referred_by=conn.get('referred_by')
-                )
-                if is_new:
-                    stats['new_connections'] += 1
-                    if conn.get('referred_by'):
-                        bt.logging.info(f"New connection with referral: {conn['username']} referred by @{conn['referred_by']}")
-                else:
-                    stats['duplicates_skipped'] += 1
-
-                stats['connections_data'].append({
-                    'tweet_id': conn['tweet_id'],
-                    'tag': conn['tag'],
-                    'username': conn['username'],
-                })
-            except Exception as e:
-                bt.logging.error(f"Error storing connection: {e}")
-                stats['errors'] += 1
-
-        stats['processing_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
-
-        bt.logging.info(
-            f"Scan complete: {stats['tweets_scanned']} replies checked, "
-            f"{stats['tags_found']} tags found, "
-            f"{stats['new_connections']} new connections"
-        )
-
-        if publish and ENABLE_DATA_PUBLISH and stats['connections_data']:
-            await self._publish_connections(stats['connections_data'])
-
-        stats.pop('connections_data', None)
-        return stats
-
     async def scan_all_pools(self) -> Dict[str, Any]:
         """
-        Scan all available pools for connection tags.
-
-        Returns:
-            Summary dict with aggregated statistics
+        Scan replies once and upsert pool-agnostic connection rows for any
+        author who appears in at least one pool's social map.
         """
         start_time = datetime.now(timezone.utc)
 
-        pool_manager = PoolManager()
-        available_pools = pool_manager.get_pools()
+        pool_accounts = self._get_pool_accounts_map()
+        bt.logging.info(f"Loaded social maps for {len(pool_accounts)} pools: {list(pool_accounts)}")
 
-        bt.logging.info(f"Scanning {len(available_pools)} pools: {available_pools}")
-
+        eligible = self._all_known_accounts()
         all_replies = self._fetch_all_replies()
 
-        total_stats = {
-            'pools_scanned': 0,
-            'accounts_checked': 0,
+        total_stats: Dict[str, Any] = {
+            'pools_scanned': len(pool_accounts),
+            'accounts_checked': len(eligible),
+            'tweets_scanned': len(all_replies),
             'tags_found': 0,
             'new_connections': 0,
             'duplicates_skipped': 0,
             'errors': 0,
         }
 
-        for pool_name in available_pools:
+        if not all_replies:
+            total_stats['processing_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
+            return total_stats
+
+        found_connections = self._extract_connections_from_tweets(all_replies, eligible)
+        total_stats['tags_found'] = len(found_connections)
+
+        bt.logging.info(
+            f"Found {len(found_connections)} connection tags from "
+            f"{len({c['username'] for c in found_connections})} accounts"
+        )
+
+        for conn in found_connections:
             try:
-                pool_stats = await self.scan_pool(pool_name, publish=False, replies=all_replies)
-
-                total_stats['pools_scanned'] += 1
-                total_stats['accounts_checked'] += pool_stats['accounts_checked']
-                total_stats['tags_found'] += pool_stats['tags_found']
-                total_stats['new_connections'] += pool_stats['new_connections']
-                total_stats['duplicates_skipped'] += pool_stats['duplicates_skipped']
-                total_stats['errors'] += pool_stats['errors']
-
-                bt.logging.info(
-                    f"Pool '{pool_name}': {pool_stats['tags_found']} tags, "
-                    f"{pool_stats['new_connections']} new"
-                )
+                is_new = self._store_connection(conn)
+                if is_new:
+                    total_stats['new_connections'] += 1
+                    if conn.get('referred_by'):
+                        bt.logging.info(
+                            f"New connection with referral: {conn['username']} "
+                            f"referred by @{conn['referred_by']}"
+                        )
+                else:
+                    total_stats['duplicates_skipped'] += 1
             except Exception as e:
-                bt.logging.error(f"Error scanning pool {pool_name}: {e}")
+                bt.logging.error(f"Error storing connection: {e}")
                 total_stats['errors'] += 1
 
         total_stats['processing_time'] = (datetime.now(timezone.utc) - start_time).total_seconds()
@@ -366,6 +338,9 @@ class ConnectionScanner:
                     'tweet_id': conn['tweet_id'],
                     'tag': conn['tag'],
                     'username': conn['account_username'],
+                    'referred_by': conn.get('referred_by'),
+                    'referee_amount': conn.get('referee_amount'),
+                    'referrer_amount': conn.get('referrer_amount'),
                 }
                 for conn in all_db_connections
             ]
@@ -373,10 +348,10 @@ class ConnectionScanner:
                 await self._publish_connections(connections_to_publish)
 
         bt.logging.info(
-            f"All pools scan complete: {total_stats['pools_scanned']} pools, "
-            f"{total_stats['tags_found']} tags, {total_stats['new_connections']} new"
+            f"Scan complete: {total_stats['pools_scanned']} pools, "
+            f"{total_stats['tags_found']} tags, "
+            f"{total_stats['new_connections']} new"
         )
-
         return total_stats
 
     async def _publish_connections(self, connections: List[Dict]) -> None:
@@ -420,13 +395,6 @@ if __name__ == "__main__":
         bt.wallet.add_args(parser)
         bt.subtensor.add_args(parser)
 
-        parser.add_argument(
-            "--pool-name",
-            type=str,
-            default="all",
-            help="Name of the pool to scan, or 'all' for all pools (default: all)"
-        )
-
         import sys
         args_list = sys.argv[1:]
 
@@ -453,20 +421,13 @@ if __name__ == "__main__":
 
         scanner = ConnectionScanner()
 
-        if config.pool_name.lower() == "all":
-            bt.logging.info("Starting connection scan for ALL pools")
-            summary = asyncio.run(scanner.scan_all_pools())
-        else:
-            bt.logging.info(f"Starting connection scan for pool: {config.pool_name}")
-            summary = asyncio.run(scanner.scan_pool(config.pool_name))
+        bt.logging.info("Starting connection scan across all pools")
+        summary = asyncio.run(scanner.scan_all_pools())
 
         print(f"\n{'='*60}")
         print("Account Connection Scan Complete")
         print(f"{'='*60}")
-        if 'pools_scanned' in summary:
-            print(f"Pools scanned: {summary['pools_scanned']}")
-        else:
-            print(f"Pool: {config.pool_name}")
+        print(f"Pools scanned: {summary['pools_scanned']}")
         print(f"Replies checked: {summary.get('tweets_scanned', 'N/A')}")
         print(f"Tags found: {summary['tags_found']}")
         print(f"New connections: {summary['new_connections']}")
