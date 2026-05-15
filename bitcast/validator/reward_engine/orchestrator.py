@@ -16,6 +16,7 @@ from .services.treasury_allocation import allocate_subnet_treasury
 from .services.referral_bonus_service import ReferralBonusService
 from .models.evaluation_result import EvaluationResultCollection
 from ..account_connection.connection_db import ConnectionDatabase
+from ..utils.config import NOCODE_UID
 
 
 class RewardOrchestrator:
@@ -81,6 +82,33 @@ class RewardOrchestrator:
                 for m in db.get_accounts_with_uids(None, validator_self.metagraph)
                 if m['uid'] is not None
             }
+
+            # Ensure no-code referred users (and their referrers) always have a UID mapping,
+            # even if they've dropped out of all pool social maps.
+            # The pool-agnostic query above covers most cases, but users whose connection
+            # tag is invalid/unresolvable still get uid=None and would be excluded.
+            # Their tag proves they registered; the referral should still be published.
+            _missing_referral_usernames = set()
+            for conn in db.get_all_connections_with_referrals():
+                referee = conn['account_username'].lower()
+                referrer = (conn.get('referred_by') or '').lower()
+                tag = conn.get('tag', '')
+                is_nocode = tag.startswith('Stitch3-') or tag.startswith('bitcast-x')
+                if is_nocode:
+                    if referee not in account_to_uid:
+                        _missing_referral_usernames.add(referee)
+                    if referrer and referrer not in account_to_uid:
+                        # Referrer may have a no-code tag too — check their connection
+                        referrer_conns = db.get_connections_by_account(referrer)
+                        ref_tag = referrer_conns[0]['tag'] if referrer_conns else ''
+                        if ref_tag.startswith('Stitch3-') or ref_tag.startswith('bitcast-x'):
+                            _missing_referral_usernames.add(referrer)
+            for _u in _missing_referral_usernames:
+                account_to_uid[_u] = NOCODE_UID
+                bt.logging.info(
+                    f"Referral UID fallback: @{_u} "
+                    f"not in social map, mapping to NOCODE_UID {NOCODE_UID}"
+                )
             bt.logging.info(f"📡 {len(connected_usernames)} connected accounts across {len(all_pools)} pools")
             
             # 3b. On thorough cycles, refresh all connected account timelines once
