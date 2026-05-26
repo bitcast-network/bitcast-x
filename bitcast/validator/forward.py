@@ -8,7 +8,7 @@ from bitcast.validator.reward_engine.services.emission_calculation_service impor
 from bitcast.validator.reward_engine.services.reward_distribution_service import RewardDistributionService
 from bitcast.validator.reward_engine.twitter_evaluator import TwitterEvaluator
 from bitcast.validator.account_connection.connection_scanner import ConnectionScanner
-from bitcast.validator.social_discovery.social_discovery import run_discovery_for_stale_pools
+from bitcast.validator.social_discovery.discovery_manager import DiscoveryManager
 
 from bitcast.validator.tweet_scoring.tweet_fasttrack import poll_fast_track
 
@@ -68,9 +68,7 @@ async def forward(self):
     try:
         # Social map handling - mode-specific behavior
         if VALIDATOR_MODE == 'discovery':
-            results = await run_discovery_for_stale_pools()
-            if results:
-                bt.logging.info(f"Social discovery complete for {len(results)} pool(s): {list(results.keys())}")
+            DiscoveryManager.get_instance().maybe_start()
         else:
             # Standard mode: Download social maps from reference validator (every 12 hours)
             if self.step % (12 * 60) == 0:
