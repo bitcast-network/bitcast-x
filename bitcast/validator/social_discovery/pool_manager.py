@@ -10,19 +10,21 @@ from bitcast.validator.utils.config import POOLS_API_URL
 
 class PoolManager:
     """Loads and manages pool configurations from API."""
-    
-    def __init__(self, api_url: Optional[str] = None):
+
+    def __init__(self, api_url: Optional[str] = None, include_inactive: bool = False):
         """
         Initialize with API URL.
         
         Args:
             api_url: Optional API endpoint URL. Defaults to POOLS_API_URL from config.
+            include_inactive: Whether to include inactive pools in the loaded config.
         """
         self.api_url = api_url or POOLS_API_URL
+        self.include_inactive = include_inactive
         self.pools = self._load_pools()
-    
+
     def _load_pools(self) -> Dict[str, Dict[str, Any]]:
-        """Load pool configurations from API (only active pools)."""
+        """Load pool configurations from API."""
         try:
             bt.logging.info(f"Fetching pools from API: {self.api_url}")
             response = requests.get(self.api_url, timeout=10)
@@ -31,8 +33,10 @@ class PoolManager:
             
             pools = {}
             for pool_data in config.get('pools', []):
-                # Only load pools where active is explicitly True
-                if not pool_data.get('active', False):
+                active = bool(pool_data.get('active', False))
+
+                # Default behavior keeps discovery scoped to active pools.
+                if not self.include_inactive and not active:
                     continue
                 
                 name = pool_data.get('name', '').lower()
@@ -41,7 +45,7 @@ class PoolManager:
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
                     'lang': pool_data.get('lang'),
                     'date_offset': pool_data.get('date_offset', 0),
-                    'active': True,
+                    'active': active,
                     # Two-stage discovery config
                     'core_min_interaction_weight': pool_data.get('core_min_interaction_weight', 2),
                     'core_min_tweets': pool_data.get('core_min_tweets', 5),
@@ -54,7 +58,8 @@ class PoolManager:
                     'max_referral_amount': pool_data.get('max_referral_amount', 100.0),
                 }
             
-            bt.logging.info(f"Loaded {len(pools)} active pools from API: {list(pools.keys())}")
+            mode = "all" if self.include_inactive else "active"
+            bt.logging.info(f"Loaded {len(pools)} {mode} pools from API: {list(pools.keys())}")
             return pools
             
         except Exception as e:
