@@ -14,7 +14,7 @@ from bitcast.validator.tweet_scoring.tweet_fasttrack import poll_fast_track
 
 from bitcast.utils.uids import get_all_uids
 from bitcast.validator.utils.config import (
-    VALIDATOR_WAIT, SCORING_INTERVAL_MINUTES, THOROUGH_SCORING_INTERVAL_MINUTES,
+    VALIDATOR_WAIT, SCORING_INTERVAL_STEPS, THOROUGH_SCORING_INTERVAL_STEPS,
     SOCIAL_MAP_DOWNLOAD_INTERVAL
 )
 from bitcast.validator.utils.data_publisher import initialize_global_publisher, get_global_publisher
@@ -49,7 +49,7 @@ async def forward(self):
     Runs every 2 steps (~20s):
       - poll_fast_track: fetches tweets from stitch3 fast-track endpoint
     
-    Runs every SCORING_INTERVAL_MINUTES steps (~20 min):
+    Runs every SCORING_INTERVAL_STEPS steps (~20 min):
       - Account connection scan, reward engine, weight updates
     """
     # Initialize global publisher if not already done.
@@ -75,8 +75,8 @@ async def forward(self):
             except Exception as e:
                 bt.logging.warning(f"Fast-track poll error: {e}")
 
-    # Scoring only runs every SCORING_INTERVAL_MINUTES steps
-    if self.step % SCORING_INTERVAL_MINUTES != 0:
+    # Scoring only runs every SCORING_INTERVAL_STEPS steps
+    if self.step % SCORING_INTERVAL_STEPS != 0:
         await asyncio.sleep(VALIDATOR_WAIT)
         return
 
@@ -108,7 +108,7 @@ async def forward(self):
         )
         
         # Reward engine
-        is_thorough = self.step % THOROUGH_SCORING_INTERVAL_MINUTES == 0
+        is_thorough = self.step % THOROUGH_SCORING_INTERVAL_STEPS == 0
         mode = "thorough (timeline)" if is_thorough else "lightweight (search)"
         bt.logging.info(f"Starting reward engine ({mode} discovery)...")
         miner_uids = get_all_uids(self)
