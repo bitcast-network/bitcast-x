@@ -367,3 +367,47 @@ class TestConnectionDatabase:
         assert len(accounts) == 1
         assert accounts[0] == {'account_username': 'alice', 'uid': 0}
 
+    def test_eligible_accounts_override_bypasses_latest_map(self, temp_db):
+        """A brief-window eligible set should be used instead of the latest social map.
+
+        Regression guard: an account dropped from the latest map but still in the
+        brief window must remain eligible. ``_load_pool_accounts`` (latest map)
+        must not be consulted when an override is supplied.
+        """
+        db = ConnectionDatabase(db_path=temp_db)
+        db.upsert_connection(tweet_id=123, tag="bitcast-UID{abc12345}", account_username="chefpino_")
+        db.upsert_connection(tweet_id=456, tag="bitcast-UID{def67890}", account_username="bob")
+
+        with patch.object(
+            ConnectionDatabase,
+            "_load_pool_accounts",
+            return_value={"bob"},  # latest map dropped chefpino_
+        ) as mock_latest:
+            # Without override: latest-map behaviour drops chefpino_
+            latest_only = {c['account_username'] for c in db.get_all_connections(pool_name="tao")}
+            assert latest_only == {"bob"}
+
+            # With brief-window override: chefpino_ stays eligible
+            windowed = {
+                c['account_username']
+                for c in db.get_all_connections(
+                    pool_name="tao", eligible_accounts={"chefpino_", "bob"}
+                )
+            }
+            assert windowed == {"chefpino_", "bob"}
+
+        # When an override is supplied the latest map must not be consulted.
+        with patch.object(
+            ConnectionDatabase, "_load_pool_accounts", side_effect=AssertionError("should not be called")
+        ):
+            result = db.get_all_connections(pool_name="tao", eligible_accounts={"chefpino_"})
+            assert {c['account_username'] for c in result} == {"chefpino_"}
+
+    def test_eligible_accounts_override_is_case_insensitive(self, temp_db):
+        """Override matching should be case-insensitive."""
+        db = ConnectionDatabase(db_path=temp_db)
+        db.upsert_connection(tweet_id=123, tag="bitcast-UID{abc12345}", account_username="Alice")
+
+        result = db.get_all_connections(pool_name="tao", eligible_accounts={"ALICE"})
+        assert {c['account_username'] for c in result} == {"alice"}
+
