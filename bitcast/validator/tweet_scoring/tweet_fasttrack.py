@@ -10,6 +10,7 @@ engagement stats. Re-processing connections is safe -- ConnectionDatabase
 uses a single row per account_username.
 """
 
+import asyncio
 from typing import Any, Dict, List
 import bittensor as bt
 import requests
@@ -66,19 +67,18 @@ def fasttrack_tweet(tweet_id: str) -> Dict[str, Any]:
             status: "fetched_and_stored" | "already_in_store" | "api_failed" | "not_found"
             tweet: The normalised tweet dict (or existing store record)
             is_new: Whether the tweet was newly added to the store
-            connection: Connection processing result (always included)
+            connection: Connection processing result (included when processed)
     """
     tweet_id = str(tweet_id).strip()
     store = TweetStore()
 
     existing = store.get_tweet(tweet_id)
     if existing is not None:
-        bt.logging.info(f"Tweet {tweet_id} already in store (by @{existing.get('author', '?')})")
         return {
             'status': 'already_in_store',
             'tweet': existing,
             'is_new': False,
-            'connection': _process_connections_all_pools(existing),
+            'connection': None,
         }
 
     client = TwitterClient()
@@ -111,13 +111,86 @@ FAST_TRACK_URL = "https://www.stitch3.ai/api/fast-track"
 FAST_TRACK_MAX_IDS = 1000
 
 
+def _publish_connections_from_db(usernames: List[str]) -> int:
+    """
+    Publish only selected connection rows using the shared publisher path.
+
+    Returns:
+        Number of connection rows included in the publish payload.
+    """
+    from datetime import datetime, timezone
+    from bitcast.validator.account_connection.connection_db import ConnectionDatabase
+    from bitcast.validator.account_connection.connection_publisher import publish_account_connections
+
+    if not usernames:
+        return 0
+
+    db = ConnectionDatabase()
+    unique_usernames = {u.lower() for u in usernames if u}
+    selected_rows: List[Dict[str, Any]] = []
+    for username in unique_usernames:
+        selected_rows.extend(db.get_connections_by_account(username))
+
+    connections_to_publish = [
+        {
+            'tweet_id': conn['tweet_id'],
+            'tag': conn['tag'],
+            'username': conn['account_username'],
+            'referred_by': conn.get('referred_by'),
+            'referee_amount': conn.get('referee_amount'),
+            'referrer_amount': conn.get('referrer_amount'),
+        }
+        for conn in selected_rows
+    ]
+    if not connections_to_publish:
+        return 0
+
+    async def _publish_selected_connections() -> bool:
+        try:
+            try:
+                from bitcast.validator.utils.run_manager import get_run_manager
+                hotkey = get_run_manager().wallet.hotkey.ss58_address
+            except (ValueError, RuntimeError):
+                hotkey = None
+
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            run_id = (
+                f"vali_x_connection_{hotkey}_{timestamp}"
+                if hotkey else
+                f"vali_x_connection_{timestamp}"
+            )
+            return await publish_account_connections(
+                connections=connections_to_publish,
+                run_id=run_id,
+            )
+        except Exception as e:
+            bt.logging.warning(f"Fast-track publish task failed: {e}")
+            return False
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_publish_selected_connections())
+        bt.logging.debug(
+            f"Fast-track queued publish for {len(connections_to_publish)} connection(s)"
+        )
+    except RuntimeError:
+        success = asyncio.run(_publish_selected_connections())
+        if success:
+            bt.logging.debug(
+                f"Fast-track published {len(connections_to_publish)} connection(s)"
+            )
+        else:
+            bt.logging.warning("Fast-track publish failed for selected connection rows")
+    return len(connections_to_publish)
+
+
 def poll_fast_track() -> Dict[str, Any]:
     """
     Poll the stitch3 fast-track endpoint and fasttrack all returned tweet IDs.
 
-    Called once per validator scoring cycle. Fetches tweet IDs from the
-    stitch3 API and passes each to fasttrack_tweet(). Capped at
-    FAST_TRACK_MAX_IDS to prevent runaway batches.
+    Fetches tweet IDs from the stitch3 API and passes each to
+    fasttrack_tweet(). Capped at FAST_TRACK_MAX_IDS to prevent runaway
+    batches.
 
     Returns:
         Dict with summary: polled, fast_tracked, already_in_store, failed, total
@@ -141,24 +214,62 @@ def poll_fast_track() -> Dict[str, Any]:
         )
         tweet_ids = tweet_ids[:FAST_TRACK_MAX_IDS]
 
-    stats = {"polled": len(tweet_ids), "fast_tracked": 0, "already_in_store": 0, "failed": 0}
+    stats = {
+        "polled": len(tweet_ids),
+        "fast_tracked": 0,
+        "already_in_store": 0,
+        "failed": 0,
+        "new_connections": 0,
+        "updated_connections": 0,
+        "connection_rows_touched": 0,
+        "published_rows": 0,
+        "publish_queued": False,
+    }
+    touched_usernames: List[str] = []
 
     for tid in tweet_ids:
         result = fasttrack_tweet(tid)
         status = result.get("status")
         if status == "fetched_and_stored":
             stats["fast_tracked"] += 1
+            conn = result.get("connection") or {}
+            new_connections = int(conn.get("new_connections", 0))
+            updated_connections = int(conn.get("duplicates", 0))
+            rows_touched = new_connections + updated_connections
+            stats["new_connections"] += new_connections
+            stats["updated_connections"] += updated_connections
+            stats["connection_rows_touched"] += rows_touched
+            if rows_touched > 0:
+                tweet = result.get("tweet") or {}
+                author = (tweet.get("author") or "").strip().lower()
+                if author:
+                    touched_usernames.append(author)
         elif status == "already_in_store":
             stats["already_in_store"] += 1
         else:
             stats["failed"] += 1
             bt.logging.debug(f"Fast-track tweet {tid}: {status}")
 
+    # Publish when any connection row was inserted or updated.
+    if stats["connection_rows_touched"] > 0:
+        from bitcast.validator.utils.config import ENABLE_DATA_PUBLISH
+        if ENABLE_DATA_PUBLISH:
+            try:
+                stats["published_rows"] = _publish_connections_from_db(touched_usernames)
+                stats["publish_queued"] = stats["published_rows"] > 0
+            except Exception as e:
+                bt.logging.warning(f"Fast-track connection publish failed: {e}")
+
     bt.logging.info(
         f"Fast-track poll: {stats['polled']} polled, "
         f"{stats['fast_tracked']} new, "
         f"{stats['already_in_store']} cached, "
-        f"{stats['failed']} failed"
+        f"{stats['failed']} failed, "
+        f"{stats['new_connections']} new connections, "
+        f"{stats['updated_connections']} updated connections, "
+        f"{stats['connection_rows_touched']} connection rows touched, "
+        f"{stats['published_rows']} rows published, "
+        f"publish_queued={stats['publish_queued']}"
     )
     return stats
 

@@ -1,4 +1,4 @@
-import time
+import asyncio
 import bittensor as bt
 
 from bitcast.validator.reward_engine.orchestrator import RewardOrchestrator
@@ -14,7 +14,8 @@ from bitcast.validator.tweet_scoring.tweet_fasttrack import poll_fast_track
 
 from bitcast.utils.uids import get_all_uids
 from bitcast.validator.utils.config import (
-    VALIDATOR_WAIT, SCORING_INTERVAL_MINUTES, THOROUGH_SCORING_INTERVAL_MINUTES
+    VALIDATOR_WAIT, SCORING_INTERVAL_MINUTES, THOROUGH_SCORING_INTERVAL_MINUTES,
+    SOCIAL_MAP_DOWNLOAD_INTERVAL
 )
 from bitcast.validator.utils.data_publisher import initialize_global_publisher, get_global_publisher
 
@@ -45,33 +46,51 @@ async def forward(self):
     """
     Forward function for standard and discovery modes.
     
-    Performs full validation (account connection, tweet scoring, filtering, rewards).
-    - Standard mode: Downloads social maps from reference validator
-    - Discovery mode: Generates social maps via social discovery
-    """
-    # Run forward every SCORING_INTERVAL_MINUTES
-    if self.step % SCORING_INTERVAL_MINUTES != 0:
-        time.sleep(VALIDATOR_WAIT)
-        return
-
-    from bitcast.validator.utils.config import VALIDATOR_MODE
-    mode_label = "STANDARD" if VALIDATOR_MODE == "standard" else "DISCOVERY"
-    bt.logging.info(f"Starting validation cycle - {mode_label} mode (step {self.step})")
+    Runs every 2 steps (~20s):
+      - poll_fast_track: fetches tweets from stitch3 fast-track endpoint
     
-    # Initialize global publisher if not already done
+    Runs every SCORING_INTERVAL_MINUTES steps (~20 min):
+      - Account connection scan, reward engine, weight updates
+    """
+    # Initialize global publisher if not already done.
+    # Do this before fast-track so immediate connection publishing can happen
+    # even on non-scoring ticks.
     try:
         get_global_publisher()
     except RuntimeError:
         initialize_global_publisher(self.wallet)
         bt.logging.debug("Global data publisher initialized")
 
+    # Fast-track runs every 2 steps (~20s)
+    if self.step % 2 == 0:
+        if not hasattr(self, "_fasttrack_poll_lock"):
+            self._fasttrack_poll_lock = asyncio.Lock()
+
+        if self._fasttrack_poll_lock.locked():
+            bt.logging.debug("Fast-track poll skipped: previous poll still running")
+        else:
+            try:
+                async with self._fasttrack_poll_lock:
+                    poll_fast_track()
+            except Exception as e:
+                bt.logging.warning(f"Fast-track poll error: {e}")
+
+    # Scoring only runs every SCORING_INTERVAL_MINUTES steps
+    if self.step % SCORING_INTERVAL_MINUTES != 0:
+        await asyncio.sleep(VALIDATOR_WAIT)
+        return
+
+    from bitcast.validator.utils.config import VALIDATOR_MODE
+    mode_label = "STANDARD" if VALIDATOR_MODE == "standard" else "DISCOVERY"
+    bt.logging.info(f"Starting validation cycle - {mode_label} mode (step {self.step})")
+    
     try:
         # Social map handling - mode-specific behavior
         if VALIDATOR_MODE == 'discovery':
             DiscoveryManager.get_instance().maybe_start()
         else:
             # Standard mode: Download social maps from reference validator (every 12 hours)
-            if self.step % (12 * 60) == 0:
+            if self.step % SOCIAL_MAP_DOWNLOAD_INTERVAL == 0:
                 from bitcast.validator.social_discovery.social_map_downloader import download_stale_social_maps
                 bt.logging.info("Checking for stale social maps...")
                 downloaded = await download_stale_social_maps()
@@ -80,9 +99,6 @@ async def forward(self):
         
         # Account connection scan
         bt.logging.info("Starting account connection scan...")
-
-        # Poll stitch3 fast-track endpoint
-        poll_fast_track()
 
         scanner = ConnectionScanner()
         summary = await scanner.scan_all_pools()
@@ -108,4 +124,4 @@ async def forward(self):
     except Exception as e:
         bt.logging.error(f"Error in validation cycle: {e}")
 
-    time.sleep(VALIDATOR_WAIT)
+    await asyncio.sleep(VALIDATOR_WAIT)
