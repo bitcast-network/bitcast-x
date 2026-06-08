@@ -8,7 +8,7 @@ import json
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 import bittensor as bt
 
 from bitcast.validator.utils.config import STALE_INFLUENCE_DECAY
@@ -288,6 +288,60 @@ def get_active_members_for_brief(
     
     bt.logging.info(f"Merged to {len(eligible_list)} unique eligible accounts across all maps")
     return eligible_list
+
+
+def get_eligible_accounts_for_window(
+    pool_name: str,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+) -> Set[str]:
+    """
+    Return the set of accounts eligible during a brief window (lowercased).
+
+    Unlike a latest-map-only view, this unions the *full* membership of every
+    social map whose active period overlaps ``[start_date, end_date]``. This
+    mirrors the leniency in :func:`get_active_members_for_brief` and
+    :func:`get_considered_accounts_for_brief` so that accounts which drop out of
+    the social map mid-brief remain eligible (their influence is separately
+    decayed via ``STALE_INFLUENCE_DECAY``) rather than being silently excluded.
+
+    Falls back to the latest map only when no date range is given, or when no
+    social maps exist for the pool (returns an empty set so callers degrade to
+    "no eligible accounts" rather than crashing).
+
+    Args:
+        pool_name: Pool name.
+        start_date: Brief start date (UTC). If None, uses latest map only.
+        end_date: Brief end date (UTC). If None, uses latest map only.
+
+    Returns:
+        Set of lowercase eligible account usernames.
+    """
+    try:
+        if start_date is None or end_date is None:
+            social_map, _ = load_latest_social_map(pool_name)
+            return {u.lower() for u in social_map.get('accounts', {})}
+
+        relevant_maps = _find_relevant_maps(pool_name, start_date, end_date)
+    except (FileNotFoundError, ValueError) as e:
+        bt.logging.warning(
+            f"No usable social map for pool '{pool_name}' ({e}); "
+            f"treating pool as having no eligible accounts."
+        )
+        return set()
+
+    eligible: Set[str] = set()
+    for map_file, _ in relevant_maps:
+        with open(map_file, 'r') as f:
+            social_map = json.load(f)
+        eligible.update(u.lower() for u in social_map.get('accounts', {}))
+
+    bt.logging.info(
+        f"Eligible accounts for {pool_name} window "
+        f"{start_date.date()}–{end_date.date()}: {len(eligible)} "
+        f"(union across {len(relevant_maps)} map(s))"
+    )
+    return eligible
 
 
 def get_considered_accounts_for_brief(

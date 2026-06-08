@@ -257,36 +257,54 @@ class UnifiedDataPublisher(DataPublisher):
                             # Check for success status in response (accept both "success" and "accepted")
                             if response_data.get("status") in ["success", "accepted"]:
                                 payload_type = signed_payload.get("payload_type", "unknown")
-                                bt.logging.info(f"✅ Successfully published {payload_type} data (%.2fs)", response_time)
+                                bt.logging.info(
+                                    f"✅ Successfully published {payload_type} data ({response_time:.2f}s)"
+                                )
                                 return True
                             else:
-                                bt.logging.error(f"Server returned error: {response_data} (%.2fs)", response_time)
+                                bt.logging.error(
+                                    f"Server returned error: {response_data} ({response_time:.2f}s)"
+                                )
                                 return False
                         except Exception as json_error:
-                            bt.logging.error(f"Failed to parse response JSON: {json_error} (%.2fs)", response_time)
+                            bt.logging.error(
+                                f"Failed to parse response JSON: {json_error} ({response_time:.2f}s)"
+                            )
                             return False
                     elif response.status == 400:
                         error_text = await response.text()
-                        bt.logging.error(f"400 Bad Request - Payload validation failed: {error_text} (%.2fs)", response_time)
+                        bt.logging.error(
+                            f"400 Bad Request - Payload validation failed: {error_text} ({response_time:.2f}s)"
+                        )
                         return False
                     elif response.status == 401:
-                        bt.logging.error(f"401 Unauthorized - Invalid signature/authentication (%.2fs)", response_time)
+                        bt.logging.error(
+                            f"401 Unauthorized - Invalid signature/authentication ({response_time:.2f}s)"
+                        )
                         return False
                     elif response.status == 403:
-                        bt.logging.error(f"403 Forbidden - Validator not authorized (%.2fs)", response_time)
+                        bt.logging.error(
+                            f"403 Forbidden - Validator not authorized ({response_time:.2f}s)"
+                        )
                         return False
                     else:
                         error_text = await response.text()
-                        bt.logging.error(f"HTTP {response.status} error from {endpoint}: {error_text} (%.2fs)", response_time)
+                        bt.logging.error(
+                            f"HTTP {response.status} error from {endpoint}: {error_text} ({response_time:.2f}s)"
+                        )
                         return False
                         
         except asyncio.TimeoutError:
             response_time = time.time() - start_time
-            bt.logging.warning(f"Request timed out after %.2fs - server queue may be processing", response_time)
+            bt.logging.warning(
+                f"Request timed out after {response_time:.2f}s - server queue may be processing"
+            )
             return False
         except Exception as e:
             response_time = time.time() - start_time
-            bt.logging.error(f"Failed to publish unified data to {endpoint}: {e} (%.2fs)", response_time)
+            bt.logging.error(
+                f"Failed to publish unified data to {endpoint}: {e} ({response_time:.2f}s)"
+            )
             return False
 
 

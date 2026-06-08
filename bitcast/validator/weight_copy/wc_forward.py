@@ -2,7 +2,7 @@
 Simplified forward logic for weight copy mode validators.
 Replaces complex validation logic with API weight fetching.
 """
-import time
+import asyncio
 import bittensor as bt
 
 from bitcast.validator.weight_copy.wc_client import WeightCopyClient
@@ -18,9 +18,9 @@ async def forward_weight_copy(self):
     
     Behavior on API failure: Continues with existing scores (no update).
     """
-    # Only run every 60 steps (same as regular validator)
-    if self.step % 60 != 0:
-        time.sleep(VALIDATOR_WAIT)
+    # Only run every 360 steps (360 × 10s = 60 minutes)
+    if self.step % 360 != 0:
+        await asyncio.sleep(VALIDATOR_WAIT)
         return
     
     bt.logging.info(f"🔄 Weight copy: Fetching weights from reference validator (step {self.step})")
@@ -36,7 +36,7 @@ async def forward_weight_copy(self):
         if result is None:
             # API fetch failed - continue with existing weights
             bt.logging.info("Continuing with existing weights until next fetch attempt")
-            time.sleep(VALIDATOR_WAIT)
+            await asyncio.sleep(VALIDATOR_WAIT)
             return
         
         scores, hotkeys, primary_step = result
@@ -47,7 +47,7 @@ async def forward_weight_copy(self):
                 f"Score array size mismatch: primary has {len(scores)}, "
                 f"we have {len(self.scores)} - keeping existing weights"
             )
-            time.sleep(VALIDATOR_WAIT)
+            await asyncio.sleep(VALIDATOR_WAIT)
             return
         
         # Validate hotkey count for informational purposes
@@ -67,5 +67,5 @@ async def forward_weight_copy(self):
     except Exception as e:
         bt.logging.error(f"Error in weight copy forward: {e} - continuing with existing weights")
     
-    time.sleep(VALIDATOR_WAIT)
+    await asyncio.sleep(VALIDATOR_WAIT)
 

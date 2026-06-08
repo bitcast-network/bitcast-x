@@ -1,7 +1,7 @@
 """Main reward calculation orchestrator - replaces monolithic reward.py functions."""
 
 from datetime import date, datetime, timezone
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 import numpy as np
 import bittensor as bt
 from bitcast.validator.reward_engine.utils import get_briefs
@@ -63,12 +63,23 @@ class RewardOrchestrator:
             # 3. Load connections early for all briefs (both scoring and emission)
             db = ConnectionDatabase()
             all_pools = {brief.get('pool', 'tao') for brief in briefs}
-            
+
+            # Resolve per-pool eligibility across the union of every brief window.
+            # Eligibility uses all social maps active during the brief window (not
+            # just the latest map), so an account that drops out of the social map
+            # mid-brief stays eligible — matching get_active_members_for_brief and
+            # the STALE_INFLUENCE_DECAY treatment in scoring.
+            pool_eligible = self._resolve_pool_eligibility(briefs)
+
             # Load and merge connections from all pools (deduplicate by username)
             all_accounts = {
                 m['account_username']: m
                 for pool in all_pools
-                for m in db.get_accounts_with_uids(pool, validator_self.metagraph)
+                for m in db.get_accounts_with_uids(
+                    pool,
+                    validator_self.metagraph,
+                    eligible_accounts=pool_eligible.get(pool),
+                )
             }
 
             valid_mappings = [m for m in all_accounts.values() if m['uid'] is not None]
@@ -272,6 +283,44 @@ class RewardOrchestrator:
         except Exception as e:
             bt.logging.error(f"Exception publishing referral bonuses: {e}")
     
+    def _resolve_pool_eligibility(
+        self, briefs: List[Dict[str, Any]]
+    ) -> Dict[str, Set[str]]:
+        """
+        Build per-pool eligible-account sets across the union of brief windows.
+
+        For each brief, eligibility is the union of every social map active during
+        that brief's [start_date, end_date] window. Unioning across all briefs in a
+        pool yields a superset that never drops an account mid-brief; the scorer's
+        per-brief active_members then applies the precise window gating.
+
+        Returns:
+            Mapping of pool name -> set of lowercase eligible usernames. Pools for
+            which eligibility cannot be resolved are omitted, so callers fall back
+            to the latest-map behaviour for those pools.
+        """
+        from bitcast.validator.tweet_scoring.social_map_loader import (
+            get_eligible_accounts_for_window,
+        )
+        from bitcast.validator.utils.date_utils import parse_brief_date
+
+        pool_eligible: Dict[str, Set[str]] = {}
+        for brief in briefs:
+            pool = brief.get('pool', 'tao')
+            start_date = parse_brief_date(brief.get('start_date'))
+            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
+            try:
+                eligible = get_eligible_accounts_for_window(pool, start_date, end_date)
+            except Exception as e:
+                bt.logging.warning(
+                    f"Failed to resolve eligibility for pool '{pool}' "
+                    f"(brief {brief.get('id')}): {e}"
+                )
+                continue
+            pool_eligible.setdefault(pool, set()).update(eligible)
+
+        return pool_eligible
+
     def _fallback_rewards(self, uids: List[int]) -> np.ndarray:
         """
         Return fallback rewards when normal calculation cannot proceed.
