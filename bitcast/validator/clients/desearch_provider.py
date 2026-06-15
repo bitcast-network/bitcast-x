@@ -371,7 +371,11 @@ class DesearchProvider(TwitterProvider):
         tweets = []
         user_info = {
             'username': username.lower(),
-            'followers_count': 0
+            'followers_count': 0,
+            'affiliate_label': None,
+            'affiliate_username': None,
+            'affiliate_url': None,
+            'label_type': None,
         }
         api_fetch_succeeded = False
         cursor = None
@@ -421,6 +425,16 @@ class DesearchProvider(TwitterProvider):
                         user_data = data.get('user', {})
                         if user_data:
                             user_info['followers_count'] = user_data.get('followers_count', 0)
+                        # Extract affiliate / highlighted label data
+                        aff_label = user_data.get('affiliates_highlighted_label', {}).get('label', {})
+                        if aff_label:
+                            user_info['affiliate_label'] = aff_label.get('description')
+                            user_info['affiliate_url'] = aff_label.get('url', {}).get('url')
+                            user_info['label_type'] = aff_label.get('user_label_type')
+                            # Extract username from URL like "https://twitter.com/Polymarket"
+                            aff_url = user_info['affiliate_url'] or ''
+                            if aff_url:
+                                user_info['affiliate_username'] = aff_url.rstrip('/').split('/')[-1].lower()
                 elif isinstance(data, list):
                     tweet_list = data
                     next_cursor = None  # No pagination available for list responses
@@ -455,8 +469,20 @@ class DesearchProvider(TwitterProvider):
                     except (ValueError, AttributeError):
                         pass
 
-                    if user_info['followers_count'] == 0 and tweet_data.get('user'):
-                        user_info['followers_count'] = tweet_data['user'].get('followers_count', 0)
+                    tweet_user = tweet_data.get('user') if tweet_data.get('user') else None
+                    if tweet_user:
+                        if user_info['followers_count'] == 0:
+                            user_info['followers_count'] = tweet_user.get('followers_count', 0)
+                        # Fallback: extract affiliate data from tweet's embedded user object
+                        if user_info['affiliate_label'] is None:
+                            aff_label = tweet_user.get('affiliates_highlighted_label', {}).get('label', {})
+                            if aff_label:
+                                user_info['affiliate_label'] = aff_label.get('description')
+                                user_info['affiliate_url'] = aff_label.get('url', {}).get('url')
+                                user_info['label_type'] = aff_label.get('user_label_type')
+                                aff_url = user_info['affiliate_url'] or ''
+                                if aff_url:
+                                    user_info['affiliate_username'] = aff_url.rstrip('/').split('/')[-1].lower()
 
                     tweets.append(parsed_tweet)
                     page_tweets_count += 1

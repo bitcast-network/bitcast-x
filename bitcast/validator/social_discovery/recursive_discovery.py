@@ -536,6 +536,10 @@ async def two_stage_discovery(
                 'score': score,
                 'followers_count': user_info_map.get(username, {}).get('followers_count', 0),
                 'is_core': username in core_accounts,
+                'affiliate_label': user_info_map.get(username, {}).get('affiliate_label'),
+                'affiliate_username': user_info_map.get(username, {}).get('affiliate_username'),
+                'affiliate_url': user_info_map.get(username, {}).get('affiliate_url'),
+                'label_type': user_info_map.get(username, {}).get('label_type'),
             }
             for username, score in sorted_accounts
         }
