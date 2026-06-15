@@ -32,8 +32,8 @@ def _process_connections_all_pools(tweet: Dict) -> Dict[str, Any]:
     if not tweet.get('text') or not TagParser.extract_tags(tweet.get('text', '')):
         bt.logging.debug(f"No connection tags in tweet {tweet.get('tweet_id')}")
         return {
-            'tags_found': 0, 'new_connections': 0, 'duplicates': 0,
-            'errors': 0, 'pools_matched': [],
+            'tags_found': 0, 'new_connections': 0, 'updated_connections': 0,
+            'unchanged': 0, 'errors': 0, 'pools_matched': [],
         }
 
     scanner = ConnectionScanner()
@@ -74,11 +74,15 @@ def fasttrack_tweet(tweet_id: str) -> Dict[str, Any]:
 
     existing = store.get_tweet(tweet_id)
     if existing is not None:
+        # The tweet may have been cached by an unrelated brief search before
+        # fast-track saw it. Still process connections so registration tags are
+        # not silently dropped. Connection processing is idempotent and only
+        # reports a touched row when the DB content actually changes.
         return {
             'status': 'already_in_store',
             'tweet': existing,
             'is_new': False,
-            'connection': None,
+            'connection': _process_connections_all_pools(existing),
         }
 
     client = TwitterClient()
@@ -230,25 +234,31 @@ def poll_fast_track() -> Dict[str, Any]:
     for tid in tweet_ids:
         result = fasttrack_tweet(tid)
         status = result.get("status")
+
         if status == "fetched_and_stored":
             stats["fast_tracked"] += 1
-            conn = result.get("connection") or {}
-            new_connections = int(conn.get("new_connections", 0))
-            updated_connections = int(conn.get("duplicates", 0))
-            rows_touched = new_connections + updated_connections
-            stats["new_connections"] += new_connections
-            stats["updated_connections"] += updated_connections
-            stats["connection_rows_touched"] += rows_touched
-            if rows_touched > 0:
-                tweet = result.get("tweet") or {}
-                author = (tweet.get("author") or "").strip().lower()
-                if author:
-                    touched_usernames.append(author)
         elif status == "already_in_store":
             stats["already_in_store"] += 1
         else:
             stats["failed"] += 1
             bt.logging.debug(f"Fast-track tweet {tid}: {status}")
+            continue
+
+        # Connections are processed for both freshly stored and already-cached
+        # tweets. Only genuine inserts/updates count as touched, so unchanged
+        # rows are never republished on subsequent polls.
+        conn = result.get("connection") or {}
+        new_connections = int(conn.get("new_connections", 0))
+        updated_connections = int(conn.get("updated_connections", 0))
+        rows_touched = new_connections + updated_connections
+        stats["new_connections"] += new_connections
+        stats["updated_connections"] += updated_connections
+        stats["connection_rows_touched"] += rows_touched
+        if rows_touched > 0:
+            tweet = result.get("tweet") or {}
+            author = (tweet.get("author") or "").strip().lower()
+            if author:
+                touched_usernames.append(author)
 
     # Publish when any connection row was inserted or updated.
     if stats["connection_rows_touched"] > 0:
@@ -332,8 +342,9 @@ if __name__ == "__main__":
         print(f"\nConnection processing:")
         print(f"  Tags found:       {conn['tags_found']}")
         print(f"  Pools matched:    {', '.join(conn['pools_matched']) or 'none'}")
-        print(f"  New connections:   {conn['new_connections']}")
-        print(f"  Duplicates:       {conn['duplicates']}")
-        print(f"  Errors:           {conn['errors']}")
+        print(f"  New connections:    {conn['new_connections']}")
+        print(f"  Updated connections:{conn['updated_connections']}")
+        print(f"  Unchanged:          {conn['unchanged']}")
+        print(f"  Errors:             {conn['errors']}")
 
     print(f"{'='*60}\n")
