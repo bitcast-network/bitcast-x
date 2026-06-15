@@ -236,12 +236,20 @@ class ConnectionDatabase:
             )
             return cursor.fetchone() is not None
 
-    def get_all_connections(self, pool_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_all_connections(
+        self,
+        pool_name: Optional[str] = None,
+        eligible_accounts: Optional[Set[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Get all connection rows.
 
-        If pool_name is provided, filters to accounts present in that pool's
-        latest social map. Otherwise returns every row.
+        If pool_name is provided, filters to accounts eligible for that pool.
+        Eligibility defaults to the pool's *latest* social map, but callers can
+        pass ``eligible_accounts`` to supply a brief-window-aware set (the union
+        of every social map active during the brief window). This keeps accounts
+        that drop out of the social map mid-brief eligible, consistent with
+        ``get_active_members_for_brief``. Otherwise returns every row.
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -250,7 +258,10 @@ class ConnectionDatabase:
             results = [dict(row) for row in cursor.fetchall()]
 
         if pool_name:
-            allowed = self._load_pool_accounts(pool_name)
+            if eligible_accounts is not None:
+                allowed = {a.lower() for a in eligible_accounts}
+            else:
+                allowed = self._load_pool_accounts(pool_name)
             results = [r for r in results if r["account_username"].lower() in allowed]
         return results
 
@@ -267,7 +278,8 @@ class ConnectionDatabase:
     def get_accounts_with_uids(
         self,
         pool_name: Optional[str],
-        metagraph: "bt.metagraph"
+        metagraph: "bt.metagraph",
+        eligible_accounts: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get account-to-UID mappings.
@@ -282,11 +294,16 @@ class ConnectionDatabase:
                 by the referral payout path so a referrer in a pool with no
                 active brief still gets paid.
             metagraph: Bittensor metagraph for UID lookups
+            eligible_accounts: Optional brief-window-aware set of eligible account
+                usernames. When provided, used instead of the pool's latest social
+                map so accounts that dropped out of the map mid-brief stay eligible.
 
         Returns:
             List of dictionaries with 'account_username' and 'uid' fields, sorted by UID.
         """
-        connections = self.get_all_connections(pool_name=pool_name)
+        connections = self.get_all_connections(
+            pool_name=pool_name, eligible_accounts=eligible_accounts
+        )
 
         accounts: List[Dict[str, Any]] = []
         for conn in connections:

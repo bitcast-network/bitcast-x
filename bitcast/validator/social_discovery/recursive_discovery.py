@@ -262,6 +262,7 @@ async def two_stage_discovery(
     run_id_prefix: Optional[str] = None,
     save_summary: bool = True,
     posts_only: bool = True,
+    include_inactive_pool: bool = False,
 ) -> Tuple[str, ConvergenceMetrics]:
     """
     Two-stage social discovery with personalized PageRank.
@@ -288,6 +289,7 @@ async def two_stage_discovery(
         run_id_prefix: Optional prefix for run IDs
         save_summary: Whether to save discovery summary to file
         posts_only: Use only /user/tweets endpoint (default: True)
+        include_inactive_pool: Include inactive pools from API configuration
         
     Returns:
         Tuple of (social_map_path, convergence_metrics)
@@ -298,7 +300,7 @@ async def two_stage_discovery(
     bt.logging.info(f"Pool: {pool_name}")
     
     # Load pool configuration
-    pool_manager = PoolManager()
+    pool_manager = PoolManager(include_inactive=include_inactive_pool)
     pool_config = pool_manager.get_pool(pool_name)
     if not pool_config:
         raise ValueError(f"Pool '{pool_name}' not found in configuration")
@@ -745,6 +747,10 @@ def main():
             "--dual-endpoint", action="store_true",
             help="Use both /user/tweets and /user/tweetsandreplies endpoints"
         )
+        parser.add_argument(
+            "--include-inactive-pool", action="store_true",
+            help="Allow selecting pools that are marked inactive in API config"
+        )
         
         # Build args list with environment-based wallet defaults
         args_list = sys.argv[1:]
@@ -791,6 +797,7 @@ def main():
             run_id_prefix=config.run_id_prefix,
             save_summary=not config.no_summary,
             posts_only=posts_only,
+            include_inactive_pool=config.include_inactive_pool,
         ))
         
         print(f"\nTwo-stage discovery complete: {path}")

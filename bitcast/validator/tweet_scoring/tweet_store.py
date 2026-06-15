@@ -130,13 +130,32 @@ class TweetStore:
             self._cache.set(key, record)
             return True
         else:
-            # Existing tweet - update engagement stats and timestamp
-            existing['favorite_count'] = tweet.get('favorite_count', existing.get('favorite_count', 0))
-            existing['retweet_count'] = tweet.get('retweet_count', existing.get('retweet_count', 0))
-            existing['reply_count'] = tweet.get('reply_count', existing.get('reply_count', 0))
-            existing['quote_count'] = tweet.get('quote_count', existing.get('quote_count', 0))
-            existing['bookmark_count'] = tweet.get('bookmark_count', existing.get('bookmark_count', 0))
-            existing['views_count'] = tweet.get('views_count', existing.get('views_count', 0))
+            # Existing tweet - update cumulative metrics monotonically.
+            # Some upstream providers can intermittently return lower counts;
+            # preserve the highest observed value to avoid regressions.
+            def _coerce_int(value: object) -> int:
+                try:
+                    if value is None:
+                        return 0
+                    return int(value)
+                except (TypeError, ValueError):
+                    return 0
+
+            def _merge_monotonic(metric_name: str) -> None:
+                current_value = _coerce_int(existing.get(metric_name, 0))
+                incoming_value = _coerce_int(tweet.get(metric_name, current_value))
+                existing[metric_name] = max(current_value, incoming_value)
+
+            for metric in (
+                'favorite_count',
+                'retweet_count',
+                'reply_count',
+                'quote_count',
+                'bookmark_count',
+                'views_count',
+            ):
+                _merge_monotonic(metric)
+
             existing['last_updated'] = datetime.now().isoformat()
             self._cache.set(key, existing)
             return False

@@ -87,6 +87,15 @@ def apply_max_tweets_filter(
     if not max_tweets or max_tweets <= 0:
         return filtered_tweets
     
+    def _safe_numeric(value) -> float:
+        """Coerce None/non-numeric values to 0 for stable sorting."""
+        if value is None:
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
     # Group by author
     tweets_by_author = defaultdict(list)
     for tweet in filtered_tweets:
@@ -106,9 +115,9 @@ def apply_max_tweets_filter(
             sorted_tweets = sorted(
                 author_tweets,
                 key=lambda t: (
-                    -t.get('score', 0.0),
-                    -t.get('views_count', 0),
-                    -t.get('favorite_count', 0),
+                    -_safe_numeric(t.get('score', 0.0)),
+                    -_safe_numeric(t.get('views_count', 0)),
+                    -_safe_numeric(t.get('favorite_count', 0)),
                     t.get('created_at', ''),
                 )
             )

@@ -4,11 +4,14 @@ import json
 import pytest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from unittest.mock import patch
+import bitcast.validator.tweet_scoring.social_map_loader as sml
 from bitcast.validator.tweet_scoring.social_map_loader import (
     load_latest_social_map,
     get_active_members,
     get_considered_accounts,
-    get_active_members_for_brief
+    get_active_members_for_brief,
+    get_eligible_accounts_for_window,
 )
 
 
@@ -262,4 +265,62 @@ class TestGetActiveMembersForBrief:
             assert all(isinstance(username, str) for username in result)
         except FileNotFoundError:
             pytest.skip("No social map found for 'tao' pool")
+
+
+class TestGetEligibleAccountsForWindow:
+    """Test get_eligible_accounts_for_window function."""
+
+    def _write_map(self, path, accounts):
+        path.write_text(json.dumps({'accounts': accounts}))
+        return path
+
+    def test_unions_full_membership_across_relevant_maps(self, tmp_path, monkeypatch):
+        """Should union the full membership of every map in the brief window.
+
+        This is the core regression guard: an account present in an earlier map
+        but dropped from the latest map must remain eligible.
+        """
+        old_map = self._write_map(
+            tmp_path / "2026.05.22_04.33.22.json",
+            {'Alice': {'score': 1.0}, 'chefpino_': {'score': 125.78}},
+        )
+        new_map = self._write_map(
+            tmp_path / "2026.06.05_05.31.52.json",
+            {'Alice': {'score': 1.0}, 'newcomer': {'score': 50.0}},
+        )
+
+        monkeypatch.setattr(
+            sml, "_find_relevant_maps",
+            lambda pool, start, end: [(old_map, None), (new_map, None)],
+        )
+
+        start_date = datetime(2026, 5, 21, tzinfo=timezone.utc)
+        end_date = datetime(2026, 6, 4, 23, 59, 59, tzinfo=timezone.utc)
+        eligible = get_eligible_accounts_for_window('test', start_date, end_date)
+
+        # chefpino_ dropped from the latest map but stays eligible via the union
+        assert eligible == {'alice', 'chefpino_', 'newcomer'}
+
+    def test_lowercases_usernames(self, tmp_path, monkeypatch):
+        """Usernames should be returned lowercased for case-insensitive matching."""
+        m = self._write_map(tmp_path / "2026.05.22_04.33.22.json", {'MixedCase': {'score': 1.0}})
+        monkeypatch.setattr(sml, "_find_relevant_maps", lambda pool, start, end: [(m, None)])
+
+        start_date = datetime(2026, 5, 21, tzinfo=timezone.utc)
+        end_date = datetime(2026, 6, 4, 23, 59, 59, tzinfo=timezone.utc)
+        assert get_eligible_accounts_for_window('test', start_date, end_date) == {'mixedcase'}
+
+    def test_no_date_range_falls_back_to_latest_map(self):
+        """When no window is given, should fall back to the latest map only."""
+        fake_map = {'accounts': {'Alice': {'score': 1.0}, 'Bob': {'score': 2.0}}}
+        with patch.object(sml, "load_latest_social_map", return_value=(fake_map, "/x.json")):
+            eligible = get_eligible_accounts_for_window('test')
+        assert eligible == {'alice', 'bob'}
+
+    def test_missing_maps_returns_empty_set(self):
+        """Should degrade to an empty set rather than crashing when no maps exist."""
+        start_date = datetime(2026, 5, 21, tzinfo=timezone.utc)
+        end_date = datetime(2026, 6, 4, 23, 59, 59, tzinfo=timezone.utc)
+        with patch.object(sml, "_find_relevant_maps", side_effect=FileNotFoundError("none")):
+            assert get_eligible_accounts_for_window('ghost', start_date, end_date) == set()
 
