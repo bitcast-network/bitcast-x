@@ -347,6 +347,53 @@ class TestConnectionScanner:
         assert connection['referee_amount'] == 100.0
         assert connection['referrer_amount'] == 100.0
 
+    def test_process_tweet_is_idempotent(self, temp_db_path, mock_twitter_client):
+        """Re-processing the same tweet must not report a touched row.
+
+        Registration tweets stay in the fast-track queue across polls. Without
+        idempotent reporting, every poll would republish the same connection.
+        """
+        scanner = ConnectionScanner(
+            db_path=temp_db_path,
+            twitter_client=mock_twitter_client,
+            tweet_ids=['999'],
+        )
+        self._patch_pools(scanner, {'tao': {'alice'}})
+
+        tweet = {'tweet_id': '111', 'author': 'alice', 'text': 'Stitch3-abc123'}
+
+        first = scanner.process_tweet(tweet)
+        assert first['new_connections'] == 1
+        assert first['updated_connections'] == 0
+        assert first['unchanged'] == 0
+
+        second = scanner.process_tweet(tweet)
+        assert second['new_connections'] == 0
+        assert second['updated_connections'] == 0
+        assert second['unchanged'] == 1
+
+    def test_process_tweet_reports_update_on_new_tag(self, temp_db_path, mock_twitter_client):
+        """A genuinely changed tag/tweet_id should report a touched row."""
+        scanner = ConnectionScanner(
+            db_path=temp_db_path,
+            twitter_client=mock_twitter_client,
+            tweet_ids=['999'],
+        )
+        self._patch_pools(scanner, {'tao': {'alice'}})
+
+        scanner.process_tweet({'tweet_id': '111', 'author': 'alice', 'text': 'Stitch3-aaaaaaaa'})
+
+        updated = scanner.process_tweet(
+            {'tweet_id': '222', 'author': 'alice', 'text': 'Stitch3-bbbbbbbb'}
+        )
+        assert updated['new_connections'] == 0
+        assert updated['updated_connections'] == 1
+        assert updated['unchanged'] == 0
+
+        connection = scanner.database.get_connections_by_account('alice')[0]
+        assert connection['tag'] == 'Stitch3-bbbbbbbb'
+        assert str(connection['tweet_id']) == '222'
+
     @patch('bitcast.validator.account_connection.connection_scanner.PoolManager')
     @patch('bitcast.validator.account_connection.connection_scanner.load_latest_social_map')
     def test_locked_referral_uses_max_across_pools(

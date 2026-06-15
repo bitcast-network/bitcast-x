@@ -219,6 +219,24 @@ class ConnectionScanner:
             referrer_amount=locked_amount,
         )
 
+    def _published_fields_snapshot(self, username: str) -> Optional[tuple]:
+        """
+        Return a tuple of the connection fields that are sent downstream, or
+        None if no row exists. Used to decide whether re-processing a tweet
+        actually changed anything worth republishing.
+        """
+        rows = self.database.get_connections_by_account(username)
+        if not rows:
+            return None
+        row = rows[0]
+        return (
+            str(row.get('tweet_id')),
+            row.get('tag'),
+            row.get('referred_by'),
+            row.get('referee_amount'),
+            row.get('referrer_amount'),
+        )
+
     def process_tweet(self, tweet: Dict) -> Dict[str, Any]:
         """
         Process a single tweet for connection tags.
@@ -226,10 +244,16 @@ class ConnectionScanner:
         Idempotent. Stores connections for any author whose handle appears in
         the union of all pool social maps. Referral amount is locked as the
         max across pools the user belongs to.
+
+        Distinguishes three outcomes per connection so callers can avoid
+        republishing unchanged rows:
+        - ``new_connections``: a brand new row was inserted.
+        - ``updated_connections``: an existing row's published fields changed.
+        - ``unchanged``: the row already matched (no-op).
         """
         stats: Dict[str, Any] = {
-            'tags_found': 0, 'new_connections': 0, 'duplicates': 0, 'errors': 0,
-            'pools_matched': [],
+            'tags_found': 0, 'new_connections': 0, 'updated_connections': 0,
+            'unchanged': 0, 'errors': 0, 'pools_matched': [],
         }
 
         eligible = self._all_known_accounts()
@@ -245,12 +269,16 @@ class ConnectionScanner:
 
         for conn in found:
             try:
+                before = self._published_fields_snapshot(conn['username'])
                 is_new = self._store_connection(conn)
                 if is_new:
                     stats['new_connections'] += 1
                     bt.logging.info(f"New connection: @{conn['username']} -> {conn['tag']}")
+                elif before != self._published_fields_snapshot(conn['username']):
+                    stats['updated_connections'] += 1
+                    bt.logging.info(f"Updated connection: @{conn['username']} -> {conn['tag']}")
                 else:
-                    stats['duplicates'] += 1
+                    stats['unchanged'] += 1
             except Exception as e:
                 bt.logging.error(f"Error storing connection for @{conn['username']}: {e}")
                 stats['errors'] += 1
