@@ -264,6 +264,125 @@ class TestTwitterEvaluator:
         assert 'good_brief' in result.results[42].aggregated_scores
         assert 'error_brief' not in result.results[42].aggregated_scores
     
+    @pytest.mark.asyncio
+    async def test_evaluate_briefs_shared_tweet_rewarded_once(self, mock_alpha_price):
+        """A tweet passing two briefs is rewarded under only the higher-budget one."""
+        evaluator = TwitterEvaluator()
+
+        briefs = [
+            {'id': 'rich_brief', 'pool': 'tao', 'budget': 7000, 'brief': 'Test', 'prompt_version': 1},
+            {'id': 'poor_brief', 'pool': 'tao', 'budget': 700, 'brief': 'Test', 'prompt_version': 1},
+        ]
+        uid_mappings = [{'account_username': 'test_user', 'uid': 42}]
+
+        scored_tweets = [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5}]
+        filtered_tweets = [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5, 'meets_brief': True}]
+
+        with patch.object(evaluator, '_score_tweets_for_brief', return_value=scored_tweets):
+            with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
+                with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=FileNotFoundError()):
+                        result = await evaluator.evaluate_briefs(
+                            briefs=briefs,
+                            uid_account_mappings=uid_mappings,
+                            connected_accounts={'test_user'},
+                            metagraph=Mock(),
+                            run_id="test_run"
+                        )
+
+        scores = result.results[42].aggregated_scores
+        # Rewarded under the richer brief only; never double-counted.
+        assert 'rich_brief' in scores
+        assert 'poor_brief' not in scores
+        daily_budget = 7000 / EMISSIONS_PERIOD
+        assert abs(scores['rich_brief'] - daily_budget) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_evaluate_briefs_two_tweets_split_across_capped_briefs(self, mock_alpha_price):
+        """Two tweets matching two single-slot briefs fill one slot each."""
+        evaluator = TwitterEvaluator()
+
+        briefs = [
+            {'id': 'brief_a', 'pool': 'tao', 'budget': 7000, 'max_tweets': 1, 'brief': 'Test', 'prompt_version': 1},
+            {'id': 'brief_b', 'pool': 'tao', 'budget': 700, 'max_tweets': 1, 'brief': 'Test', 'prompt_version': 1},
+        ]
+        uid_mappings = [{'account_username': 'test_user', 'uid': 42}]
+
+        scored_tweets = [
+            {'author': 'test_user', 'tweet_id': 't1', 'score': 0.6},
+            {'author': 'test_user', 'tweet_id': 't2', 'score': 0.4},
+        ]
+        filtered_tweets = [
+            {'author': 'test_user', 'tweet_id': 't1', 'score': 0.6, 'meets_brief': True},
+            {'author': 'test_user', 'tweet_id': 't2', 'score': 0.4, 'meets_brief': True},
+        ]
+
+        with patch.object(evaluator, '_score_tweets_for_brief', return_value=scored_tweets):
+            with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
+                with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=FileNotFoundError()):
+                        result = await evaluator.evaluate_briefs(
+                            briefs=briefs,
+                            uid_account_mappings=uid_mappings,
+                            connected_accounts={'test_user'},
+                            metagraph=Mock(),
+                            run_id="test_run"
+                        )
+
+        scores = result.results[42].aggregated_scores
+        # Both briefs pay out: one tweet each, so each brief's single slot is full.
+        assert abs(scores['brief_a'] - 7000 / EMISSIONS_PERIOD) < 0.01
+        assert abs(scores['brief_b'] - 700 / EMISSIONS_PERIOD) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_evaluate_briefs_snapshot_tweet_excluded_from_assignment(self, mock_alpha_price):
+        """A tweet frozen in one brief's snapshot can't be reassigned to another."""
+        evaluator = TwitterEvaluator()
+
+        briefs = [
+            {'id': 'frozen_brief', 'pool': 'tao', 'budget': 7000, 'brief': 'Test', 'prompt_version': 1},
+            {'id': 'fresh_brief', 'pool': 'tao', 'budget': 7000, 'brief': 'Test', 'prompt_version': 1},
+        ]
+        uid_mappings = [{'account_username': 'test_user', 'uid': 42}]
+
+        # frozen_brief already has a snapshot committing tweet '123'.
+        snapshot = {
+            'brief_id': 'frozen_brief',
+            'pool_name': 'tao',
+            'tweet_rewards': [{
+                'tweet_id': '123', 'author': 'test_user', 'uid': 42,
+                'total_usd': 7000.0, 'score': 0.5,
+            }],
+        }
+
+        def fake_load(brief_id, pool_name):
+            if brief_id == 'frozen_brief':
+                return snapshot, '/snap/frozen.json'
+            raise FileNotFoundError()
+
+        scored_tweets = [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5}]
+        filtered_tweets = [{'author': 'test_user', 'tweet_id': '123', 'score': 0.5, 'meets_brief': True}]
+
+        # The frozen-brief path republishes via _convert_snapshot_to_tweets_with_targets,
+        # which uses the module-level pricing binding; patch it there.
+        with patch('bitcast.validator.reward_engine.twitter_evaluator.get_bitcast_alpha_price', return_value=0.01):
+            with patch.object(evaluator, '_score_tweets_for_brief', return_value=scored_tweets):
+                with patch.object(evaluator, '_filter_tweets_for_brief', return_value=filtered_tweets):
+                    with patch('bitcast.validator.reward_engine.twitter_evaluator.save_reward_snapshot'):
+                        with patch('bitcast.validator.reward_engine.twitter_evaluator.load_reward_snapshot', side_effect=fake_load):
+                            result = await evaluator.evaluate_briefs(
+                                briefs=briefs,
+                                uid_account_mappings=uid_mappings,
+                                connected_accounts={'test_user'},
+                                metagraph=Mock(),
+                                run_id="test_run"
+                            )
+
+        scores = result.results[42].aggregated_scores
+        # Tweet stays with the frozen brief; the fresh brief gets nothing.
+        assert 'frozen_brief' in scores
+        assert 'fresh_brief' not in scores
+
     def test_calculate_tweet_targets(self, mock_alpha_price):
         """Test _calculate_tweet_targets method with power law smoothing."""
         evaluator = TwitterEvaluator()

@@ -31,7 +31,8 @@ from bitcast.validator.reward_engine.utils import (
     publish_brief_tweets,
     create_tweet_payload,
     save_reward_snapshot,
-    load_reward_snapshot
+    load_reward_snapshot,
+    assign_tweets_to_briefs
 )
 from bitcast.validator.tweet_bonus.performance_bonus import calculate_performance_bonus
 from bitcast.validator.tweet_bonus.featured_tweet import select_featured_tweet, apply_featured_tweet_bonus
@@ -205,226 +206,61 @@ class TwitterEvaluator(ScanBasedEvaluator):
         
         bt.logging.debug(f"Account mappings: {len(account_to_uid)} accounts → {len(uid_to_accounts)} unique UIDs")
         
-        # Process each brief
+        # A single tweet can pass the filter for several briefs, but each tweet
+        # may only be rewarded once. Rewards are therefore computed in three
+        # phases so the one-to-one assignment can see all briefs at once:
+        #   1. Gather    - score + filter every first-run brief; finalize briefs
+        #                  already frozen in a snapshot and lock their tweets.
+        #   2. Assign    - greedily route each tweet to exactly one brief.
+        #   3. Finalize  - calculate rewards / snapshot / publish per brief on its
+        #                  assigned tweets only.
         brief_scores_by_uid = {}  # {uid: {brief_id: usd_amount}}
         contributing_accounts = {}  # {uid: set of account_usernames that actually tweeted}
-        
+
+        # Phase 1: Gather.
+        committed_tweet_ids = set()  # tweet ids frozen into existing snapshots
+        pending_candidates = []  # first-run briefs awaiting assignment
         for brief in briefs:
             brief_id = brief['id']
             pool_name = brief['pool']
-            tag = brief.get('tag')  # Optional
-            qrt = brief.get('qrt')  # Optional
-            inclusion_keywords = brief.get('inclusion_keywords')  # Optional
-            budget = brief.get('budget', 0)
-            
-            # Parse brief dates
-            start_date = parse_brief_date(brief.get('start_date'))
-            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
-            
-            bt.logging.info(f"📝 Brief {brief_id}: pool={pool_name}, budget=${budget}")
-            
-            # Try to load reward snapshot first
+            bt.logging.info(f"📝 Brief {brief_id}: pool={pool_name}, budget=${brief.get('budget', 0)}")
+
             try:
-                snapshot_data, snapshot_file = load_reward_snapshot(brief_id, pool_name)
-                tweet_rewards = snapshot_data['tweet_rewards']
-                bt.logging.info(f"📸 Using reward snapshot for brief {brief_id} ({len(tweet_rewards)} tweets)")
-                
-                # Aggregate to UID level and convert to daily payouts
-                uid_total_targets = {}
-                uid_to_authors = {}
-                for tweet in tweet_rewards:
-                    uid = tweet['uid']
-                    uid_total_targets[uid] = uid_total_targets.get(uid, 0.0) + tweet['total_usd']
-                    uid_to_authors.setdefault(uid, set()).add(tweet['author'])
-                
-                daily_budget = budget / EMISSIONS_PERIOD
-                usd_targets = {uid: total / EMISSIONS_PERIOD for uid, total in uid_total_targets.items()}
-                
-                # Store results and track contributing accounts
-                for uid, usd_amount in usd_targets.items():
-                    if uid not in brief_scores_by_uid:
-                        brief_scores_by_uid[uid] = {}
-                    brief_scores_by_uid[uid][brief_id] = usd_amount
-                    contributing_accounts[uid] = contributing_accounts.get(uid, set()) | uid_to_authors[uid]
-                
-                bt.logging.info(f"  → ${daily_budget:.2f}/day distributed to {len(usd_targets)} UIDs (from snapshot)")
-                
-                # Log USD rewards by account
-                self._log_usd_rewards_by_account(tweet_rewards, account_to_uid, brief_id)
-                
-                # Convert snapshot to publishing format and publish
-                tweets_with_targets = self._convert_snapshot_to_tweets_with_targets(tweet_rewards)
-                featured_selection = select_featured_tweet([], brief, pool_name)
-                await self._publish_brief_tweets(
-                    brief_id=brief_id,
-                    brief=brief,
-                    tweets_with_targets=tweets_with_targets,
-                    usd_targets=usd_targets,
-                    run_id=run_id,
-                    featured_selection=featured_selection,
-                )
-                
-                continue
-                
+                snapshot_data, _ = load_reward_snapshot(brief_id, pool_name)
             except FileNotFoundError:
-                # No snapshot - this is first emission run, calculate and save
-                bt.logging.info(f"🔍 First emission run for brief {brief_id} - calculating rewards")
-            
-            # First emission run: score, filter, calculate, and save snapshot
-            try:
-                # Extract brief-level configuration
-                brief_max_members = brief.get('max_members')
+                snapshot_data = None
 
-                # Step 1: Score tweets
-                scored_tweets = self._score_tweets_for_brief(
-                    pool_name=pool_name,
-                    brief_id=brief_id,
-                    connected_accounts=connected_accounts,
-                    tag=tag,
-                    qrt=qrt,
-                    inclusion_keywords=inclusion_keywords,
-                    run_id=run_id,
-                    start_date=start_date,
-                    end_date=end_date,
-                    max_members=brief_max_members,
-                    thorough=thorough,
+            if snapshot_data is not None:
+                # Already frozen on a previous run: finalize from snapshot and
+                # lock its tweets so they cannot be reassigned elsewhere.
+                committed_tweet_ids |= await self._process_snapshot_brief(
+                    brief, snapshot_data, account_to_uid,
+                    brief_scores_by_uid, contributing_accounts, run_id
                 )
-                
-                if not scored_tweets:
-                    bt.logging.warning(f"No scored tweets for brief {brief_id}")
-                    continue
-                
-                bt.logging.debug(f"Scored {len(scored_tweets)} tweets for brief {brief_id}")
-                
-                # Step 2: Filter tweets by brief criteria (includes max_tweets)
-                all_evaluated_tweets = self._filter_tweets_for_brief(
-                    scored_tweets=scored_tweets,
-                    brief=brief,
-                    run_id=run_id,
-                    max_tweets=brief.get('max_tweets')
-                )
-                filtered_tweets = [t for t in all_evaluated_tweets if t.get('meets_brief', False)]
-
-                if not filtered_tweets:
-                    bt.logging.warning(f"No tweets passed filtering for brief {brief_id}")
-                    continue
-
-                bt.logging.info(f"  → {len(filtered_tweets)} tweets passed filtering")
-
-                # Step 3: Apply performance bonus (passed tweets only)
-                filtered_tweets = self._apply_performance_bonus(
-                    filtered_tweets, pool_name, brief_id
-                )
-
-                # Step 3b: Apply featured tweet bonus
-                featured_selection = select_featured_tweet(filtered_tweets, brief, pool_name)
-                if featured_selection:
-                    tweet_discovery = self._create_tweet_discovery(pool_name, connected_accounts)
-                    if tweet_discovery:
-                        filtered_tweets = apply_featured_tweet_bonus(
-                            filtered_tweets, featured_selection, tweet_discovery, pool_name, brief_id
-                        )
-
-                # Step 4: Calculate USD/alpha targets per tweet
-                daily_budget = budget / EMISSIONS_PERIOD
-                tweets_with_targets = self._calculate_tweet_targets(
-                    filtered_tweets=filtered_tweets,
-                    daily_budget=daily_budget,
-                    brief_id=brief_id
-                )
-                
-                # Step 4: Aggregate targets to UID level
-                usd_targets = self._aggregate_targets_to_uids(
-                    tweets_with_targets=tweets_with_targets,
-                    account_to_uid=account_to_uid
-                )
-                
-                if not usd_targets:
-                    bt.logging.warning(f"No USD targets for brief {brief_id}")
-                    continue
-                
-                # Build tweet-level reward data for snapshot
-                tweet_rewards = []
-                for tweet in tweets_with_targets:
-                    author = tweet.get('author')
-                    if not author:
-                        continue
-                    
-                    uid = account_to_uid.get(author, NOCODE_UID if SIMULATE_CONNECTIONS else None)
-                    if uid is None:
-                        continue
-                    
-                    tweet_rewards.append({
-                        'tweet_id': tweet.get('tweet_id'),
-                        'author': author,
-                        'uid': uid,
-                        'score': tweet.get('score', 0.0),
-                        'performance_bonus_pct': tweet.get('performance_bonus_pct', 0.0),
-                        'performance_bonus_breakdown': tweet.get('performance_bonus_breakdown'),
-                        'featured_tweet_bonus': tweet.get('featured_tweet_bonus', False),
-                        'total_usd': tweet.get('total_usd_target', 0.0),
-                        'text': tweet.get('text', ''),
-                        'favorite_count': tweet.get('favorite_count', 0),
-                        'retweet_count': tweet.get('retweet_count', 0),
-                        'reply_count': tweet.get('reply_count', 0),
-                        'quote_count': tweet.get('quote_count', 0),
-                        'bookmark_count': tweet.get('bookmark_count', 0),
-                        'views_count': tweet.get('views_count', 0),
-                        'retweets': tweet.get('retweets', []),
-                        'quotes': tweet.get('quotes', []),
-                        'created_at': tweet.get('created_at', ''),
-                        'lang': tweet.get('lang', 'und'),
-                        'author_influence': tweet.get('author_influence'),
-                        'baseline_score': tweet.get('baseline_score'),
-                        'score_breakdown': tweet.get('score_breakdown')
-                    })
-                    
-                    # Track contributing accounts
-                    if uid in usd_targets:
-                        contributing_accounts.setdefault(uid, set()).add(author)
-                
-                # Save reward snapshot with tweet-level granularity
-                snapshot_data = {
-                    'brief_id': brief_id,
-                    'pool_name': pool_name,
-                    'created_at': datetime.now(timezone.utc).isoformat(),
-                    'tweet_rewards': tweet_rewards
-                }
-                
-                try:
-                    snapshot_file = save_reward_snapshot(brief_id, pool_name, snapshot_data)
-                    bt.logging.info(f"💾 Saved reward snapshot: {len(tweet_rewards)} tweets → {snapshot_file}")
-                    self._log_usd_rewards_by_account(tweet_rewards, account_to_uid, brief_id)
-                except Exception as e:
-                    bt.logging.error(f"Failed to save reward snapshot: {e}")
-                
-                # Store UID-level results
-                for uid, usd_amount in usd_targets.items():
-                    if uid not in brief_scores_by_uid:
-                        brief_scores_by_uid[uid] = {}
-                    brief_scores_by_uid[uid][brief_id] = usd_amount
-                
-                bt.logging.info(f"  → ${daily_budget:.2f}/day distributed to {len(usd_targets)} UIDs")
-                
-                # Log top 3 tweets by score for this brief
-                self._log_top_tweets(tweets_with_targets, brief_id)
-                
-                # Step 5: Publish all evaluated tweets (passed with targets + failed with 0 targets)
-                failed_tweets = [t for t in all_evaluated_tweets if not t.get('meets_brief', False)]
-                all_tweets_for_publish = tweets_with_targets + failed_tweets
-                await self._publish_brief_tweets(
-                    brief_id=brief_id,
-                    brief=brief,
-                    tweets_with_targets=all_tweets_for_publish,
-                    usd_targets=usd_targets,
-                    run_id=run_id,
-                    featured_selection=featured_selection,
-                )
-                
-            except Exception as e:
-                bt.logging.error(f"Error processing brief {brief_id}: {e}", exc_info=True)
                 continue
-        
+
+            bt.logging.info(f"🔍 First emission run for brief {brief_id} - calculating rewards")
+            candidate = self._gather_first_run_candidate(
+                brief, connected_accounts, run_id, thorough
+            )
+            if candidate is not None:
+                pending_candidates.append(candidate)
+
+        # Phase 2: Assign each tweet to exactly one brief (greedy max-weight),
+        # respecting per-account max_tweets caps and tweets already snapshotted.
+        assignments = assign_tweets_to_briefs(
+            [c['assignment_input'] for c in pending_candidates],
+            committed_tweet_ids=committed_tweet_ids,
+        )
+
+        # Phase 3: Finalize first-run briefs on their assigned tweets.
+        for candidate in pending_candidates:
+            assigned_tweet_ids = assignments.get(candidate['brief']['id'], set())
+            await self._finalize_first_run_brief(
+                candidate, assigned_tweet_ids, connected_accounts,
+                account_to_uid, brief_scores_by_uid, contributing_accounts, run_id
+            )
+
         # Step 5: Create EvaluationResults for each UID
         for uid, brief_scores in brief_scores_by_uid.items():
             # Get accounts that actually contributed tweets (not all mapped accounts)
@@ -457,6 +293,304 @@ class TwitterEvaluator(ScanBasedEvaluator):
         bt.logging.info(f"🎯 Twitter evaluation complete: {len(collection.results)} UIDs evaluated")
         return collection
     
+    async def _process_snapshot_brief(
+        self,
+        brief: Dict[str, Any],
+        snapshot_data: Dict[str, Any],
+        account_to_uid: Dict[str, int],
+        brief_scores_by_uid: Dict[int, Dict[str, float]],
+        contributing_accounts: Dict[int, set],
+        run_id: Optional[str],
+    ) -> set:
+        """
+        Finalize a brief from its existing reward snapshot (stable daily payout).
+
+        Aggregates the frozen tweet rewards to UID-level daily targets, records
+        them, and republishes. Returns the set of tweet ids frozen by this
+        snapshot so they are excluded from this run's assignment.
+        """
+        brief_id = brief['id']
+        pool_name = brief['pool']
+        budget = brief.get('budget', 0)
+        tweet_rewards = snapshot_data['tweet_rewards']
+        bt.logging.info(f"📸 Using reward snapshot for brief {brief_id} ({len(tweet_rewards)} tweets)")
+
+        # Aggregate to UID level and convert to daily payouts
+        uid_total_targets = {}
+        uid_to_authors = {}
+        for tweet in tweet_rewards:
+            uid = tweet['uid']
+            uid_total_targets[uid] = uid_total_targets.get(uid, 0.0) + tweet['total_usd']
+            uid_to_authors.setdefault(uid, set()).add(tweet['author'])
+
+        daily_budget = budget / EMISSIONS_PERIOD
+        usd_targets = {uid: total / EMISSIONS_PERIOD for uid, total in uid_total_targets.items()}
+
+        # Store results and track contributing accounts
+        for uid, usd_amount in usd_targets.items():
+            brief_scores_by_uid.setdefault(uid, {})[brief_id] = usd_amount
+            contributing_accounts[uid] = contributing_accounts.get(uid, set()) | uid_to_authors[uid]
+
+        bt.logging.info(f"  → ${daily_budget:.2f}/day distributed to {len(usd_targets)} UIDs (from snapshot)")
+        self._log_usd_rewards_by_account(tweet_rewards, account_to_uid, brief_id)
+
+        # Convert snapshot to publishing format and publish
+        tweets_with_targets = self._convert_snapshot_to_tweets_with_targets(tweet_rewards)
+        featured_selection = select_featured_tweet([], brief, pool_name)
+        await self._publish_brief_tweets(
+            brief_id=brief_id,
+            brief=brief,
+            tweets_with_targets=tweets_with_targets,
+            usd_targets=usd_targets,
+            run_id=run_id,
+            featured_selection=featured_selection,
+        )
+
+        return {t['tweet_id'] for t in tweet_rewards if t.get('tweet_id')}
+
+    def _gather_first_run_candidate(
+        self,
+        brief: Dict[str, Any],
+        connected_accounts: set,
+        run_id: Optional[str],
+        thorough: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Score and filter a first-run brief, returning its assignment candidate.
+
+        Runs scoring and LLM filtering only. Bonuses and reward calculation are
+        deferred to finalize, once each tweet has been assigned to a single brief,
+        because they depend on the final rewarded set. Returns None if no tweets
+        pass the filter (nothing to assign or reward) or if scoring/filtering errors.
+
+        NOTE: max_tweets is intentionally NOT applied here. The per-account cap is
+        enforced jointly with one-to-one dedup in assign_tweets_to_briefs(), so the
+        full set of passing tweets is offered as assignment candidates.
+        """
+        brief_id = brief['id']
+        pool_name = brief['pool']
+        try:
+            start_date = parse_brief_date(brief.get('start_date'))
+            end_date = parse_brief_date(brief.get('end_date'), end_of_day=True)
+
+            # Step 1: Score tweets
+            scored_tweets = self._score_tweets_for_brief(
+                pool_name=pool_name,
+                brief_id=brief_id,
+                connected_accounts=connected_accounts,
+                tag=brief.get('tag'),
+                qrt=brief.get('qrt'),
+                inclusion_keywords=brief.get('inclusion_keywords'),
+                run_id=run_id,
+                start_date=start_date,
+                end_date=end_date,
+                max_members=brief.get('max_members'),
+                thorough=thorough,
+            )
+            if not scored_tweets:
+                bt.logging.warning(f"No scored tweets for brief {brief_id}")
+                return None
+
+            bt.logging.debug(f"Scored {len(scored_tweets)} tweets for brief {brief_id}")
+
+            # Step 2: Filter by brief criteria. max_tweets is deferred to assignment.
+            all_evaluated_tweets = self._filter_tweets_for_brief(
+                scored_tweets=scored_tweets,
+                brief=brief,
+                run_id=run_id,
+                max_tweets=None,
+            )
+            passed_tweets = [t for t in all_evaluated_tweets if t.get('meets_brief', False)]
+            if not passed_tweets:
+                bt.logging.warning(f"No tweets passed filtering for brief {brief_id}")
+                return None
+
+            bt.logging.info(f"  → {len(passed_tweets)} tweets passed filtering")
+
+            # NOTE: the performance and featured-tweet bonuses are deliberately
+            # NOT applied here. Both are computed relative to the set of tweets
+            # rewarded under the brief, so they're applied in finalize on the
+            # assigned subset. Assignment therefore ranks on raw scores; the
+            # bonuses are small relative to budget and don't change routing.
+            daily_budget = brief.get('budget', 0) / EMISSIONS_PERIOD
+            return {
+                'brief': brief,
+                'pool_name': pool_name,
+                'daily_budget': daily_budget,
+                'passed_tweets': passed_tweets,
+                'all_evaluated_tweets': all_evaluated_tweets,
+                'assignment_input': {
+                    'brief_id': brief_id,
+                    'daily_budget': daily_budget,
+                    'max_tweets': brief.get('max_tweets'),
+                    'tweets': passed_tweets,
+                },
+            }
+        except Exception as e:
+            bt.logging.error(f"Error processing brief {brief_id}: {e}", exc_info=True)
+            return None
+
+    async def _finalize_first_run_brief(
+        self,
+        candidate: Dict[str, Any],
+        assigned_tweet_ids: set,
+        connected_accounts: set,
+        account_to_uid: Dict[str, int],
+        brief_scores_by_uid: Dict[int, Dict[str, float]],
+        contributing_accounts: Dict[int, set],
+        run_id: Optional[str],
+    ) -> None:
+        """
+        Calculate rewards, snapshot and publish a first-run brief.
+
+        Operates only on the tweets assigned to this brief. Tweets that passed the
+        filter but were assigned to another brief are published with no reward for
+        this brief (alongside tweets that failed the filter) so the monitoring view
+        stays complete.
+        """
+        brief = candidate['brief']
+        brief_id = brief['id']
+        pool_name = candidate['pool_name']
+        daily_budget = candidate['daily_budget']
+        passed_tweets = candidate['passed_tweets']
+        all_evaluated_tweets = candidate['all_evaluated_tweets']
+
+        try:
+            assigned_tweets = [t for t in passed_tweets if t.get('tweet_id') in assigned_tweet_ids]
+
+            # Tweets shown with no reward for this brief: passed-but-assigned-
+            # elsewhere, plus those that failed the filter.
+            unrewarded_tweets = (
+                [t for t in passed_tweets if t.get('tweet_id') not in assigned_tweet_ids]
+                + [t for t in all_evaluated_tweets if not t.get('meets_brief', False)]
+            )
+
+            if not assigned_tweets:
+                bt.logging.info(f"  → Brief {brief_id}: no tweets assigned after dedup")
+                await self._publish_brief_tweets(
+                    brief_id=brief_id,
+                    brief=brief,
+                    tweets_with_targets=unrewarded_tweets,
+                    usd_targets={},
+                    run_id=run_id,
+                    featured_selection=None,
+                )
+                return
+
+            bt.logging.info(f"  → {len(assigned_tweets)} tweets assigned to brief {brief_id}")
+
+            # Bonuses are computed relative to the rewarded set, so they run here
+            # on the assigned subset (not on the pre-assignment candidate pool).
+            # Performance bonus first (it adjusts scores), then featured tweet.
+            assigned_tweets = self._apply_performance_bonus(assigned_tweets, pool_name, brief_id)
+
+            featured_selection = select_featured_tweet(assigned_tweets, brief, pool_name)
+            if featured_selection:
+                tweet_discovery = self._create_tweet_discovery(pool_name, connected_accounts)
+                if tweet_discovery:
+                    assigned_tweets = apply_featured_tweet_bonus(
+                        assigned_tweets, featured_selection, tweet_discovery, pool_name, brief_id
+                    )
+
+            # Calculate USD/alpha targets, then aggregate to UID level.
+            tweets_with_targets = self._calculate_tweet_targets(
+                filtered_tweets=assigned_tweets,
+                daily_budget=daily_budget,
+                brief_id=brief_id,
+            )
+            usd_targets = self._aggregate_targets_to_uids(
+                tweets_with_targets=tweets_with_targets,
+                account_to_uid=account_to_uid,
+            )
+
+            if not usd_targets:
+                # Assigned tweets resolved to no rewardable UID. Don't freeze an
+                # empty snapshot - let it recompute on the next run.
+                bt.logging.warning(f"No USD targets for brief {brief_id}")
+                return
+
+            # Build tweet-level reward data and persist the snapshot.
+            tweet_rewards = self._build_tweet_rewards(tweets_with_targets, account_to_uid)
+            for reward in tweet_rewards:
+                if reward['uid'] in usd_targets:
+                    contributing_accounts.setdefault(reward['uid'], set()).add(reward['author'])
+
+            snapshot_data = {
+                'brief_id': brief_id,
+                'pool_name': pool_name,
+                'created_at': datetime.now(timezone.utc).isoformat(),
+                'tweet_rewards': tweet_rewards
+            }
+            try:
+                snapshot_file = save_reward_snapshot(brief_id, pool_name, snapshot_data)
+                bt.logging.info(f"💾 Saved reward snapshot: {len(tweet_rewards)} tweets → {snapshot_file}")
+                self._log_usd_rewards_by_account(tweet_rewards, account_to_uid, brief_id)
+            except Exception as e:
+                bt.logging.error(f"Failed to save reward snapshot: {e}")
+
+            # Store UID-level results
+            for uid, usd_amount in usd_targets.items():
+                brief_scores_by_uid.setdefault(uid, {})[brief_id] = usd_amount
+
+            bt.logging.info(f"  → ${daily_budget:.2f}/day distributed to {len(usd_targets)} UIDs")
+            self._log_top_tweets(tweets_with_targets, brief_id)
+
+            # Publish all evaluated tweets (assigned with targets + the rest at 0).
+            await self._publish_brief_tweets(
+                brief_id=brief_id,
+                brief=brief,
+                tweets_with_targets=tweets_with_targets + unrewarded_tweets,
+                usd_targets=usd_targets,
+                run_id=run_id,
+                featured_selection=featured_selection,
+            )
+
+        except Exception as e:
+            bt.logging.error(f"Error finalizing brief {brief_id}: {e}", exc_info=True)
+
+    def _build_tweet_rewards(
+        self,
+        tweets_with_targets: List[Dict],
+        account_to_uid: Dict[str, int],
+    ) -> List[Dict]:
+        """Build UID-resolved tweet-level reward records for the snapshot."""
+        tweet_rewards = []
+        for tweet in tweets_with_targets:
+            author = tweet.get('author')
+            if not author:
+                continue
+
+            uid = account_to_uid.get(author, NOCODE_UID if SIMULATE_CONNECTIONS else None)
+            if uid is None:
+                continue
+
+            tweet_rewards.append({
+                'tweet_id': tweet.get('tweet_id'),
+                'author': author,
+                'uid': uid,
+                'score': tweet.get('score', 0.0),
+                'performance_bonus_pct': tweet.get('performance_bonus_pct', 0.0),
+                'performance_bonus_breakdown': tweet.get('performance_bonus_breakdown'),
+                'featured_tweet_bonus': tweet.get('featured_tweet_bonus', False),
+                'total_usd': tweet.get('total_usd_target', 0.0),
+                'text': tweet.get('text', ''),
+                'favorite_count': tweet.get('favorite_count', 0),
+                'retweet_count': tweet.get('retweet_count', 0),
+                'reply_count': tweet.get('reply_count', 0),
+                'quote_count': tweet.get('quote_count', 0),
+                'bookmark_count': tweet.get('bookmark_count', 0),
+                'views_count': tweet.get('views_count', 0),
+                'retweets': tweet.get('retweets', []),
+                'quotes': tweet.get('quotes', []),
+                'created_at': tweet.get('created_at', ''),
+                'lang': tweet.get('lang', 'und'),
+                'author_influence': tweet.get('author_influence'),
+                'baseline_score': tweet.get('baseline_score'),
+                'score_breakdown': tweet.get('score_breakdown')
+            })
+
+        return tweet_rewards
+
     def _score_tweets_for_brief(
         self,
         pool_name: str,
