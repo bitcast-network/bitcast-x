@@ -13,6 +13,7 @@ from .reward_snapshot import (
     save_reward_snapshot,
     load_reward_snapshot
 )
+from .tweet_brief_assignment import assign_tweets_to_briefs
 
 __all__ = [
     "get_briefs",
@@ -22,5 +23,6 @@ __all__ = [
     "create_tweet_payload",
     "save_reward_snapshot",
     "load_reward_snapshot",
+    "assign_tweets_to_briefs",
 ]
 
