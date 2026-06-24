@@ -315,8 +315,18 @@ def score_tweets_for_pool(
     # Step 5: Get engagements and score tweets
     bt.logging.info("Retrieving engagements and scoring tweets")
     
-    # Exclude brief participants from contributing to each other's scores
-    excluded_engagers = {m.lower() for m in active_members}
+    # Score every tweet using engagement from ALL considered accounts. Only the
+    # tweet's own author is excluded here (self-engagement, handled inside
+    # _build_engagements_from_store).
+    #
+    # Participant exclusion — dropping engagement from accounts that themselves
+    # earn in this brief — is intentionally NOT applied at this stage. Whether an
+    # account "participates" depends on which tweets pass brief (LLM) filtering,
+    # which only runs AFTER scoring. Excluding all active members here (the old
+    # behaviour) wrongly discarded engagement from connected, high-influence
+    # accounts whose own tweets never passed the brief. The participant exclusion
+    # is now applied in the filtering stage once passing authors are known
+    # (see tweet_filtering.tweet_filter._exclude_participant_engagement).
     
     # Initialize score calculator
     calculator = ScoreCalculator(
@@ -327,10 +337,9 @@ def score_tweets_for_pool(
     
     score_start = time.time()
     
-    # Fetch all engagements concurrently
+    # Fetch all engagements concurrently (no participant exclusion at this stage)
     all_engagements = discovery.get_engagements_batch(
         tweets=filtered_tweets,
-        excluded_engagers=excluded_engagers
     )
     
     # Score each tweet using pre-fetched engagements

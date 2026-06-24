@@ -141,6 +141,86 @@ def apply_max_tweets_filter(
     return limited_tweets
 
 
+def _exclude_participant_engagement(evaluated_tweets: List[Dict]) -> None:
+    """Drop engagement from accounts that themselves earn in this brief.
+
+    An account is a brief "participant" only if it has at least one tweet that
+    passed brief filtering (``meets_brief``). Engagement (RT/QRT) from such
+    accounts must not contribute to other tweets' scores, preventing miners who
+    are already being rewarded from boosting each other. Engagement from
+    non-participating accounts — even connected, high-influence ones — still
+    counts.
+
+    This runs after LLM evaluation (the only point where participation is known)
+    and mutates ``evaluated_tweets`` in place. For each tweet it removes the
+    contributions of participant engagers from ``score``, ``score_breakdown`` and
+    the ``retweets``/``quotes`` display lists. A tweet's own author is never in
+    its own breakdown, so an author's self-participation never affects their own
+    score here.
+
+    Scores are recomputed as ``baseline_score + Σ(remaining contributions)`` so
+    the result exactly matches scoring with the correct exclusion set, with no
+    additional API calls or LLM evaluations.
+    """
+    passing_authors = {
+        t.get('author', '').lower()
+        for t in evaluated_tweets
+        if t.get('meets_brief', False) and t.get('author')
+    }
+    if not passing_authors:
+        return
+
+    adjusted = 0
+    for tweet in evaluated_tweets:
+        breakdown = tweet.get('score_breakdown')
+        if not breakdown:
+            continue
+
+        removed_users = {
+            entry.get('u', '').lower()
+            for entry in breakdown
+            if entry.get('u', '').lower() in passing_authors
+        }
+        if not removed_users:
+            continue
+
+        remaining = [
+            entry for entry in breakdown
+            if entry.get('u', '').lower() not in removed_users
+        ]
+
+        # Recompute from baseline to avoid floating-point drift.
+        baseline = tweet.get('baseline_score')
+        if baseline is None:
+            removed_contribution = sum(
+                entry.get('c', 0.0) for entry in breakdown
+                if entry.get('u', '').lower() in removed_users
+            )
+            tweet['score'] = round(tweet.get('score', 0.0) - removed_contribution, 6)
+        else:
+            tweet['score'] = round(
+                baseline + sum(entry.get('c', 0.0) for entry in remaining), 6
+            )
+
+        tweet['score_breakdown'] = remaining
+        if 'retweets' in tweet:
+            tweet['retweets'] = [
+                u for u in tweet['retweets'] if u.lower() not in removed_users
+            ]
+        if 'quotes' in tweet:
+            tweet['quotes'] = [
+                u for u in tweet['quotes'] if u.lower() not in removed_users
+            ]
+        adjusted += 1
+
+    if adjusted:
+        bt.logging.info(
+            f"Participant engagement exclusion: adjusted scores for {adjusted} "
+            f"tweet(s) (engagement from {len(passing_authors)} participating "
+            f"account(s) excluded)"
+        )
+
+
 def filter_tweets_for_brief(
     brief_id: str,
     brief_text: str,
@@ -244,6 +324,12 @@ def filter_tweets_for_brief(
     
     evaluation_time = time.time() - evaluation_start
     bt.logging.debug(f"Evaluation complete in {evaluation_time:.1f}s")
+    
+    # Step 3b: Exclude engagement from accounts that earn in this brief.
+    # Engagement was scored for all considered accounts; only accounts with an
+    # accepted (passing) tweet are excluded. Must run after evaluation, before
+    # any score-based ranking (max_tweets) or reward calculation.
+    _exclude_participant_engagement(filtered_tweets)
     
     # Step 4: Separate passed and failed tweets
     bt.logging.debug("Analyzing results")
