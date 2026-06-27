@@ -25,13 +25,24 @@ from bitcast.validator.utils.config import (
     PAGERANK_ALPHA,
     SOCIAL_DISCOVERY_MAX_WORKERS,
     SOCIAL_DISCOVERY_LOOKBACK,
-    SOCIAL_DISCOVERY_FETCH_DAYS
+    SOCIAL_DISCOVERY_FETCH_DAYS,
+    MIN_RELEVANT_TWEETS,
+    AI_SCORE_CAP,
+    AI_MAX_ACCOUNTS_CHECKED,
 )
 from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
 from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
+from bitcast.validator.utils.relevance import smoothed_relevance_ratio, passes_relevance_gate
+
+# Synthetic sink node that absorbs leaked outgoing influence from AI accounts.
+AI_SINK_NODE = "__ai_sink__"
 
 # Reference date for social discovery scheduling
 DISCOVERY_REFERENCE_DATE = date(2025, 11, 9)
+# Length of the bi-weekly discovery cycle. Also used to bucket AI-detection
+# sampling so the seed is stable for a whole cycle (consensus determinism),
+# rather than rotating daily.
+DISCOVERY_CYCLE_DAYS = 14
 
 
 class TwitterNetworkAnalyzer:
@@ -91,7 +102,120 @@ class TwitterNetworkAnalyzer:
             bt.logging.info(f"Concurrent mode enabled with {self.max_workers} workers")
         else:
             bt.logging.info("Sequential mode (concurrency disabled)")
-    
+
+        # Populated by analyze_network for the most recent run (social discovery v2).
+        # Exposed as attributes rather than return values to preserve the 6-tuple
+        # return signature relied on by existing callers.
+        self.relevance_scores: Dict[str, float] = {}
+        self.ai_scores: Dict[str, float] = {}
+
+    def _compute_relevance_gradient(
+        self,
+        usernames: Set[str],
+        keywords: List[str],
+        lang: Optional[str],
+        min_relevance_ratio: float,
+        skip_if_fresh: bool,
+    ) -> Tuple[Set[str], Dict[str, float]]:
+        """Compute the smoothed on-topic ratio per account and apply the inclusion gate.
+
+        Returns:
+            Tuple of (relevant_users, relevance_ratio_map) where relevant_users are
+            the accounts that clear the gate and the map holds every account's
+            smoothed ratio (used as the PageRank personalization vector).
+        """
+        def counts_safe(username: str) -> Tuple[str, int, int]:
+            try:
+                relevant, total = self.twitter_client.compute_user_relevance_counts(
+                    username, keywords, lang, skip_if_cache_fresh=skip_if_fresh
+                )
+                return username, relevant, total
+            except Exception as e:
+                bt.logging.warning(f"Relevance counts failed for @{username}: {e}")
+                return username, 0, 0
+
+        results = []
+        if self.max_workers > 1:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {executor.submit(counts_safe, u): u for u in usernames}
+                for future in as_completed(futures):
+                    results.append(future.result())
+        else:
+            results = [counts_safe(u) for u in usernames]
+
+        relevant_users: Set[str] = set()
+        relevance_ratio: Dict[str, float] = {}
+        for username, relevant, total in results:
+            ratio = smoothed_relevance_ratio(relevant, total)
+            relevance_ratio[username] = ratio
+            if passes_relevance_gate(relevant, ratio, min_relevance_ratio, MIN_RELEVANT_TWEETS):
+                relevant_users.add(username)
+
+        return relevant_users, relevance_ratio
+
+    def _select_ai_check_candidates(
+        self,
+        all_users: Set[str],
+        interaction_weights: Dict[Tuple[str, str], float],
+        max_checks: int,
+    ) -> Set[str]:
+        """Pick which accounts to AI-check when a cap is configured.
+
+        Only the top ``max_checks`` accounts by total (in+out) interaction weight
+        are scored; the rest are assumed human (no dampening). Tie-break is by
+        username so every validator selects the identical set from the same graph.
+        ``max_checks <= 0`` means unlimited.
+        """
+        if not max_checks or max_checks <= 0 or len(all_users) <= max_checks:
+            return set(all_users)
+
+        weight_by_user: Dict[str, float] = {user: 0.0 for user in all_users}
+        for (from_user, to_user), weight in interaction_weights.items():
+            if from_user in weight_by_user:
+                weight_by_user[from_user] += weight
+            if to_user in weight_by_user:
+                weight_by_user[to_user] += weight
+
+        ranked = sorted(all_users, key=lambda u: (-weight_by_user.get(u, 0.0), u))
+        selected = set(ranked[:max_checks])
+        bt.logging.info(
+            f"AI dampening: checking top {len(selected)}/{len(all_users)} accounts by "
+            f"interaction weight ({len(all_users) - len(selected)} assumed human, not checked)"
+        )
+        return selected
+
+    def _compute_ai_scores_for(self, usernames: Set[str]) -> Dict[str, float]:
+        """Compute per-account AI scores (lazy import to avoid any import cycle)."""
+        from bitcast.validator.social_discovery import ai_detection
+        return ai_detection.compute_ai_scores(usernames)
+
+    def _apply_ai_sink(self, G: nx.DiGraph, ai_scores: Dict[str, float]) -> bool:
+        """Add sink edges that leak each AI account's outgoing influence.
+
+        For an account A with AI score ``ai`` and existing out-edge weight ``W``,
+        an edge A -> SINK of weight ``W * ai/(1-ai)`` makes A's real targets keep
+        transition share ``(1 - ai)`` after PageRank row-normalization, leaking the
+        rest to the (dangling) sink. Naive scaling of A's out-edges would be a no-op
+        because the row renormalizes — the sink is what makes the dampening real.
+
+        Returns True if any sink edge was added.
+        """
+        added = 0
+        for node in list(G.nodes()):
+            ai = ai_scores.get(node, 0.0) or 0.0
+            if ai <= 0:
+                continue
+            out_weight = sum(d.get('weight', 0.0) for _, _, d in G.out_edges(node, data=True))
+            if out_weight <= 0:
+                continue
+            ai_capped = min(ai, AI_SCORE_CAP)
+            w_sink = out_weight * ai_capped / (1.0 - ai_capped)
+            G.add_edge(node, AI_SINK_NODE, weight=w_sink)
+            added += 1
+        if added:
+            bt.logging.info(f"AI dampening: leaked outgoing influence to sink for {added} accounts")
+        return added > 0
+
     def _fetch_tweets_safe(self, username: str, skip_if_cache_fresh: Optional[bool] = None) -> Tuple[str, List[Dict], Dict, Optional[str]]:
         """
         Fetch tweets for a user with error handling.
@@ -149,7 +273,11 @@ class TwitterNetworkAnalyzer:
         min_interaction_weight: float = 0,
         core_accounts: Optional[Set[str]] = None,
         use_personalized_pagerank: bool = False,
-        skip_if_cache_fresh: Optional[bool] = None
+        skip_if_cache_fresh: Optional[bool] = None,
+        relevance_gradient: bool = False,
+        min_relevance_ratio: float = 0.0,
+        ai_dampening: bool = False,
+        ai_scores: Optional[Dict[str, float]] = None,
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
@@ -175,7 +303,16 @@ class TwitterNetworkAnalyzer:
                                       PageRank biased toward core accounts instead of standard PageRank.
             skip_if_cache_fresh: If provided, overrides the instance's skip_if_cache_fresh setting
                                 for this analyze_network call only.
-            
+            relevance_gradient: If True (v2), replace the boolean keyword-count relevance gate
+                               with a continuous smoothed on-topic ratio used both as an inclusion
+                               gate (min_relevance_ratio) and the PageRank personalization vector.
+                               Populates self.relevance_scores.
+            min_relevance_ratio: Inclusion floor on the smoothed ratio (used with relevance_gradient).
+            ai_dampening: If True (v2), dampen each account's outgoing PageRank influence in
+                         proportion to its AI score via a sink node. Populates self.ai_scores.
+            ai_scores: Optional precomputed {username: ai_score} map (injectable for tests/determinism).
+                      When None and ai_dampening is True, scores are computed internally.
+
         Returns:
             Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
             - scores_dict: Absolute influence scores (PageRank × pool_difficulty / 1000)
@@ -185,6 +322,10 @@ class TwitterNetworkAnalyzer:
         """
         start_time = time.time()
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
+
+        # Reset per-run v2 outputs (exposed as instance attributes).
+        self.relevance_scores = {}
+        self.ai_scores = {}
 
         # Relax params when seed count is low to bootstrap discovery
         if len(seed_accounts) < 20:
@@ -352,9 +493,18 @@ class TwitterNetworkAnalyzer:
             relevance_start = time.time()
             relevant_users = set()
             all_accounts_to_check = discovered_users | set(seed_accounts)
-            
-            if self.max_workers > 1:
-                # Concurrent relevance checking
+
+            if relevance_gradient:
+                # v2: continuous smoothed on-topic ratio + inclusion gate.
+                bt.logging.info(
+                    f"Computing relevance gradient (min_ratio={min_relevance_ratio:.3f}) "
+                    f"for {len(all_accounts_to_check)} accounts..."
+                )
+                relevant_users, self.relevance_scores = self._compute_relevance_gradient(
+                    all_accounts_to_check, keywords, lang, min_relevance_ratio, skip_if_fresh
+                )
+            elif self.max_workers > 1:
+                # Legacy: concurrent boolean relevance checking
                 bt.logging.info(f"Checking relevance concurrently ({self.max_workers} workers)...")
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
@@ -367,11 +517,11 @@ class TwitterNetworkAnalyzer:
                         if is_relevant:
                             relevant_users.add(username)
             else:
-                # Sequential relevance checking
+                # Legacy: sequential boolean relevance checking
                 for username in all_accounts_to_check:
                     if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets, skip_if_cache_fresh=skip_if_fresh):
                         relevant_users.add(username)
-            
+
             relevance_time = time.time() - relevance_start
             bt.logging.info(f"Relevance check completed in {relevance_time:.1f}s: {len(relevant_users)}/{len(all_accounts_to_check)} relevant")
             
@@ -449,25 +599,57 @@ class TwitterNetworkAnalyzer:
         G = nx.DiGraph()
         for (from_user, to_user), weight in interaction_weights.items():
             G.add_edge(from_user, to_user, weight=weight)
-        
-        if use_personalized_pagerank and core_accounts:
-            # Personalized PageRank biased toward core accounts
-            personalization = {
-                node: 1.0 if node in core_accounts else 0.0
-                for node in G.nodes()
-            }
+
+        # AI out-link dampening (v2): leak a fraction of each AI account's outgoing
+        # influence to a sink node so it cannot amplify its neighbours. To bound
+        # cost, only the top-N most influential accounts are checked (the rest are
+        # assumed human); unchecked accounts are recorded as absent (None) rather
+        # than 0.0 so audits can tell "not checked" from "checked, human".
+        sink_added = False
+        if ai_dampening:
+            if ai_scores is None:
+                candidates = self._select_ai_check_candidates(
+                    all_users, interaction_weights, AI_MAX_ACCOUNTS_CHECKED
+                )
+                ai_scores = self._compute_ai_scores_for(candidates)
+            self.ai_scores = dict(ai_scores)
+            sink_added = self._apply_ai_sink(G, ai_scores)
+
+        # Build the personalization vector. The relevance gradient (v2) takes
+        # precedence; otherwise fall back to legacy core-biased personalization.
+        personalization = None
+        if relevance_gradient and self.relevance_scores:
+            personalization = {node: self.relevance_scores.get(node, 0.0) for node in G.nodes()}
+            if sum(personalization.values()) <= 0:
+                personalization = None
+            else:
+                bt.logging.info("Using relevance-gradient personalization vector")
+        elif use_personalized_pagerank and core_accounts:
+            personalization = {node: 1.0 if node in core_accounts else 0.0 for node in G.nodes()}
             if sum(personalization.values()) > 0:
                 bt.logging.info(f"Using personalized PageRank biased toward {int(sum(personalization.values()))} core accounts")
-                pagerank_scores = nx.pagerank(
-                    G, weight='weight', alpha=self.alpha,
-                    personalization=personalization, max_iter=1000
-                )
             else:
                 bt.logging.warning("No core accounts found in graph, falling back to standard PageRank")
-                pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
-        else:
-            pagerank_scores = nx.pagerank(G, weight='weight', alpha=self.alpha, max_iter=1000)
-        
+                personalization = None
+
+        # When a sink is present, dangling-node mass must not flow back into the
+        # sink. Redistribute via the personalization vector when available (returns
+        # leaked influence to the on-topic population), else uniformly over real nodes.
+        dangling = None
+        if sink_added:
+            if personalization is not None:
+                dangling = personalization
+            else:
+                dangling = {node: (0.0 if node == AI_SINK_NODE else 1.0) for node in G.nodes()}
+
+        pagerank_scores = nx.pagerank(
+            G, weight='weight', alpha=self.alpha, max_iter=1000,
+            personalization=personalization, dangling=dangling,
+        )
+
+        # Drop the synthetic sink before scoring real accounts.
+        pagerank_scores.pop(AI_SINK_NODE, None)
+
         # Step 5: Calculate pool difficulty and absolute influence scores
         # Pool difficulty = total followers across all pool members
         # This allows comparing influence across pools with different difficulty levels
@@ -548,9 +730,9 @@ def should_run_discovery_today(date_offset: int = 0, reference_date: date = DISC
     today = datetime.now(timezone.utc).date()
     days_since_reference = (today - reference_date).days
     
-    # Apply offset and check if it's a discovery day (every 14 days)
+    # Apply offset and check if it's a discovery day (every DISCOVERY_CYCLE_DAYS days)
     adjusted_days = days_since_reference - date_offset
-    return adjusted_days >= 0 and adjusted_days % 14 == 0
+    return adjusted_days >= 0 and adjusted_days % DISCOVERY_CYCLE_DAYS == 0
 
 
 async def run_discovery_for_stale_pools() -> Dict[str, str]:

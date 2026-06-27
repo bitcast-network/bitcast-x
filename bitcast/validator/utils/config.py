@@ -104,6 +104,44 @@ CACHE_FRESHNESS_SECONDS = SOCIAL_DISCOVERY_CACHE_HOURS * 3600
 # Concurrency (1 = sequential, 2+ = concurrent)
 SOCIAL_DISCOVERY_MAX_WORKERS = 10
 
+# -----------------------------------------------------------------------------
+# Social Discovery v2: Relevance gradient (continuous on-topic ratio)
+# -----------------------------------------------------------------------------
+# Replaces the legacy 2-tier keyword-count relevance gate with a beta-smoothed
+# on-topic ratio. Feeds the PageRank personalization vector and an inclusion gate.
+# Flag-gated so behaviour is identical to legacy until explicitly enabled.
+RELEVANCE_GRADIENT_ENABLED = os.getenv('RELEVANCE_GRADIENT_ENABLED', 'False').lower() == 'true'
+# Beta prior: smoothed_ratio = (relevant + a) / (total + a + b) with
+# a = mean*strength, b = (1-mean)*strength. Low mean => "off-topic until proven";
+# strength is the pseudo-count at which an account's own data equals the prior.
+RELEVANCE_PRIOR_MEAN = float(os.getenv('RELEVANCE_PRIOR_MEAN', '0.02'))
+RELEVANCE_PRIOR_STRENGTH = float(os.getenv('RELEVANCE_PRIOR_STRENGTH', '15'))
+# Default per-pool inclusion floor on the smoothed ratio (pools can override).
+RELEVANCE_MIN_RATIO_DEFAULT = float(os.getenv('RELEVANCE_MIN_RATIO_DEFAULT', '0.02'))
+# Absolute floor on relevant-tweet count (guards against small-sample gaming).
+MIN_RELEVANT_TWEETS = int(os.getenv('MIN_RELEVANT_TWEETS', '1'))
+
+# -----------------------------------------------------------------------------
+# Social Discovery v2: AI out-link dampening (its-ai.org)
+# -----------------------------------------------------------------------------
+# Dampens an account's outgoing PageRank influence in proportion to how
+# AI-generated its content is, by leaking transition probability to a sink node.
+# Breaks "circle-jerk" mutual amplification among low-quality AI accounts.
+AI_DAMPENING_ENABLED = os.getenv('AI_DAMPENING_ENABLED', 'False').lower() == 'true'
+ITS_AI_API_URL = os.getenv('ITS_AI_API_URL', 'https://api.its-ai.org/api/v2/text')
+ITS_AI_API_KEY = os.getenv('ITS_AI_API_KEY')
+ITS_AI_TIMEOUT = int(os.getenv('ITS_AI_TIMEOUT', '300'))  # synchronous, blocks up to 5 min
+AI_SAMPLE_SIZE = int(os.getenv('AI_SAMPLE_SIZE', '4'))     # tweets sampled per account
+AI_MIN_TWEET_CHARS = int(os.getenv('AI_MIN_TWEET_CHARS', '200'))  # its-ai requires >=200 chars
+AI_DETECTION_CONCURRENCY = int(os.getenv('AI_DETECTION_CONCURRENCY', '4'))  # its-ai ~4x comfortable
+AI_SCORE_BUCKET = float(os.getenv('AI_SCORE_BUCKET', '0.2'))  # bucketise to absorb API jitter
+AI_SCORE_CAP = float(os.getenv('AI_SCORE_CAP', '0.95'))      # cap so sink weight stays finite
+AI_SCORE_TTL_SECONDS = int(os.getenv('AI_SCORE_TTL_DAYS', '14')) * 24 * 60 * 60  # per-account cache
+# Cap the number of accounts AI-checked per run to bound cost: only the top-N by
+# interaction weight (most influential) are scored; the rest are assumed human
+# (no dampening). 0 = unlimited (check every account).
+AI_MAX_ACCOUNTS_CHECKED = int(os.getenv('AI_MAX_ACCOUNTS_CHECKED', '0'))
+
 # =============================================================================
 # Emissions and Rewards
 # =============================================================================
@@ -188,5 +226,7 @@ bt.logging.info(f"SUBNET_TREASURY_UID: {SUBNET_TREASURY_UID}")
 bt.logging.info(f"NOCODE_UID: {NOCODE_UID}")
 bt.logging.info(f"SIMULATE_CONNECTIONS: {SIMULATE_CONNECTIONS}")
 bt.logging.info(f"VALIDATOR_MODE: {VALIDATOR_MODE}")
+bt.logging.info(f"RELEVANCE_GRADIENT_ENABLED: {RELEVANCE_GRADIENT_ENABLED}")
+bt.logging.info(f"AI_DAMPENING_ENABLED: {AI_DAMPENING_ENABLED}")
 bt.logging.info(f"REFERENCE_VALIDATOR_ENDPOINT: {REFERENCE_VALIDATOR_ENDPOINT}")
 bt.logging.info(f"CONNECTION_TWEET_IDS: {CONNECTION_TWEET_IDS}")

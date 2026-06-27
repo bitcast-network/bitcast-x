@@ -27,7 +27,18 @@ from .social_discovery import TwitterNetworkAnalyzer
 from .social_map_publisher import publish_social_map
 from .pool_manager import PoolManager
 from .adjacency_utils import serialize_adjacency_matrix
-from bitcast.validator.utils.config import ENABLE_DATA_PUBLISH
+from bitcast.validator.utils.config import (
+    ENABLE_DATA_PUBLISH,
+    RELEVANCE_GRADIENT_ENABLED,
+    AI_DAMPENING_ENABLED,
+    RELEVANCE_PRIOR_MEAN,
+    RELEVANCE_PRIOR_STRENGTH,
+    MIN_RELEVANT_TWEETS,
+    AI_SAMPLE_SIZE,
+    AI_SCORE_BUCKET,
+    AI_SCORE_CAP,
+    AI_MAX_ACCOUNTS_CHECKED,
+)
 from bitcast.validator.utils.data_publisher import get_global_publisher
 from bitcast.validator.tweet_scoring.social_map_loader import parse_social_map_filename
 
@@ -318,10 +329,18 @@ async def two_stage_discovery(
     ext_max_seed_accounts = ext_ov.get('max_seed_accounts', pool_config.get('extended_max_seed_accounts', 300))
     ext_max_iterations = ext_ov.get('max_iterations', pool_config.get('max_discovery_iterations', max_iterations))
     ext_convergence = ext_ov.get('convergence_threshold', pool_config.get('convergence_threshold', convergence_threshold))
-    
+
+    # Social discovery v2 (flag-gated). Applied only in the extended stage, which
+    # produces the final ranked map; the core stage is left as crawl control.
+    min_relevance_ratio = pool_config.get('min_relevance_ratio', 0.0)
+
     bt.logging.info(f"Core params: min_weight={core_min_interaction_weight}, min_tweets={core_min_tweets}, max_seeds={core_max_seed_accounts}")
     bt.logging.info(f"Extended params: min_weight={ext_min_interaction_weight}, min_tweets={ext_min_tweets}, max_seeds={ext_max_seed_accounts}")
     bt.logging.info(f"Extended iterations: max={ext_max_iterations}, convergence={ext_convergence:.0%}")
+    if RELEVANCE_GRADIENT_ENABLED:
+        bt.logging.info(f"v2 relevance gradient ENABLED: min_relevance_ratio={min_relevance_ratio:.3f}")
+    if AI_DAMPENING_ENABLED:
+        bt.logging.info("v2 AI out-link dampening ENABLED")
     bt.logging.info("=" * 80)
     
     # Generate run ID
@@ -460,6 +479,9 @@ async def two_stage_discovery(
             core_accounts=core_accounts,
             use_personalized_pagerank=True,
             skip_if_cache_fresh=True,
+            relevance_gradient=RELEVANCE_GRADIENT_ENABLED,
+            min_relevance_ratio=min_relevance_ratio,
+            ai_dampening=AI_DAMPENING_ENABLED,
         )
         
         # Track discoveries
@@ -521,6 +543,11 @@ async def two_stage_discovery(
     sorted_accounts = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     scaled_pool_difficulty = total_pool_followers / 1000
     core_in_final = core_accounts & set(usernames)
+
+    # Social discovery v2 score maps from the final extended analyze_network run
+    # (empty dicts when the respective feature is disabled).
+    relevance_scores = analyzer.relevance_scores if RELEVANCE_GRADIENT_ENABLED else {}
+    ai_scores = analyzer.ai_scores if AI_DAMPENING_ENABLED else {}
     
     social_map_data = {
         'metadata': {
@@ -538,6 +565,9 @@ async def two_stage_discovery(
                 'score': score,
                 'followers_count': user_info_map.get(username, {}).get('followers_count', 0),
                 'is_core': username in core_accounts,
+                # Social discovery v2 (None when the respective feature is disabled).
+                'relevance_score': round(relevance_scores[username], 4) if username in relevance_scores else None,
+                'ai_score': round(ai_scores[username], 4) if username in ai_scores else None,
                 'affiliate_label': user_info_map.get(username, {}).get('affiliate_label'),
                 'affiliate_username': user_info_map.get(username, {}).get('affiliate_username'),
                 'affiliate_url': user_info_map.get(username, {}).get('affiliate_url'),
@@ -598,6 +628,18 @@ async def two_stage_discovery(
             'max_seed_accounts': ext_max_seed_accounts,
             'max_iterations': ext_max_iterations,
             'convergence_threshold': ext_convergence,
+        },
+        'v2_params': {
+            'relevance_gradient_enabled': RELEVANCE_GRADIENT_ENABLED,
+            'min_relevance_ratio': min_relevance_ratio,
+            'relevance_prior_mean': RELEVANCE_PRIOR_MEAN,
+            'relevance_prior_strength': RELEVANCE_PRIOR_STRENGTH,
+            'min_relevant_tweets': MIN_RELEVANT_TWEETS,
+            'ai_dampening_enabled': AI_DAMPENING_ENABLED,
+            'ai_sample_size': AI_SAMPLE_SIZE,
+            'ai_score_bucket': AI_SCORE_BUCKET,
+            'ai_score_cap': AI_SCORE_CAP,
+            'ai_max_accounts_checked': AI_MAX_ACCOUNTS_CHECKED,
         },
     }
     with open(metadata_file, 'w') as f:
