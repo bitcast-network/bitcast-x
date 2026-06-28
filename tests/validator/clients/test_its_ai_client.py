@@ -33,9 +33,9 @@ class TestAnalyzeText:
         session.post.return_value = _resp(200, {"score": 0.42, "ai_percentage": 0.4})
         score = analyze_text("x" * 300, api_key="k", session=session)
         assert score == pytest.approx(0.42)
-        # Auth header carries the key directly.
+        # Auth header carries the key with the APIKey scheme.
         _, kwargs = session.post.call_args
-        assert kwargs["headers"]["Authorization"] == "k"
+        assert kwargs["headers"]["Authorization"] == "APIKey k"
         assert kwargs["json"] == {"text": "x" * 300}
 
     def test_validation_error_returns_none(self):
@@ -84,7 +84,7 @@ class TestAnalyzeTexts:
         out = analyze_texts(["a" * 250, "b" * 250], api_key="k", session=session)
         assert out == [pytest.approx(0.1), pytest.approx(0.9)]
         _, kwargs = session.post.call_args
-        assert kwargs["headers"]["Authorization"] == "k"
+        assert kwargs["headers"]["Authorization"] == "APIKey k"
         assert kwargs["json"] == {"texts": ["a" * 250, "b" * 250]}
 
     def test_per_item_error_and_null_become_none(self):

@@ -13,7 +13,7 @@ Two endpoints, both synchronous (block until analysis completes, up to ~5 min):
       one per submitted text, in the same order. Invalid items carry a per-item
       ``error`` instead of failing the whole request.
 
-Auth for both: ``Authorization: <api_key>`` header. We use ``score`` directly as
+Auth for both: ``Authorization: APIKey <api_key>`` header. We use ``score`` directly as
 the per-tweet AI score (0.0 human .. 1.0 AI).
 
 Transient failures (network errors, 429, 5xx) are retried with exponential
@@ -71,7 +71,7 @@ def _post_with_retries(http, endpoint, payload, key, timeout, label):
     overridden by Retry-After on 429.
     """
     headers = {
-        "Authorization": key,
+        "Authorization": f"APIKey {key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
