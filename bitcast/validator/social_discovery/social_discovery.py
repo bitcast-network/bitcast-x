@@ -26,13 +26,11 @@ from bitcast.validator.utils.config import (
     SOCIAL_DISCOVERY_MAX_WORKERS,
     SOCIAL_DISCOVERY_LOOKBACK,
     SOCIAL_DISCOVERY_FETCH_DAYS,
-    MIN_RELEVANT_TWEETS,
     AI_SCORE_CAP,
     AI_MAX_ACCOUNTS_CHECKED,
 )
 from bitcast.validator.utils.twitter_cache import get_cached_user_tweets
 from bitcast.validator.utils.twitter_validators import is_valid_twitter_username
-from bitcast.validator.utils.relevance import smoothed_relevance_ratio, passes_relevance_gate
 
 # Synthetic sink node that absorbs leaked outgoing influence from AI accounts.
 AI_SINK_NODE = "__ai_sink__"
@@ -104,54 +102,9 @@ class TwitterNetworkAnalyzer:
             bt.logging.info("Sequential mode (concurrency disabled)")
 
         # Populated by analyze_network for the most recent run (social discovery v2).
-        # Exposed as attributes rather than return values to preserve the 6-tuple
+        # Exposed as an attribute rather than a return value to preserve the 6-tuple
         # return signature relied on by existing callers.
-        self.relevance_scores: Dict[str, float] = {}
         self.ai_scores: Dict[str, float] = {}
-
-    def _compute_relevance_gradient(
-        self,
-        usernames: Set[str],
-        keywords: List[str],
-        lang: Optional[str],
-        min_relevance_ratio: float,
-        skip_if_fresh: bool,
-    ) -> Tuple[Set[str], Dict[str, float]]:
-        """Compute the smoothed on-topic ratio per account and apply the inclusion gate.
-
-        Returns:
-            Tuple of (relevant_users, relevance_ratio_map) where relevant_users are
-            the accounts that clear the gate and the map holds every account's
-            smoothed ratio (used as the PageRank personalization vector).
-        """
-        def counts_safe(username: str) -> Tuple[str, int, int]:
-            try:
-                relevant, total = self.twitter_client.compute_user_relevance_counts(
-                    username, keywords, lang, skip_if_cache_fresh=skip_if_fresh
-                )
-                return username, relevant, total
-            except Exception as e:
-                bt.logging.warning(f"Relevance counts failed for @{username}: {e}")
-                return username, 0, 0
-
-        results = []
-        if self.max_workers > 1:
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {executor.submit(counts_safe, u): u for u in usernames}
-                for future in as_completed(futures):
-                    results.append(future.result())
-        else:
-            results = [counts_safe(u) for u in usernames]
-
-        relevant_users: Set[str] = set()
-        relevance_ratio: Dict[str, float] = {}
-        for username, relevant, total in results:
-            ratio = smoothed_relevance_ratio(relevant, total)
-            relevance_ratio[username] = ratio
-            if passes_relevance_gate(relevant, ratio, min_relevance_ratio, MIN_RELEVANT_TWEETS):
-                relevant_users.add(username)
-
-        return relevant_users, relevance_ratio
 
     def _select_ai_check_candidates(
         self,
@@ -274,10 +227,9 @@ class TwitterNetworkAnalyzer:
         core_accounts: Optional[Set[str]] = None,
         use_personalized_pagerank: bool = False,
         skip_if_cache_fresh: Optional[bool] = None,
-        relevance_gradient: bool = False,
-        min_relevance_ratio: float = 0.0,
         ai_dampening: bool = False,
         ai_scores: Optional[Dict[str, float]] = None,
+        shortlisted_accounts: Optional[Set[str]] = None,
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
@@ -303,15 +255,16 @@ class TwitterNetworkAnalyzer:
                                       PageRank biased toward core accounts instead of standard PageRank.
             skip_if_cache_fresh: If provided, overrides the instance's skip_if_cache_fresh setting
                                 for this analyze_network call only.
-            relevance_gradient: If True (v2), replace the boolean keyword-count relevance gate
-                               with a continuous smoothed on-topic ratio used both as an inclusion
-                               gate (min_relevance_ratio) and the PageRank personalization vector.
-                               Populates self.relevance_scores.
-            min_relevance_ratio: Inclusion floor on the smoothed ratio (used with relevance_gradient).
             ai_dampening: If True (v2), dampen each account's outgoing PageRank influence in
                          proportion to its AI score via a sink node. Populates self.ai_scores.
             ai_scores: Optional precomputed {username: ai_score} map (injectable for tests/determinism).
                       When None and ai_dampening is True, scores are computed internally.
+            shortlisted_accounts: Optional set of handles whose badged affiliates get amplified
+                      influence. Any account whose ``affiliate_username`` is in this set is treated
+                      as a core member of the personalized-PageRank restart distribution (same
+                      teleport weight as core accounts), so its endorsements carry amplified,
+                      propagating influence. A non-empty shortlist enables personalized PageRank
+                      even when use_personalized_pagerank is False.
 
         Returns:
             Tuple of (scores_dict, adjacency_matrix, relationship_matrix, usernames_list, user_info_map, total_pool_followers)
@@ -324,7 +277,6 @@ class TwitterNetworkAnalyzer:
         bt.logging.info(f"Analyzing network from {len(seed_accounts)} seed accounts")
 
         # Reset per-run v2 outputs (exposed as instance attributes).
-        self.relevance_scores = {}
         self.ai_scores = {}
 
         # Relax params when seed count is low to bootstrap discovery
@@ -494,17 +446,8 @@ class TwitterNetworkAnalyzer:
             relevant_users = set()
             all_accounts_to_check = discovered_users | set(seed_accounts)
 
-            if relevance_gradient:
-                # v2: continuous smoothed on-topic ratio + inclusion gate.
-                bt.logging.info(
-                    f"Computing relevance gradient (min_ratio={min_relevance_ratio:.3f}) "
-                    f"for {len(all_accounts_to_check)} accounts..."
-                )
-                relevant_users, self.relevance_scores = self._compute_relevance_gradient(
-                    all_accounts_to_check, keywords, lang, min_relevance_ratio, skip_if_fresh
-                )
-            elif self.max_workers > 1:
-                # Legacy: concurrent boolean relevance checking
+            if self.max_workers > 1:
+                # Concurrent relevance checking
                 bt.logging.info(f"Checking relevance concurrently ({self.max_workers} workers)...")
                 with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                     futures = {
@@ -517,7 +460,7 @@ class TwitterNetworkAnalyzer:
                         if is_relevant:
                             relevant_users.add(username)
             else:
-                # Legacy: sequential boolean relevance checking
+                # Sequential relevance checking
                 for username in all_accounts_to_check:
                     if self.twitter_client.check_user_relevance(username, keywords, min_followers, lang, min_tweets, skip_if_cache_fresh=skip_if_fresh):
                         relevant_users.add(username)
@@ -615,26 +558,38 @@ class TwitterNetworkAnalyzer:
             self.ai_scores = dict(ai_scores)
             sink_added = self._apply_ai_sink(G, ai_scores)
 
-        # Build the personalization vector. The relevance gradient (v2) takes
-        # precedence; otherwise fall back to legacy core-biased personalization.
+        # Build the personalization vector: core-biased personalized PageRank when
+        # requested, else standard PageRank. Affiliates of shortlisted accounts are
+        # folded into the restart set at the same weight as core accounts, so their
+        # endorsements carry amplified, propagating influence. A non-empty shortlist
+        # enables personalized PageRank even when use_personalized_pagerank is False.
+        restart_nodes: Set[str] = set()
+        if use_personalized_pagerank and core_accounts:
+            restart_nodes |= set(core_accounts)
+        if shortlisted_accounts:
+            affiliate_boosted = {
+                node for node in G.nodes()
+                if user_info_map.get(node, {}).get('affiliate_username') in shortlisted_accounts
+            }
+            if affiliate_boosted:
+                bt.logging.info(
+                    f"Affiliate boost: {len(affiliate_boosted)} account(s) affiliated with "
+                    f"{len(shortlisted_accounts)} shortlisted handle(s) promoted to core teleport weight"
+                )
+            restart_nodes |= affiliate_boosted
+
         personalization = None
-        if relevance_gradient and self.relevance_scores:
-            personalization = {node: self.relevance_scores.get(node, 0.0) for node in G.nodes()}
-            if sum(personalization.values()) <= 0:
-                personalization = None
-            else:
-                bt.logging.info("Using relevance-gradient personalization vector")
-        elif use_personalized_pagerank and core_accounts:
-            personalization = {node: 1.0 if node in core_accounts else 0.0 for node in G.nodes()}
+        if restart_nodes:
+            personalization = {node: 1.0 if node in restart_nodes else 0.0 for node in G.nodes()}
             if sum(personalization.values()) > 0:
-                bt.logging.info(f"Using personalized PageRank biased toward {int(sum(personalization.values()))} core accounts")
+                bt.logging.info(f"Using personalized PageRank biased toward {int(sum(personalization.values()))} accounts")
             else:
-                bt.logging.warning("No core accounts found in graph, falling back to standard PageRank")
+                bt.logging.warning("No restart accounts found in graph, falling back to standard PageRank")
                 personalization = None
 
         # When a sink is present, dangling-node mass must not flow back into the
         # sink. Redistribute via the personalization vector when available (returns
-        # leaked influence to the on-topic population), else uniformly over real nodes.
+        # leaked influence to the core-biased population), else uniformly over real nodes.
         dangling = None
         if sink_added:
             if personalization is not None:

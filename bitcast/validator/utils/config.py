@@ -105,27 +105,6 @@ CACHE_FRESHNESS_SECONDS = SOCIAL_DISCOVERY_CACHE_HOURS * 3600
 SOCIAL_DISCOVERY_MAX_WORKERS = 10
 
 # -----------------------------------------------------------------------------
-# Social Discovery v2: Relevance gradient (continuous on-topic ratio)
-# -----------------------------------------------------------------------------
-# Replaces the legacy 2-tier keyword-count relevance gate with a beta-smoothed
-# on-topic ratio. Feeds the PageRank personalization vector and an inclusion gate.
-# Flag-gated so behaviour is identical to legacy until explicitly enabled.
-RELEVANCE_GRADIENT_ENABLED = os.getenv('RELEVANCE_GRADIENT_ENABLED', 'False').lower() == 'true'
-# Beta prior: smoothed_ratio = (relevant + a) / (total + a + b) with
-# a = mean*strength, b = (1-mean)*strength. Low mean => "off-topic until proven";
-# strength is the pseudo-count at which an account's own data equals the prior.
-RELEVANCE_PRIOR_MEAN = float(os.getenv('RELEVANCE_PRIOR_MEAN', '0.02'))
-RELEVANCE_PRIOR_STRENGTH = float(os.getenv('RELEVANCE_PRIOR_STRENGTH', '15'))
-# Default per-pool inclusion floor on the smoothed ratio (pools can override).
-# This is the OUTER/extended gate (who makes the final map).
-RELEVANCE_MIN_RATIO_DEFAULT = float(os.getenv('RELEVANCE_MIN_RATIO_DEFAULT', '0.02'))
-# Core crawl gate: stricter than the outer gate. Core only seeds the Stage-2
-# crawl frontier, so we anchor it on high-confidence on-topic accounts.
-RELEVANCE_CORE_MIN_RATIO_DEFAULT = float(os.getenv('RELEVANCE_CORE_MIN_RATIO_DEFAULT', '0.05'))
-# Absolute floor on relevant-tweet count (guards against small-sample gaming).
-MIN_RELEVANT_TWEETS = int(os.getenv('MIN_RELEVANT_TWEETS', '1'))
-
-# -----------------------------------------------------------------------------
 # Social Discovery v2: AI out-link dampening (its-ai.org)
 # -----------------------------------------------------------------------------
 # Dampens an account's outgoing PageRank influence in proportion to how
@@ -240,7 +219,6 @@ bt.logging.info(f"SUBNET_TREASURY_UID: {SUBNET_TREASURY_UID}")
 bt.logging.info(f"NOCODE_UID: {NOCODE_UID}")
 bt.logging.info(f"SIMULATE_CONNECTIONS: {SIMULATE_CONNECTIONS}")
 bt.logging.info(f"VALIDATOR_MODE: {VALIDATOR_MODE}")
-bt.logging.info(f"RELEVANCE_GRADIENT_ENABLED: {RELEVANCE_GRADIENT_ENABLED}")
 bt.logging.info(f"AI_DAMPENING_ENABLED: {AI_DAMPENING_ENABLED}")
 bt.logging.info(f"REFERENCE_VALIDATOR_ENDPOINT: {REFERENCE_VALIDATOR_ENDPOINT}")
 bt.logging.info(f"CONNECTION_TWEET_IDS: {CONNECTION_TWEET_IDS}")

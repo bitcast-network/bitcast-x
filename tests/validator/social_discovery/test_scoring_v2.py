@@ -1,4 +1,4 @@
-"""Integration tests for social discovery v2: relevance gradient + AI out-link sink."""
+"""Integration tests for social discovery v2: AI out-link sink."""
 
 import unittest.mock as mock
 
@@ -20,20 +20,22 @@ def _tweet(text, tagged=None):
     }
 
 
-def _make_client(mock_tweets, counts=None):
-    """Build a mock TwitterClient. counts maps username -> (relevant, total)."""
+def _make_client(mock_tweets, affiliates=None):
+    """Build a mock TwitterClient.
+
+    affiliates: optional {username: affiliate_username} mapping injected into user_info.
+    """
+    affiliates = affiliates or {}
     client = mock.Mock()
 
     def fetch(username, fetch_days=30, skip_if_cache_fresh=False):
-        return {"tweets": mock_tweets.get(username, []), "user_info": {"followers_count": 1000}}
+        user_info = {"followers_count": 1000}
+        if username in affiliates:
+            user_info["affiliate_username"] = affiliates[username]
+        return {"tweets": mock_tweets.get(username, []), "user_info": user_info}
 
     client.fetch_user_tweets.side_effect = fetch
     client.check_user_relevance.return_value = True
-
-    def relevance_counts(username, keywords, lang=None, skip_if_cache_fresh=False):
-        return counts.get(username, (0, 0)) if counts else (1, 1)
-
-    client.compute_user_relevance_counts.side_effect = relevance_counts
     return client
 
 
@@ -71,6 +73,63 @@ class TestAiSink:
             ["a", "b", "c"], ["hi"], ai_dampening=True, ai_scores={"a": 0.0},
         )
         assert same["b"] == pytest.approx(base["b"], rel=1e-9)
+
+
+# Two structurally symmetric, disjoint mutual pairs:
+#   aff <-> x   and   plain <-> y
+# Without a boost the two pairs score identically. "aff" is a badged affiliate
+# of the shortlisted handle "brand".
+AFFILIATE_GRAPH_TWEETS = {
+    "aff": [_tweet("hi @x", ["x"])],
+    "x": [_tweet("hi @aff", ["aff"])],
+    "plain": [_tweet("hi @y", ["y"])],
+    "y": [_tweet("hi @plain", ["plain"])],
+}
+AFFILIATE_USERS = ["aff", "x", "plain", "y"]
+
+
+class TestAffiliateBoost:
+    def test_affiliate_of_shortlisted_outranks_symmetric_nonaffiliate(self):
+        client = _make_client(AFFILIATE_GRAPH_TWEETS, affiliates={"aff": "brand"})
+        analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
+
+        base, *_ = analyzer.analyze_network(AFFILIATE_USERS, ["hi"])
+        # Baseline: the two mirror pairs are identical.
+        assert base["aff"] == pytest.approx(base["plain"], rel=1e-9)
+        assert base["x"] == pytest.approx(base["y"], rel=1e-9)
+
+        boosted, *_ = analyzer.analyze_network(
+            AFFILIATE_USERS, ["hi"], shortlisted_accounts={"brand"},
+        )
+        # The affiliate is lifted above its baseline and above the mirror account.
+        assert boosted["aff"] > base["aff"]
+        assert boosted["aff"] > boosted["plain"]
+        # Propagation: the account the affiliate endorses is lifted above the
+        # account the non-affiliate endorses.
+        assert boosted["x"] > boosted["y"]
+
+    def test_empty_shortlist_is_noop(self):
+        client = _make_client(AFFILIATE_GRAPH_TWEETS, affiliates={"aff": "brand"})
+        analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
+        base, *_ = analyzer.analyze_network(AFFILIATE_USERS, ["hi"])
+        for shortlist in (None, set()):
+            same, *_ = analyzer.analyze_network(
+                AFFILIATE_USERS, ["hi"], shortlisted_accounts=shortlist,
+            )
+            for user in AFFILIATE_USERS:
+                assert same[user] == pytest.approx(base[user], rel=1e-9)
+
+    def test_shortlist_with_no_matching_affiliate_is_noop(self):
+        client = _make_client(AFFILIATE_GRAPH_TWEETS, affiliates={"aff": "brand"})
+        analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
+        base, *_ = analyzer.analyze_network(AFFILIATE_USERS, ["hi"])
+        # "aff" is the handle, but no account is affiliated TO "aff"; matching is on
+        # affiliate_username, so this shortlist boosts nobody.
+        same, *_ = analyzer.analyze_network(
+            AFFILIATE_USERS, ["hi"], shortlisted_accounts={"aff"},
+        )
+        for user in AFFILIATE_USERS:
+            assert same[user] == pytest.approx(base[user], rel=1e-9)
 
 
 class TestAiCheckCap:
@@ -124,40 +183,3 @@ class TestAiCheckCap:
 
         assert len(scored["set"]) == 1
         assert "b" in scored["set"]  # b is the hub (a->b, c->b, b->a)
-
-
-class TestRelevanceGradient:
-    def test_gate_excludes_low_ratio_account(self):
-        # c is high-volume but only 0.1% on-topic -> excluded at 5% gate.
-        counts = {"a": (10, 10), "b": (10, 10), "c": (1, 1000)}
-        client = _make_client(GRAPH_TWEETS, counts=counts)
-        analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
-
-        scores, *_ = analyzer.analyze_network(
-            ["a", "b", "c"], ["hi"], relevance_gradient=True, min_relevance_ratio=0.05,
-        )
-
-        assert "c" not in scores
-        assert "a" in scores and "b" in scores
-        # Relevance scores recorded for every checked account, including excluded c.
-        assert set(analyzer.relevance_scores) >= {"a", "b", "c"}
-        assert analyzer.relevance_scores["c"] < 0.05
-
-    def test_low_min_ratio_includes_everyone(self):
-        counts = {"a": (10, 10), "b": (10, 10), "c": (1, 1000)}
-        client = _make_client(GRAPH_TWEETS, counts=counts)
-        analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
-        scores, *_ = analyzer.analyze_network(
-            ["a", "b", "c"], ["hi"], relevance_gradient=True, min_relevance_ratio=0.0,
-        )
-        assert {"a", "b", "c"} <= set(scores)
-
-    def test_uses_counts_not_bool_relevance(self):
-        counts = {"a": (10, 10), "b": (10, 10), "c": (10, 10)}
-        client = _make_client(GRAPH_TWEETS, counts=counts)
-        analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
-        analyzer.analyze_network(
-            ["a", "b", "c"], ["hi"], relevance_gradient=True, min_relevance_ratio=0.0,
-        )
-        client.compute_user_relevance_counts.assert_called()
-        client.check_user_relevance.assert_not_called()

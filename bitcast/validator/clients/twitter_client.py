@@ -500,57 +500,9 @@ class TwitterClient:
                 tweets_with_keywords += 1
                 if tweets_with_keywords >= min_tweets:
                     return True
-
+        
         return False
-
-    def compute_user_relevance_counts(
-        self,
-        username: str,
-        keywords: List[str],
-        lang: Optional[str] = None,
-        skip_if_cache_fresh: bool = False,
-    ) -> Tuple[int, int]:
-        """Count on-topic tweets for an account without short-circuiting.
-
-        Unlike check_user_relevance (which early-returns a bool as soon as the
-        count threshold is hit), this scans every tweet so a continuous on-topic
-        ratio can be computed. Keyword matching is identical to check_user_relevance.
-
-        Args:
-            username: Twitter username to check
-            keywords: List of keywords to search for
-            lang: Optional language filter. If set and the account has no tweets in
-                  this language, the account is treated as off-topic (returns (0, total)).
-            skip_if_cache_fresh: If True, skip API call if cache is fresh
-
-        Returns:
-            Tuple of (relevant_tweet_count, total_tweet_count) over the cached window.
-        """
-        result = self.fetch_user_tweets(username, skip_if_cache_fresh=skip_if_cache_fresh)
-        tweets = result.get('tweets') or []
-        total = len(tweets)
-        if total == 0:
-            return 0, 0
-
-        # Language gate (mirrors check_user_relevance): require at least one tweet
-        # in the target language, but count keywords across all tweets.
-        if lang is not None and not any(t.get('lang') == lang for t in tweets):
-            return 0, total
-
-        keywords_lower = [kw.lower() for kw in keywords]
-        relevant = 0
-        for tweet in tweets:
-            text_lower = tweet['text'].lower()
-            has_keyword = any(
-                bool(re.search(re.escape(kw) + r'\b', text_lower)) if kw.startswith(('#', '$'))
-                else bool(re.search(r'\b' + re.escape(kw) + r'\b', text_lower))
-                for kw in keywords_lower
-            )
-            if has_keyword:
-                relevant += 1
-
-        return relevant, total
-
+    
     def search_tweets(self, query: str, max_results: int = 100, sort: str = "latest") -> Dict[str, Any]:
         """
         Search for tweets using X-style query syntax.
