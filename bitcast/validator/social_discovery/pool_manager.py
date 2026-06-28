@@ -5,7 +5,7 @@ Simple pool configuration manager that fetches from API.
 from typing import Dict, List, Optional, Any
 import requests
 import bittensor as bt
-from bitcast.validator.utils.config import POOLS_API_URL, RELEVANCE_MIN_RATIO_DEFAULT
+from bitcast.validator.utils.config import POOLS_API_URL, RELEVANCE_MIN_RATIO_DEFAULT, RELEVANCE_CORE_MIN_RATIO_DEFAULT
 
 
 class PoolManager:
@@ -56,7 +56,10 @@ class PoolManager:
                     # Social discovery v2: inclusion floor on the smoothed on-topic ratio
                     # (e.g. 0.05 for tao, 0.02 for broader pools). Used when the relevance
                     # gradient is enabled; ignored by the legacy count-based gate.
+                    # min_relevance_ratio gates the OUTER/extended map; core_min_relevance_ratio
+                    # is the stricter gate for the Stage-1 core crawl frontier.
                     'min_relevance_ratio': pool_data.get('min_relevance_ratio', RELEVANCE_MIN_RATIO_DEFAULT),
+                    'core_min_relevance_ratio': pool_data.get('core_min_relevance_ratio', RELEVANCE_CORE_MIN_RATIO_DEFAULT),
                     'max_discovery_iterations': pool_data.get('max_discovery_iterations', 3),
                     'convergence_threshold': pool_data.get('convergence_threshold', 0.90),
                     'max_referral_amount': pool_data.get('max_referral_amount', 100.0),

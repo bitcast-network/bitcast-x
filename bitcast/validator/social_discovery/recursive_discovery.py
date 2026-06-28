@@ -330,15 +330,23 @@ async def two_stage_discovery(
     ext_max_iterations = ext_ov.get('max_iterations', pool_config.get('max_discovery_iterations', max_iterations))
     ext_convergence = ext_ov.get('convergence_threshold', pool_config.get('convergence_threshold', convergence_threshold))
 
-    # Social discovery v2 (flag-gated). Applied only in the extended stage, which
-    # produces the final ranked map; the core stage is left as crawl control.
+    # Social discovery v2 (flag-gated). When enabled, BOTH stages gate on the
+    # smoothed on-topic ratio (one relevance definition, two thresholds): the
+    # stricter core ratio bounds the Stage-1 crawl frontier, the looser outer
+    # ratio gates who makes the final extended map. When disabled, the legacy
+    # count-based gate (core_min_tweets / extended_min_tweets) is used instead.
     min_relevance_ratio = pool_config.get('min_relevance_ratio', 0.0)
+    core_min_relevance_ratio = core_ov.get('min_relevance_ratio',
+                                           pool_config.get('core_min_relevance_ratio', 0.0))
 
     bt.logging.info(f"Core params: min_weight={core_min_interaction_weight}, min_tweets={core_min_tweets}, max_seeds={core_max_seed_accounts}")
     bt.logging.info(f"Extended params: min_weight={ext_min_interaction_weight}, min_tweets={ext_min_tweets}, max_seeds={ext_max_seed_accounts}")
     bt.logging.info(f"Extended iterations: max={ext_max_iterations}, convergence={ext_convergence:.0%}")
     if RELEVANCE_GRADIENT_ENABLED:
-        bt.logging.info(f"v2 relevance gradient ENABLED: min_relevance_ratio={min_relevance_ratio:.3f}")
+        bt.logging.info(
+            f"v2 relevance gradient ENABLED: core_min_ratio={core_min_relevance_ratio:.3f}, "
+            f"outer_min_ratio={min_relevance_ratio:.3f}"
+        )
     if AI_DAMPENING_ENABLED:
         bt.logging.info("v2 AI out-link dampening ENABLED")
     bt.logging.info("=" * 80)
@@ -402,9 +410,11 @@ async def two_stage_discovery(
             keywords=pool_config['keywords'],
             min_followers=0,
             lang=pool_config.get('lang'),
-            min_tweets=core_min_tweets,
+            min_tweets=core_min_tweets,  # ignored when relevance_gradient is on
             min_interaction_weight=core_min_interaction_weight,
             skip_if_cache_fresh=True,
+            relevance_gradient=RELEVANCE_GRADIENT_ENABLED,
+            min_relevance_ratio=core_min_relevance_ratio,
         )
         
         core_accounts = set(core_usernames)

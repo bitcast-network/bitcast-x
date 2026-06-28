@@ -117,7 +117,11 @@ RELEVANCE_GRADIENT_ENABLED = os.getenv('RELEVANCE_GRADIENT_ENABLED', 'False').lo
 RELEVANCE_PRIOR_MEAN = float(os.getenv('RELEVANCE_PRIOR_MEAN', '0.02'))
 RELEVANCE_PRIOR_STRENGTH = float(os.getenv('RELEVANCE_PRIOR_STRENGTH', '15'))
 # Default per-pool inclusion floor on the smoothed ratio (pools can override).
+# This is the OUTER/extended gate (who makes the final map).
 RELEVANCE_MIN_RATIO_DEFAULT = float(os.getenv('RELEVANCE_MIN_RATIO_DEFAULT', '0.02'))
+# Core crawl gate: stricter than the outer gate. Core only seeds the Stage-2
+# crawl frontier, so we anchor it on high-confidence on-topic accounts.
+RELEVANCE_CORE_MIN_RATIO_DEFAULT = float(os.getenv('RELEVANCE_CORE_MIN_RATIO_DEFAULT', '0.05'))
 # Absolute floor on relevant-tweet count (guards against small-sample gaming).
 MIN_RELEVANT_TWEETS = int(os.getenv('MIN_RELEVANT_TWEETS', '1'))
 
