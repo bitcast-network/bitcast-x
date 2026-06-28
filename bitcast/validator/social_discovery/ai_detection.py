@@ -1,13 +1,17 @@
 """
 Account-level AI-content scoring for social discovery v2.
 
-Pipeline per account:
-  1. Deterministically sample up to AI_SAMPLE_SIZE tweets with >= AI_MIN_TWEET_CHARS
-     characters (seed = hash(date_bucket + username + tweet_id)). Determinism is
-     critical: every validator must select the same tweets so independently
-     computed scores agree.
-  2. Score each sampled tweet via its-ai (concurrent, cached per-tweet permanently).
-  3. Average the valid scores and bucketise (coarse bands absorb API jitter).
+Pipeline (compute_ai_scores), batched globally across accounts:
+  1. Deterministically sample up to AI_SAMPLE_SIZE tweets per account with
+     >= AI_MIN_TWEET_CHARS characters (seed = hash(date_bucket + username +
+     tweet_id)). Determinism is critical: every validator must select the same
+     tweets so independently computed scores agree.
+  2. Pool every sampled tweet not already in the per-tweet cache across ALL
+     accounts, dedup by tweet_id, and score them via its-ai's /v2/batch endpoint
+     (a few large requests instead of one per tweet). Results are cached
+     per-tweet permanently.
+  3. Per account, average its sample's valid scores and bucketise (coarse bands
+     absorb API jitter).
 
 The resulting score (0.0 human .. 1.0 AI) is used to dampen the account's
 outgoing PageRank influence via a sink node.
@@ -36,6 +40,7 @@ from bitcast.validator.utils.config import (
     AI_MIN_TWEET_CHARS,
     AI_DETECTION_CONCURRENCY,
     AI_SCORE_BUCKET,
+    ITS_AI_BATCH_SIZE,
 )
 
 
@@ -85,42 +90,57 @@ def select_sample_tweets(
     return eligible[:sample_size]
 
 
-def _score_tweet(tweet: dict, client) -> Optional[float]:
-    """Score a single tweet via its-ai, using the permanent per-tweet cache."""
+def _tweet_score_key(tweet: dict) -> str:
+    """Map a tweet to a stable key for the fresh-score map (tweet_id, else identity)."""
+    return tweet.get('tweet_id') or f"_obj_{id(tweet)}"
+
+
+def _batch_score_and_cache(
+    tweets: List[dict],
+    client,
+    batch_size: int = ITS_AI_BATCH_SIZE,
+    concurrency: int = AI_DETECTION_CONCURRENCY,
+) -> Dict[str, float]:
+    """Score ``tweets`` via its-ai's batch endpoint and cache each per-tweet.
+
+    ``tweets`` should already exclude per-tweet-cache hits and be deduped. Chunks
+    of up to ``batch_size`` are sent per request, with up to ``concurrency``
+    requests in flight. Returns {score_key: score} for the items that scored.
+    """
+    if not tweets:
+        return {}
+
+    chunks = [tweets[i:i + batch_size] for i in range(0, len(tweets), batch_size)]
+
+    def _run(chunk: List[dict]):
+        return client.analyze_texts([t['text'] for t in chunk])
+
+    if concurrency > 1 and len(chunks) > 1:
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            chunk_results = list(executor.map(_run, chunks))
+    else:
+        chunk_results = [_run(c) for c in chunks]
+
+    fresh: Dict[str, float] = {}
+    for chunk, results in zip(chunks, chunk_results):
+        for tweet, score in zip(chunk, results):
+            if score is None:
+                continue
+            tid = tweet.get('tweet_id')
+            if tid:
+                cache_tweet_ai_score(tid, score)
+            fresh[_tweet_score_key(tweet)] = score
+    return fresh
+
+
+def _resolve_tweet_score(tweet: dict, fresh: Dict[str, float]) -> Optional[float]:
+    """Per-tweet score from the cache (pre-existing hit) or this run's fresh batch."""
     tid = tweet.get('tweet_id')
     if tid:
         cached = get_cached_tweet_ai_score(tid)
         if cached is not None:
             return cached
-    score = client.analyze_text(tweet['text'])
-    if score is not None and tid:
-        cache_tweet_ai_score(tid, score)
-    return score
-
-
-def compute_account_ai_score(
-    username: str,
-    tweets: List[dict],
-    date_bucket: str,
-    client=its_ai_client,
-    concurrency: int = AI_DETECTION_CONCURRENCY,
-) -> Optional[float]:
-    """Bucketised mean AI score over the account's sampled tweets, or None to skip."""
-    sample = select_sample_tweets(username, tweets, date_bucket)
-    if not sample:
-        return None
-
-    if concurrency > 1 and len(sample) > 1:
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            results = list(executor.map(lambda t: _score_tweet(t, client), sample))
-    else:
-        results = [_score_tweet(t, client) for t in sample]
-
-    valid = [r for r in results if r is not None]
-    if not valid:
-        return None
-
-    return bucketize(sum(valid) / len(valid))
+    return fresh.get(_tweet_score_key(tweet))
 
 
 def compute_ai_scores(
@@ -131,9 +151,10 @@ def compute_ai_scores(
 ) -> Dict[str, float]:
     """Compute per-account AI scores for a set of usernames.
 
-    Accounts are processed sequentially while each account's tweet samples are
-    scored concurrently, so total in-flight its-ai requests stay within
-    AI_DETECTION_CONCURRENCY (its-ai is comfortable at ~4x).
+    All sampled tweets needing scoring are pooled across accounts and sent to
+    its-ai's batch endpoint in a few large requests (deduped, per-tweet-cached),
+    rather than one request per tweet. Selection, caching, bucketising and the
+    fail-open policy are unchanged, so results match the per-tweet path exactly.
 
     Args:
         usernames: Iterable of usernames to score.
@@ -148,29 +169,46 @@ def compute_ai_scores(
     provider = tweets_provider or _load_cached_tweets
     scores: Dict[str, float] = {}
 
+    # Phase 1: resolve each uncached account to its deterministic tweet sample.
+    pending: Dict[str, List[dict]] = {}
     for username in usernames:
         cached = get_cached_ai_score(username, bucket)
         if cached is not None:
             scores[username] = cached
             continue
-
         tweets = provider(username)
         if not tweets:
             continue
+        sample = select_sample_tweets(username, tweets, bucket)
+        if sample:
+            pending[username] = sample
 
-        try:
-            score = compute_account_ai_score(username, tweets, bucket, client=client)
-        except its_ai_client.ItsAiConfigError:
-            # Missing/invalid API key (or 401) affects every account — surface
-            # loudly rather than silently disabling dampening for the whole run.
-            raise
-        except Exception as e:
-            bt.logging.warning(f"AI scoring failed for @{username}: {e}")
+    # Phase 2: pool every sample tweet missing a per-tweet score, dedup, batch-score.
+    # ItsAiConfigError (missing key / 401) propagates: it affects every account,
+    # so we surface it rather than silently disabling dampening for the whole run.
+    to_score: List[dict] = []
+    seen_ids = set()
+    for sample in pending.values():
+        for tweet in sample:
+            tid = tweet.get('tweet_id')
+            if tid:
+                if tid in seen_ids:
+                    continue
+                seen_ids.add(tid)
+                if get_cached_tweet_ai_score(tid) is not None:
+                    continue
+            to_score.append(tweet)
+
+    fresh = _batch_score_and_cache(to_score, client)
+
+    # Phase 3: aggregate per account from cached + freshly scored tweets.
+    for username, sample in pending.items():
+        valid = [s for s in (_resolve_tweet_score(t, fresh) for t in sample) if s is not None]
+        if not valid:
             continue
-
-        if score is not None:
-            cache_ai_score(username, bucket, score)
-            scores[username] = score
+        score = bucketize(sum(valid) / len(valid))
+        cache_ai_score(username, bucket, score)
+        scores[username] = score
 
     if scores:
         flagged = sum(1 for v in scores.values() if v > 0)

@@ -83,41 +83,6 @@ class TestSampleSelection:
         assert [t["tweet_id"] for t in a] != [t["tweet_id"] for t in c]
 
 
-class TestComputeAccountScore:
-    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_tweet_ai_score")
-    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
-    def test_averages_and_buckets(self, _get, _set):
-        client = mock.Mock()
-        client.analyze_text.side_effect = [0.9, 0.7, 0.8, 1.0]  # mean 0.85 -> bucket 0.8
-        tweets = [_tweet(str(i), "x" * 250) for i in range(4)]
-        score = ai_detection.compute_account_ai_score("alice", tweets, "2026-06-27", client=client, concurrency=1)
-        assert score == 0.8
-
-    def test_no_eligible_tweets_returns_none(self):
-        client = mock.Mock()
-        tweets = [_tweet("1", "short")]
-        score = ai_detection.compute_account_ai_score("alice", tweets, "2026-06-27", client=client, concurrency=1)
-        assert score is None
-        client.analyze_text.assert_not_called()
-
-    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
-    def test_all_samples_fail_returns_none(self, _get):
-        client = mock.Mock()
-        client.analyze_text.return_value = None  # every call skipped
-        tweets = [_tweet(str(i), "x" * 250) for i in range(3)]
-        score = ai_detection.compute_account_ai_score("alice", tweets, "2026-06-27", client=client, concurrency=1)
-        assert score is None
-
-    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_tweet_ai_score")
-    def test_uses_per_tweet_cache(self, _set):
-        client = mock.Mock()
-        with mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=0.2):
-            tweets = [_tweet(str(i), "x" * 250) for i in range(3)]
-            score = ai_detection.compute_account_ai_score("alice", tweets, "2026-06-27", client=client, concurrency=1)
-        assert score == ai_detection.bucketize(0.2)
-        client.analyze_text.assert_not_called()  # all served from cache
-
-
 class TestComputeAiScores:
     @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_ai_score")
     @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
@@ -125,7 +90,7 @@ class TestComputeAiScores:
     @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
     def test_skips_accounts_with_no_tweets(self, *_):
         client = mock.Mock()
-        client.analyze_text.return_value = 0.9
+        client.analyze_texts.side_effect = lambda texts: [0.9] * len(texts)
         tweets_map = {"alice": [_tweet(str(i), "x" * 250) for i in range(4)], "bob": []}
         scores = ai_detection.compute_ai_scores(
             ["alice", "bob"], date_bucket="2026-06-27",
@@ -141,4 +106,100 @@ class TestComputeAiScores:
             ["alice"], date_bucket="2026-06-27", client=client, tweets_provider=lambda u: None
         )
         assert scores["alice"] == 0.4
-        client.analyze_text.assert_not_called()
+        client.analyze_texts.assert_not_called()
+
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_tweet_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
+    def test_pools_tweets_across_accounts_into_one_batch(self, _g, _s, _ga, _ca):
+        # Two accounts, 4 sampled tweets each -> a single batch of 8 texts, not 8 calls.
+        client = mock.Mock()
+        client.analyze_texts.side_effect = lambda texts: [0.8] * len(texts)
+        tweets_map = {
+            "alice": [_tweet(f"a{i}", "x" * 250) for i in range(4)],
+            "bob": [_tweet(f"b{i}", "y" * 250) for i in range(4)],
+        }
+        scores = ai_detection.compute_ai_scores(
+            ["alice", "bob"], date_bucket="2026-06-27",
+            client=client, tweets_provider=lambda u: tweets_map.get(u),
+        )
+        assert scores["alice"] == ai_detection.bucketize(0.8)
+        assert scores["bob"] == ai_detection.bucketize(0.8)
+        assert client.analyze_texts.call_count == 1
+        assert len(client.analyze_texts.call_args[0][0]) == 8
+
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_tweet_ai_score")
+    def test_uses_per_tweet_cache_and_only_scores_misses(self, _set, *_):
+        # Three tweets, one already cached -> batch only contains the two misses.
+        client = mock.Mock()
+        client.analyze_texts.side_effect = lambda texts: [0.9] * len(texts)
+        cache = {"1": 0.3}
+        tweets_map = {"alice": [_tweet(str(i), "x" * 250) for i in (1, 2, 3)]}
+        with mock.patch(
+            "bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score",
+            side_effect=lambda tid: cache.get(tid),
+        ):
+            scores = ai_detection.compute_ai_scores(
+                ["alice"], date_bucket="2026-06-27",
+                client=client, tweets_provider=lambda u: tweets_map.get(u),
+            )
+        # Only the two uncached tweets are sent.
+        assert len(client.analyze_texts.call_args[0][0]) == 2
+        # Mean over cached 0.3 + fresh 0.9, 0.9 = 0.7 -> bucketised.
+        assert scores["alice"] == ai_detection.bucketize((0.3 + 0.9 + 0.9) / 3)
+
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_tweet_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
+    def test_per_item_none_is_skipped(self, *_):
+        # A None score for one tweet (per-item error) is dropped from the mean.
+        client = mock.Mock()
+        client.analyze_texts.return_value = [0.9, None, 0.7]  # mean of valid = 0.8
+        tweets_map = {"alice": [_tweet(str(i), "x" * 250) for i in range(3)]}
+        scores = ai_detection.compute_ai_scores(
+            ["alice"], date_bucket="2026-06-27",
+            client=client, tweets_provider=lambda u: tweets_map.get(u),
+        )
+        assert scores["alice"] == ai_detection.bucketize(0.8)
+
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
+    def test_account_with_only_short_tweets_is_skipped(self, *_):
+        client = mock.Mock()
+        tweets_map = {"alice": [_tweet("1", "short"), _tweet("2", "also short")]}
+        scores = ai_detection.compute_ai_scores(
+            ["alice"], date_bucket="2026-06-27",
+            client=client, tweets_provider=lambda u: tweets_map.get(u),
+        )
+        assert "alice" not in scores
+        client.analyze_texts.assert_not_called()  # nothing eligible to score
+
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.cache_tweet_ai_score")
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
+    def test_account_skipped_when_all_samples_fail(self, *_):
+        client = mock.Mock()
+        client.analyze_texts.side_effect = lambda texts: [None] * len(texts)  # all fail open
+        tweets_map = {"alice": [_tweet(str(i), "x" * 250) for i in range(3)]}
+        scores = ai_detection.compute_ai_scores(
+            ["alice"], date_bucket="2026-06-27",
+            client=client, tweets_provider=lambda u: tweets_map.get(u),
+        )
+        assert "alice" not in scores
+
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_ai_score", return_value=None)
+    @mock.patch("bitcast.validator.social_discovery.ai_detection.get_cached_tweet_ai_score", return_value=None)
+    def test_config_error_propagates(self, *_):
+        client = mock.Mock()
+        client.analyze_texts.side_effect = ai_detection.its_ai_client.ItsAiConfigError("no key")
+        tweets_map = {"alice": [_tweet("1", "x" * 250)]}
+        with pytest.raises(ai_detection.its_ai_client.ItsAiConfigError):
+            ai_detection.compute_ai_scores(
+                ["alice"], date_bucket="2026-06-27",
+                client=client, tweets_provider=lambda u: tweets_map.get(u),
+            )
