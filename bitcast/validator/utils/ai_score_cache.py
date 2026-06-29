@@ -7,8 +7,10 @@ Two layers, both backed by the shared DiscoveryCache (diskcache):
      Tweet text is immutable, so an its-ai result for a tweet never changes.
 
   2. Per-account score (key ``ai_acct_{username}_{date_bucket}``) -- 2-week TTL.
-     The seeded sample rotates with the UTC date bucket, so the aggregate is
-     recomputed periodically while still amortizing cost within a window.
+     The seeded sample rotates with the discovery-cycle bucket (see
+     current_date_bucket), so the aggregate is recomputed once per cycle while
+     still amortizing cost within it. Cycle-based (not UTC-daily) bucketing keeps
+     the bucket identical for all validators running a pool within the same cycle.
 """
 
 from typing import Optional
