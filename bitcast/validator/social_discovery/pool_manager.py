@@ -45,7 +45,7 @@ class PoolManager:
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
                     # Handles whose badged affiliates get amplified influence. Affiliates
                     # of these accounts are treated as core members in Stage-2 PageRank.
-                    'shortlisted_accounts': [acc.lower() for acc in (pool_data.get('shortlisted_accounts') or [])],
+                    'promoted_affiliates': [acc.lower() for acc in (pool_data.get('promoted_affiliates') or [])],
                     'lang': pool_data.get('lang'),
                     'date_offset': pool_data.get('date_offset', 0),
                     'active': active,

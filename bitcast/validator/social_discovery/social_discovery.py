@@ -229,7 +229,7 @@ class TwitterNetworkAnalyzer:
         skip_if_cache_fresh: Optional[bool] = None,
         ai_dampening: bool = False,
         ai_scores: Optional[Dict[str, float]] = None,
-        shortlisted_accounts: Optional[Set[str]] = None,
+        promoted_affiliates: Optional[Set[str]] = None,
     ) -> Tuple[Dict[str, float], np.ndarray, np.ndarray, List[str], Dict[str, Dict], int]:
         """
         Analyze Twitter network and return absolute influence scores and relationship matrices.
@@ -259,11 +259,11 @@ class TwitterNetworkAnalyzer:
                          proportion to its AI score via a sink node. Populates self.ai_scores.
             ai_scores: Optional precomputed {username: ai_score} map (injectable for tests/determinism).
                       When None and ai_dampening is True, scores are computed internally.
-            shortlisted_accounts: Optional set of handles whose badged affiliates get amplified
+            promoted_affiliates: Optional set of handles whose badged affiliates get amplified
                       influence. Any account whose ``affiliate_username`` is in this set is treated
                       as a core member of the personalized-PageRank restart distribution (same
                       teleport weight as core accounts), so its endorsements carry amplified,
-                      propagating influence. A non-empty shortlist enables personalized PageRank
+                      propagating influence. A non-empty set enables personalized PageRank
                       even when use_personalized_pagerank is False.
 
         Returns:
@@ -559,22 +559,22 @@ class TwitterNetworkAnalyzer:
             sink_added = self._apply_ai_sink(G, ai_scores)
 
         # Build the personalization vector: core-biased personalized PageRank when
-        # requested, else standard PageRank. Affiliates of shortlisted accounts are
+        # requested, else standard PageRank. Affiliates of promoted handles are
         # folded into the restart set at the same weight as core accounts, so their
-        # endorsements carry amplified, propagating influence. A non-empty shortlist
+        # endorsements carry amplified, propagating influence. A non-empty set
         # enables personalized PageRank even when use_personalized_pagerank is False.
         restart_nodes: Set[str] = set()
         if use_personalized_pagerank and core_accounts:
             restart_nodes |= set(core_accounts)
-        if shortlisted_accounts:
+        if promoted_affiliates:
             affiliate_boosted = {
                 node for node in G.nodes()
-                if user_info_map.get(node, {}).get('affiliate_username') in shortlisted_accounts
+                if user_info_map.get(node, {}).get('affiliate_username') in promoted_affiliates
             }
             if affiliate_boosted:
                 bt.logging.info(
                     f"Affiliate boost: {len(affiliate_boosted)} account(s) affiliated with "
-                    f"{len(shortlisted_accounts)} shortlisted handle(s) promoted to core teleport weight"
+                    f"{len(promoted_affiliates)} promoted handle(s) promoted to core teleport weight"
                 )
             restart_nodes |= affiliate_boosted
 

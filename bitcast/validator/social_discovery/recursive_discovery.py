@@ -470,7 +470,7 @@ async def two_stage_discovery(
             use_personalized_pagerank=True,
             skip_if_cache_fresh=True,
             ai_dampening=AI_DAMPENING_ENABLED,
-            shortlisted_accounts=set(pool_config.get('shortlisted_accounts') or []),
+            promoted_affiliates=set(pool_config.get('promoted_affiliates') or []),
         )
         
         # Track discoveries

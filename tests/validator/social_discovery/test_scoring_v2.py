@@ -78,7 +78,7 @@ class TestAiSink:
 # Two structurally symmetric, disjoint mutual pairs:
 #   aff <-> x   and   plain <-> y
 # Without a boost the two pairs score identically. "aff" is a badged affiliate
-# of the shortlisted handle "brand".
+# of the promoted handle "brand".
 AFFILIATE_GRAPH_TWEETS = {
     "aff": [_tweet("hi @x", ["x"])],
     "x": [_tweet("hi @aff", ["aff"])],
@@ -89,7 +89,7 @@ AFFILIATE_USERS = ["aff", "x", "plain", "y"]
 
 
 class TestAffiliateBoost:
-    def test_affiliate_of_shortlisted_outranks_symmetric_nonaffiliate(self):
+    def test_affiliate_of_promoted_outranks_symmetric_nonaffiliate(self):
         client = _make_client(AFFILIATE_GRAPH_TWEETS, affiliates={"aff": "brand"})
         analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
 
@@ -99,7 +99,7 @@ class TestAffiliateBoost:
         assert base["x"] == pytest.approx(base["y"], rel=1e-9)
 
         boosted, *_ = analyzer.analyze_network(
-            AFFILIATE_USERS, ["hi"], shortlisted_accounts={"brand"},
+            AFFILIATE_USERS, ["hi"], promoted_affiliates={"brand"},
         )
         # The affiliate is lifted above its baseline and above the mirror account.
         assert boosted["aff"] > base["aff"]
@@ -108,25 +108,25 @@ class TestAffiliateBoost:
         # account the non-affiliate endorses.
         assert boosted["x"] > boosted["y"]
 
-    def test_empty_shortlist_is_noop(self):
+    def test_empty_promoted_affiliates_is_noop(self):
         client = _make_client(AFFILIATE_GRAPH_TWEETS, affiliates={"aff": "brand"})
         analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
         base, *_ = analyzer.analyze_network(AFFILIATE_USERS, ["hi"])
-        for shortlist in (None, set()):
+        for promoted in (None, set()):
             same, *_ = analyzer.analyze_network(
-                AFFILIATE_USERS, ["hi"], shortlisted_accounts=shortlist,
+                AFFILIATE_USERS, ["hi"], promoted_affiliates=promoted,
             )
             for user in AFFILIATE_USERS:
                 assert same[user] == pytest.approx(base[user], rel=1e-9)
 
-    def test_shortlist_with_no_matching_affiliate_is_noop(self):
+    def test_promoted_with_no_matching_affiliate_is_noop(self):
         client = _make_client(AFFILIATE_GRAPH_TWEETS, affiliates={"aff": "brand"})
         analyzer = TwitterNetworkAnalyzer(client, max_workers=1)
         base, *_ = analyzer.analyze_network(AFFILIATE_USERS, ["hi"])
         # "aff" is the handle, but no account is affiliated TO "aff"; matching is on
-        # affiliate_username, so this shortlist boosts nobody.
+        # affiliate_username, so this set boosts nobody.
         same, *_ = analyzer.analyze_network(
-            AFFILIATE_USERS, ["hi"], shortlisted_accounts={"aff"},
+            AFFILIATE_USERS, ["hi"], promoted_affiliates={"aff"},
         )
         for user in AFFILIATE_USERS:
             assert same[user] == pytest.approx(base[user], rel=1e-9)
