@@ -128,7 +128,7 @@ AI_MIN_TWEET_CHARS = int(os.getenv('AI_MIN_TWEET_CHARS', '200'))  # its-ai requi
 ITS_AI_BATCH_SIZE = int(os.getenv('ITS_AI_BATCH_SIZE', '250'))
 AI_DETECTION_CONCURRENCY = int(os.getenv('AI_DETECTION_CONCURRENCY', '4'))  # concurrent batch requests
 AI_SCORE_BUCKET = float(os.getenv('AI_SCORE_BUCKET', '0.2'))  # bucketise to absorb API jitter
-AI_SCORE_CAP = float(os.getenv('AI_SCORE_CAP', '0.95'))      # cap so sink weight stays finite
+AI_SCORE_CAP = float(os.getenv('AI_SCORE_CAP', '0.75'))      # cap so sink weight stays finite
 AI_SCORE_TTL_SECONDS = int(os.getenv('AI_SCORE_TTL_DAYS', '14')) * 24 * 60 * 60  # per-account cache
 # Cap the number of accounts AI-checked per run to bound cost: only the top-N by
 # interaction weight (most influential) are scored; the rest are assumed human
