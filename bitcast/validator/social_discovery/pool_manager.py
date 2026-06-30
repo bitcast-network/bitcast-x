@@ -43,6 +43,9 @@ class PoolManager:
                 pools[name] = {
                     'keywords': [kw.lower() for kw in pool_data.get('keywords', [])],
                     'initial_accounts': [acc.lower() for acc in pool_data.get('initial_accounts', [])],
+                    # Handles whose badged affiliates get amplified influence. Affiliates
+                    # of these accounts are treated as core members in Stage-2 PageRank.
+                    'promoted_affiliates': [acc.lower() for acc in (pool_data.get('promoted_affiliates') or [])],
                     'lang': pool_data.get('lang'),
                     'date_offset': pool_data.get('date_offset', 0),
                     'active': active,
