@@ -394,6 +394,133 @@ def get_considered_accounts_for_brief(
     return merged
 
 
+def _find_map_for_timestamp(pool_name: str, timestamp: datetime) -> Optional[Tuple[Path, datetime]]:
+    """
+    Find the social map that was active at a specific timestamp.
+
+    A map is "active" from its creation until the next map is created.
+    If *timestamp* predates all maps, the earliest map is returned.
+    If *timestamp* postdates all maps, the latest map is returned.
+    If no maps exist, returns None.
+
+    Args:
+        pool_name: Pool name.
+        timestamp: UTC datetime to look up.
+
+    Returns:
+        Tuple of (map_file_path, map_timestamp) or None if no maps exist.
+    """
+    social_maps_dir = Path(__file__).parents[1] / "social_discovery" / "social_maps" / pool_name
+
+    if not social_maps_dir.exists():
+        return None
+
+    all_maps = [
+        f for f in social_maps_dir.glob("*.json")
+        if not f.name.endswith(('_adjacency.json', '_metadata.json'))
+        and not f.name.startswith('recursive_summary_')
+    ]
+
+    if not all_maps:
+        return None
+
+    maps_with_times = sorted(
+        [(f, ts) for f in all_maps if (ts := parse_social_map_filename(f.name))],
+        key=lambda x: x[1]
+    )
+
+    if not maps_with_times:
+        return None
+
+    # Find the map whose active period [map_time, next_map_time) contains timestamp
+    for i, (map_file, map_time) in enumerate(maps_with_times):
+        next_map_time = maps_with_times[i + 1][1] if i + 1 < len(maps_with_times) else datetime.max.replace(tzinfo=timezone.utc)
+        if map_time <= timestamp < next_map_time:
+            return (map_file, map_time)
+
+    # timestamp predates all maps → return earliest
+    return maps_with_times[0]
+
+
+# Module-level cache for time-pinned influence lookups.
+# Key: pool_name, Value: dict of {timestamp_str: {lowercase_username: score}}
+_influence_cache: Dict[str, Dict[str, Dict[str, float]]] = {}
+
+
+def get_influence_at_time(
+    pool_name: str,
+    username: str,
+    timestamp: datetime,
+    fallback_score: Optional[float] = None,
+) -> Optional[float]:
+    """
+    Look up a user's influence score from the social map that was active at *timestamp*.
+
+    This pins influence scores to the time a tweet was posted, so that when the
+    social map regenerates mid-campaign, older tweets keep the score they had
+    at posting time.
+
+    A module-level cache avoids repeated file reads for the same (pool, map).
+
+    Args:
+        pool_name: Pool name.
+        username: Twitter handle (case-insensitive).
+        timestamp: UTC datetime (typically ``tweet.created_at``).
+        fallback_score: Value to return if the username is not found in the
+            resolved map.  If None, returns None.
+
+    Returns:
+        Influence score (float), or *fallback_score* / None if not found.
+    """
+    username_lower = username.lower()
+    timestamp = timestamp.astimezone(timezone.utc) if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+    ts_key = timestamp.isoformat()
+
+    # Check cache
+    cache_entry = _influence_cache.get(pool_name, {}).get(ts_key)
+    if cache_entry is not None:
+        return cache_entry.get(username_lower, fallback_score)
+
+    # Find the map active at this timestamp
+    result = _find_map_for_timestamp(pool_name, timestamp)
+    if result is None:
+        # No maps at all for this pool — return fallback
+        return fallback_score
+
+    map_file, _ = result
+
+    # Load and cache the accounts dict for this map
+    try:
+        with open(map_file, 'r') as f:
+            social_map = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        bt.logging.warning(f"Failed to load social map {map_file}: {e}")
+        return fallback_score
+
+    accounts_dict = _accounts_dict_from_map(social_map)
+
+    # Cache it
+    if pool_name not in _influence_cache:
+        _influence_cache[pool_name] = {}
+    _influence_cache[pool_name][ts_key] = accounts_dict
+
+    return accounts_dict.get(username_lower, fallback_score)
+
+
+def clear_influence_cache(pool_name: Optional[str] = None) -> None:
+    """
+    Clear the time-pinned influence lookup cache.
+
+    Args:
+        pool_name: If given, clear only the cache for this pool.
+            If None, clear the entire cache.
+    """
+    if pool_name is None:
+        _influence_cache.clear()
+    else:
+        _influence_cache.pop(pool_name, None)
+
+
 def load_relationship_scores(pool_name: str) -> Tuple[Optional[Any], List[str], Dict[str, int]]:
     """
     Load the latest relationship scores matrix for cabal protection.

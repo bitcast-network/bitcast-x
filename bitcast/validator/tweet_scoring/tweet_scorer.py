@@ -31,6 +31,7 @@ from .social_map_loader import (
     get_considered_accounts,
     get_active_members_for_brief,
     get_considered_accounts_for_brief,
+    get_influence_at_time,
     load_relationship_scores
 )
 from .tweet_filter import TweetFilter
@@ -349,7 +350,26 @@ def score_tweets_for_pool(
         author = tweet.get('author', '').lower()
         engagements = all_engagements.get(tweet_id, {})
         
-        author_influence = considered_accounts_dict.get(author, calculator.min_influence_score)
+        # Pin author influence to the social map active at tweet-time.
+        # This prevents scores from fluctuating when the social map regenerates
+        # mid-campaign. Falls back to min_influence_score if no map covers the
+        # timestamp or the author isn't in the resolved map.
+        author_influence = None
+        created_at_str = tweet.get('created_at', '')
+        if created_at_str:
+            try:
+                tweet_dt = datetime.strptime(created_at_str, '%a %b %d %H:%M:%S %z %Y')
+                author_influence = get_influence_at_time(
+                    pool_name=pool_name,
+                    username=author,
+                    timestamp=tweet_dt,
+                    fallback_score=None,
+                )
+            except ValueError:
+                bt.logging.debug(f"Could not parse created_at '{created_at_str}' for tweet {tweet_id}")
+        
+        if author_influence is None:
+            author_influence = calculator.min_influence_score
         
         score, details = calculator.calculate_tweet_score(
             engagements=engagements,
