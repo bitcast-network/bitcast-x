@@ -443,7 +443,9 @@ def _find_map_for_timestamp(pool_name: str, timestamp: datetime) -> Optional[Tup
 
 
 # Module-level cache for time-pinned influence lookups.
-# Key: pool_name, Value: dict of {timestamp_str: {lowercase_username: score}}
+# Key: pool_name, Value: dict of {map_file_path: {lowercase_username: score}}
+# Map files are immutable once written, so entries never go stale; the cache
+# is bounded by the number of maps per pool (one new map every ~2 weeks).
 _influence_cache: Dict[str, Dict[str, Dict[str, float]]] = {}
 
 
@@ -474,12 +476,6 @@ def get_influence_at_time(
     """
     username_lower = username.lower()
     timestamp = timestamp.astimezone(timezone.utc) if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-    ts_key = timestamp.isoformat()
-
-    # Check cache
-    cache_entry = _influence_cache.get(pool_name, {}).get(ts_key)
-    if cache_entry is not None:
-        return cache_entry.get(username_lower, fallback_score)
 
     # Find the map active at this timestamp
     result = _find_map_for_timestamp(pool_name, timestamp)
@@ -488,21 +484,21 @@ def get_influence_at_time(
         return fallback_score
 
     map_file, _ = result
+    map_key = str(map_file)
 
-    # Load and cache the accounts dict for this map
-    try:
-        with open(map_file, 'r') as f:
-            social_map = json.load(f)
-    except (json.JSONDecodeError, OSError) as e:
-        bt.logging.warning(f"Failed to load social map {map_file}: {e}")
-        return fallback_score
+    accounts_dict = _influence_cache.get(pool_name, {}).get(map_key)
 
-    accounts_dict = _accounts_dict_from_map(social_map)
+    if accounts_dict is None:
+        # Load and cache the accounts dict for this map
+        try:
+            with open(map_file, 'r') as f:
+                social_map = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            bt.logging.warning(f"Failed to load social map {map_file}: {e}")
+            return fallback_score
 
-    # Cache it
-    if pool_name not in _influence_cache:
-        _influence_cache[pool_name] = {}
-    _influence_cache[pool_name][ts_key] = accounts_dict
+        accounts_dict = _accounts_dict_from_map(social_map)
+        _influence_cache.setdefault(pool_name, {})[map_key] = accounts_dict
 
     return accounts_dict.get(username_lower, fallback_score)
 

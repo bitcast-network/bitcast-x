@@ -231,7 +231,8 @@ class TestInfluenceCache:
     """Test caching behavior of get_influence_at_time."""
 
     def test_cache_avoids_repeated_file_reads(self, two_maps, monkeypatch):
-        """Second call for the same (pool, timestamp) should use cache."""
+        """Calls resolving to the same map should read its file only once,
+        even for different tweet timestamps."""
         import builtins
         original_open = builtins.open
         call_count = 0
@@ -245,18 +246,18 @@ class TestInfluenceCache:
 
         monkeypatch.setattr(builtins, 'open', counting_open)
 
-        ts = datetime(2025, 11, 10, tzinfo=timezone.utc)
-
         # First call — loads from file
-        score1 = get_influence_at_time('test', 'alice', ts)
+        score1 = get_influence_at_time('test', 'alice', datetime(2025, 11, 10, tzinfo=timezone.utc))
         first_count = call_count
 
-        # Second call — should hit cache
-        score2 = get_influence_at_time('test', 'bob', ts)
+        # Different timestamps within the same map's active period — must hit cache
+        score2 = get_influence_at_time('test', 'bob', datetime(2025, 11, 12, 8, 30, tzinfo=timezone.utc))
+        score3 = get_influence_at_time('test', 'alice', datetime(2025, 11, 14, 23, 59, tzinfo=timezone.utc))
         second_count = call_count
 
         assert score1 == 0.50
         assert score2 == 0.30
+        assert score3 == 0.50
         assert second_count == first_count  # no additional file reads
 
     def test_clear_influence_cache_for_specific_pool(self, two_maps):
