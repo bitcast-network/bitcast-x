@@ -46,7 +46,7 @@ def convert_numpy_types(obj):
 class DataPublisher(ABC):
     """Abstract base class for data publishing with message signing."""
     
-    def __init__(self, wallet: bt.wallet, timeout_seconds: int = 10):
+    def __init__(self, wallet: bt.Wallet, timeout_seconds: int = 10):
         """
         Initialize DataPublisher with validator wallet.
         
@@ -150,7 +150,7 @@ class DataPublisher(ABC):
 class UnifiedDataPublisher(DataPublisher):
     """Unified publisher for Twitter/X platform data using async API format."""
     
-    def __init__(self, wallet: bt.wallet, timeout_seconds: int = 60):
+    def __init__(self, wallet: bt.Wallet, timeout_seconds: int = 60):
         """
         Initialize UnifiedDataPublisher with timeout for async processing.
         
@@ -315,7 +315,7 @@ class UnifiedDataPublisher(DataPublisher):
 _global_publisher: Optional[UnifiedDataPublisher] = None
 
 
-def initialize_global_publisher(wallet: bt.wallet) -> None:
+def initialize_global_publisher(wallet: bt.Wallet) -> None:
     """
     Initialize the global publisher with a validator wallet.
     Should be called once during validator startup.

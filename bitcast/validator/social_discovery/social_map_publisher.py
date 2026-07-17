@@ -188,8 +188,8 @@ def main():
             description="Republish the latest social map data for a pool"
         )
         bt.logging.add_args(parser)
-        bt.wallet.add_args(parser)
-        bt.subtensor.add_args(parser)
+        bt.Wallet.add_args(parser)
+        bt.Subtensor.add_args(parser)
         
         parser.add_argument(
             "--pool-name",
@@ -208,11 +208,11 @@ def main():
             args_list.extend(['--wallet.hotkey', HOTKEY_NAME])
         
         # Parse configuration with CLI args + env-based wallet args
-        config = bt.config(parser, args=args_list)
+        config = bt.Config(parser, args=args_list)
         bt.logging.set_config(config=config.logging)
         
         # Initialize global publisher with properly configured wallet
-        wallet = bt.wallet(config=config)
+        wallet = bt.Wallet(config=config)
         initialize_global_publisher(wallet)
         bt.logging.info("🌐 Global publisher initialized for standalone mode")
         

@@ -100,7 +100,7 @@ async def main():
         )
         
         # Parse arguments
-        config = bt.config(parser)
+        config = bt.Config(parser)
         bt.logging.set_config(config=config.logging)
         
         # Initialize client

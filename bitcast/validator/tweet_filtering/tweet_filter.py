@@ -477,7 +477,7 @@ if __name__ == "__main__":
             args_list.insert(0, '--logging.info')
         
         # Parse configuration
-        config = bt.config(parser, args=args_list)
+        config = bt.Config(parser, args=args_list)
         bt.logging.set_config(config=config.logging)
         
         # Validate required arguments

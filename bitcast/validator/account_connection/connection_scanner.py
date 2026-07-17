@@ -420,8 +420,8 @@ if __name__ == "__main__":
             description="Scan for connection tags in replies to designated tweets"
         )
         bt.logging.add_args(parser)
-        bt.wallet.add_args(parser)
-        bt.subtensor.add_args(parser)
+        bt.Wallet.add_args(parser)
+        bt.Subtensor.add_args(parser)
 
         import sys
         args_list = sys.argv[1:]
@@ -434,7 +434,7 @@ if __name__ == "__main__":
         if HOTKEY_NAME and not any('--wallet.hotkey' in arg for arg in args_list):
             args_list.extend(['--wallet.hotkey', HOTKEY_NAME])
 
-        config = bt.config(parser, args=args_list)
+        config = bt.Config(parser, args=args_list)
         bt.logging.set_config(config=config.logging)
 
         env_path = Path(__file__).parents[1] / '.env'
@@ -444,7 +444,7 @@ if __name__ == "__main__":
 
         if ENABLE_DATA_PUBLISH:
             from bitcast.validator.utils.data_publisher import initialize_global_publisher
-            wallet = bt.wallet(config=config)
+            wallet = bt.Wallet(config=config)
             initialize_global_publisher(wallet)
 
         scanner = ConnectionScanner()

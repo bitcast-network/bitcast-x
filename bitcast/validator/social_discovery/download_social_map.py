@@ -111,7 +111,7 @@ async def main():
         if not any(arg.startswith('--logging.') for arg in args_list):
             args_list.insert(0, '--logging.info')
         
-        config = bt.config(parser, args=args_list)
+        config = bt.Config(parser, args=args_list)
         bt.logging.set_config(config=config.logging)
         
         # Validate arguments

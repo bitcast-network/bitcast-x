@@ -278,7 +278,7 @@ class ConnectionDatabase:
     def get_accounts_with_uids(
         self,
         pool_name: Optional[str],
-        metagraph: "bt.metagraph",
+        metagraph: "bt.Metagraph",
         eligible_accounts: Optional[Set[str]] = None,
     ) -> List[Dict[str, Any]]:
         """

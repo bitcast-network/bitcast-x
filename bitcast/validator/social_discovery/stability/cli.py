@@ -107,7 +107,7 @@ def main(argv=None):
     if not any(arg.startswith("--logging.") for arg in args_list):
         args_list = ["--logging.info"] + list(args_list)
 
-    config = bt.config(parser, args=args_list)
+    config = bt.Config(parser, args=args_list)
     bt.logging.set_config(config=config.logging)
 
     pool_name = config.pool
