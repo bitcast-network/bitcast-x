@@ -720,8 +720,8 @@ def main():
             description="Two-stage social discovery with personalized PageRank"
         )
         bt.logging.add_args(parser)
-        bt.wallet.add_args(parser)
-        bt.subtensor.add_args(parser)
+        bt.Wallet.add_args(parser)
+        bt.Subtensor.add_args(parser)
         
         parser.add_argument(
             "--pool-name", type=str, default="tao",
@@ -785,11 +785,11 @@ def main():
         if not any(arg.startswith('--logging.') for arg in args_list):
             args_list.insert(0, '--logging.info')
         
-        config = bt.config(parser, args=args_list)
+        config = bt.Config(parser, args=args_list)
         bt.logging.set_config(config=config.logging)
         
         # Initialize global publisher
-        wallet = bt.wallet(config=config)
+        wallet = bt.Wallet(config=config)
         initialize_global_publisher(wallet)
         bt.logging.info("Global publisher initialized for standalone mode")
         

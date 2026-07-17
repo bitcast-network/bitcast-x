@@ -307,7 +307,7 @@ if __name__ == "__main__":
     if not any('--logging' in arg for arg in args_list):
         args_list.insert(0, '--logging.debug')
 
-    config = bt.config(parser, args=args_list)
+    config = bt.Config(parser, args=args_list)
     bt.logging.set_config(config=config.logging)
 
     if not config.tweet_id:
