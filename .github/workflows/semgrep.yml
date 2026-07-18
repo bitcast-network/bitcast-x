@@ -22,7 +22,7 @@ jobs:
         run: pip install semgrep
 
       - name: Run Semgrep
-        run: semgrep scan --config auto --config p/python p/security-audit p/owasp-top-ten --error --severity ERROR --sarif --output semgrep-results.sarif .
+        run: semgrep scan --config auto --config p/python --config p/security-audit --config p/owasp-top-ten --error --severity ERROR --sarif --output semgrep-results.sarif .
 
       - name: Upload SARIF
         if: always()
