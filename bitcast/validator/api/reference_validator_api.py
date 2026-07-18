@@ -42,6 +42,8 @@ def load_state() -> Dict:
     if not state_path.exists():
         raise FileNotFoundError(f"State file not found at {state_path}")
     
+    # The state file is written and read only by this validator on the local machine.
+    # nosemgrep: trailofbits.python.pickles-in-numpy.pickles-in-numpy
     state = np.load(state_path, allow_pickle=True)
     return {
         "scores": state["scores"],

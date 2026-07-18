@@ -59,6 +59,8 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    # PRAGMA statements cannot use bound parameters; `table` is an internal constant.
+    # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
     return column in {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
@@ -215,6 +217,8 @@ def run_migrations(db_path: Path) -> int:
             if migration is None:
                 raise RuntimeError(f"No migration registered for schema version {version}")
             migration(db_path, conn)
+            # PRAGMA statements cannot use bound parameters; `version` is an int from the loop above.
+            # nosemgrep: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
             conn.execute(f"PRAGMA user_version = {version}")
             conn.commit()
 
