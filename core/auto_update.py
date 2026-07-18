@@ -70,6 +70,8 @@ def run_auto_update(neuron_type):
             project_parent = os.path.abspath(os.path.join(project_root, ".."))
             venv_path = f"{project_parent}/venv_bitcast_x"
             setup_cmd = f"source {venv_path}/bin/activate && {project_root}/scripts/setup_env.sh"
+            # shell=True is required to `source` the venv activation; paths derive from the repo's own location.
+            # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
             subprocess.run(setup_cmd, shell=True, executable='/bin/bash')
 
             time.sleep(20)
@@ -77,6 +79,8 @@ def run_auto_update(neuron_type):
             print("Restarting neuron")
             # Run start script with venv activation
             start_cmd = f"source {venv_path}/bin/activate && {project_root}/scripts/run_{neuron_type}.sh"
+            # shell=True is required to `source` the venv activation; paths derive from the repo's own location.
+            # nosemgrep: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
             subprocess.run(start_cmd, shell=True, executable='/bin/bash')
     else:
         print("Repo is up-to-date.")
