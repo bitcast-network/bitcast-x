@@ -39,6 +39,69 @@ from .tweet_discovery import TweetDiscovery
 from .score_calculator import ScoreCalculator
 
 
+def _resolve_author_influence(
+    author: str,
+    created_at_str: str,
+    tweet_id: str,
+    pool_name: str,
+    considered_accounts_dict: Dict[str, float],
+    calculator: "ScoreCalculator",
+) -> float:
+    """Resolve an author's influence score using max(tweet_time, current).
+
+    The tweet-time influence is looked up via ``get_influence_at_time`` against
+    the social map active when the tweet was created. The "current" influence is
+    the merged score from all social maps active during the brief window, taken
+    from ``considered_accounts_dict`` (the same source used for engagement
+    eligibility). The higher of the two is returned so that scores are not
+    artificially low when a social map regenerates mid-campaign and the creator's
+    influence jumps. If neither source yields a value, the calculator's
+    ``min_influence_score`` fallback is used.
+
+    Args:
+        author: Lowercased author username.
+        created_at_str: Tweet ``created_at`` string (Twitter UTC format) or ''.
+        tweet_id: Tweet id (for logging only).
+        pool_name: Pool name (forwarded to ``get_influence_at_time``).
+        considered_accounts_dict: ``{lowercase_username: influence_score}`` merged
+            across the brief window.
+        calculator: ``ScoreCalculator`` providing ``min_influence_score`` fallback.
+
+    Returns:
+        Resolved author influence score (never None).
+    """
+    # Pin author influence to the higher of tweet-time or current influence.
+    # This prevents scores from being artificially low when a social map
+    # regenerates mid-campaign and the creator's influence jumps.
+    author_influence = None
+    if created_at_str:
+        try:
+            tweet_dt = datetime.strptime(created_at_str, '%a %b %d %H:%M:%S %z %Y')
+            author_influence = get_influence_at_time(
+                pool_name=pool_name,
+                username=author,
+                timestamp=tweet_dt,
+                fallback_score=None,
+            )
+        except ValueError:
+            bt.logging.debug(f"Could not parse created_at '{created_at_str}' for tweet {tweet_id}")
+
+    # Use the higher of tweet-time influence and current influence.
+    # considered_accounts_dict contains the merged influence scores from all
+    # social maps active during the brief window (same source as eligibility).
+    current_influence = considered_accounts_dict.get(author)
+
+    if author_influence is not None and current_influence is not None:
+        author_influence = max(author_influence, current_influence)
+    elif current_influence is not None:
+        author_influence = current_influence
+
+    if author_influence is None:
+        author_influence = calculator.min_influence_score
+
+    return author_influence
+
+
 def filter_tweets_by_date(tweets: List[Dict], cutoff_start: datetime, cutoff_end: Optional[datetime] = None) -> List[Dict]:
     """
     Filter tweets to only those within date range. All comparisons in UTC.
@@ -350,26 +413,17 @@ def score_tweets_for_pool(
         author = tweet.get('author', '').lower()
         engagements = all_engagements.get(tweet_id, {})
         
-        # Pin author influence to the social map active at tweet-time.
-        # This prevents scores from fluctuating when the social map regenerates
-        # mid-campaign. Falls back to min_influence_score if no map covers the
-        # timestamp or the author isn't in the resolved map.
-        author_influence = None
-        created_at_str = tweet.get('created_at', '')
-        if created_at_str:
-            try:
-                tweet_dt = datetime.strptime(created_at_str, '%a %b %d %H:%M:%S %z %Y')
-                author_influence = get_influence_at_time(
-                    pool_name=pool_name,
-                    username=author,
-                    timestamp=tweet_dt,
-                    fallback_score=None,
-                )
-            except ValueError:
-                bt.logging.debug(f"Could not parse created_at '{created_at_str}' for tweet {tweet_id}")
-        
-        if author_influence is None:
-            author_influence = calculator.min_influence_score
+        # Pin author influence to the higher of tweet-time or current influence.
+        # This prevents scores from being artificially low when a social map
+        # regenerates mid-campaign and the creator's influence jumps.
+        author_influence = _resolve_author_influence(
+            author=author,
+            created_at_str=tweet.get('created_at', ''),
+            tweet_id=tweet_id,
+            pool_name=pool_name,
+            considered_accounts_dict=considered_accounts_dict,
+            calculator=calculator,
+        )
         
         score, details = calculator.calculate_tweet_score(
             engagements=engagements,

@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import bitcast.validator.tweet_scoring.social_map_loader as sml
+import bitcast.validator.tweet_scoring.tweet_scorer as ts_mod
 from bitcast.validator.tweet_scoring.social_map_loader import (
     get_influence_at_time,
     clear_influence_cache,
@@ -14,6 +15,8 @@ from bitcast.validator.tweet_scoring.social_map_loader import (
     parse_social_map_filename,
     _accounts_dict_from_map,
 )
+from bitcast.validator.tweet_scoring.score_calculator import ScoreCalculator
+from bitcast.validator.tweet_scoring.tweet_scorer import _resolve_author_influence
 
 
 # ---------------------------------------------------------------------------
@@ -310,3 +313,139 @@ class TestScoreConsistencyAcrossMapRefresh:
         # But if we re-query at the original tweet time, we get the original score
         rechecked = get_influence_at_time('test', 'alice', tweet_time)
         assert rechecked == 0.50  # still the old score, pinned to tweet time
+
+
+# ---------------------------------------------------------------------------
+# Tests for the max(tweet_time, current) influence selection at the
+# tweet_scorer.py call site (SUB-125).
+# ---------------------------------------------------------------------------
+
+class TestMaxInfluenceBehavior:
+    """Tests for ``_resolve_author_influence`` — the call-site logic in
+    ``tweet_scorer.py`` that selects the higher of tweet-time vs. current
+    influence for an author.
+
+    These tests exercise the actual function used by ``score_tweets_for_pool``
+    (extracted as ``_resolve_author_influence`` so it can be unit-tested in
+    isolation rather than mocking the entire scoring pipeline).
+    """
+
+    # Twitter-style created_at string used across tests.
+    CREATED_AT = 'Mon Nov 10 12:00:00 +0000 2025'
+
+    @pytest.fixture
+    def calculator(self):
+        """A ScoreCalculator whose min_influence_score is the smallest value in
+        ``considered_accounts`` (same construction as the real call site)."""
+        return ScoreCalculator(
+            considered_accounts={'someone': 0.01},
+            retweet_weight=2.0,
+            quote_weight=3.0,
+        )
+
+    def _resolve(self, calculator, author='alice', created_at=None,
+                 considered_accounts_dict=None, pool_name='test',
+                 tweet_id='t1'):
+        """Thin wrapper around the helper with sensible defaults."""
+        return _resolve_author_influence(
+            author=author,
+            created_at_str=created_at if created_at is not None else self.CREATED_AT,
+            tweet_id=tweet_id,
+            pool_name=pool_name,
+            considered_accounts_dict=considered_accounts_dict if considered_accounts_dict is not None else {},
+            calculator=calculator,
+        )
+
+    def test_current_higher_than_tweet_time_uses_current(self, calculator):
+        """When current_influence > tweet_time_influence, the higher (current)
+        influence is used.
+
+        Scenario: the social map regenerated mid-campaign and the creator's
+        influence jumped from 0.30 (at tweet time) to 0.80 (current). The score
+        should reflect the higher 0.80, not the stale 0.30.
+        """
+        considered = {'alice': 0.80}
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=0.30):
+            result = self._resolve(calculator, considered_accounts_dict=considered)
+        assert result == 0.80  # max(0.30, 0.80)
+
+    def test_tweet_time_higher_than_current_preserves_tweet_time(self, calculator):
+        """When tweet_time_influence > current_influence (score dropped), the
+        higher (tweet-time) influence is preserved.
+
+        Scenario: the creator's influence was 0.50 at tweet time but the latest
+        merged map only carries 0.10 (e.g. they were partially dropped). The
+        score must not be punished for the regression — 0.50 wins.
+        """
+        considered = {'alice': 0.10}
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=0.50):
+            result = self._resolve(calculator, considered_accounts_dict=considered)
+        assert result == 0.50  # max(0.50, 0.10)
+
+    def test_both_none_falls_back_to_min_influence_score(self, calculator):
+        """When both tweet-time and current influence are None (author missing
+        from the resolved map and absent from considered_accounts_dict), the
+        calculator's min_influence_score fallback is used."""
+        # get_influence_at_time returns None (author not in any map), and the
+        # author is absent from considered_accounts_dict -> .get returns None.
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=None):
+            result = self._resolve(
+                calculator,
+                author='nobody',
+                considered_accounts_dict={},
+            )
+        assert result == calculator.min_influence_score
+
+    def test_tweet_time_only_used_when_current_missing(self, calculator):
+        """If the author is in the resolved tweet-time map but not in
+        considered_accounts_dict, the tweet-time influence is used (current is
+        None, so max() isn't applicable)."""
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=0.42):
+            result = self._resolve(
+                calculator,
+                considered_accounts_dict={},  # author absent
+            )
+        assert result == 0.42
+
+    def test_current_only_used_when_created_at_missing(self, calculator):
+        """If created_at is empty/unparseable, tweet-time influence is None and
+        only the current influence from considered_accounts_dict is used."""
+        considered = {'alice': 0.77}
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=None) as m:
+            result = self._resolve(
+                calculator,
+                created_at='',  # no created_at -> no tweet-time lookup
+                considered_accounts_dict=considered,
+            )
+            # get_influence_at_time should not even be called when created_at is empty.
+            assert not m.called
+        assert result == 0.77
+
+    def test_unparseable_created_at_falls_back_to_current(self, calculator):
+        """A malformed created_at string logs a debug message and treats
+        tweet-time influence as None — falling through to current influence."""
+        considered = {'alice': 0.66}
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=0.99) as m:
+            result = self._resolve(
+                calculator,
+                created_at='not-a-date',
+                considered_accounts_dict=considered,
+            )
+            # strptime raises ValueError before get_influence_at_time is called.
+            assert not m.called
+        assert result == 0.66
+
+    def test_result_is_never_none(self, calculator):
+        """The helper contract guarantees a non-None float is always returned
+        (falls back to min_influence_score as a last resort)."""
+        with patch.object(ts_mod, 'get_influence_at_time', return_value=None):
+            result = self._resolve(
+                calculator,
+                author='ghost',
+                created_at='',
+                considered_accounts_dict={},
+            )
+        assert result is not None
+        assert isinstance(result, float)
+        assert result == calculator.min_influence_score
+
