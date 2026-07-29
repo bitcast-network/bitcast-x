@@ -42,20 +42,9 @@ from bitcast.validator.tweet_scoring.social_map_loader import load_latest_social
 class TwitterEvaluator(ScanBasedEvaluator):
     """Evaluator for Twitter/X platform content."""
     
-    # Multiplier applied to the budget of product placement briefs.
-    PRODUCT_PLACEMENT_MULTIPLIER = 2.0
-    
     def platform_name(self) -> str:
         """Return platform identifier."""
         return "twitter"
-    
-    @classmethod
-    def _get_effective_budget(cls, brief: Dict[str, Any]) -> float:
-        """Return the brief budget, applying a multiplier for product placement briefs."""
-        budget = brief.get('budget', 0)
-        if brief.get('format') == 'productPlacement':
-            budget *= cls.PRODUCT_PLACEMENT_MULTIPLIER
-        return budget
     
     async def score_briefs_for_monitoring(
         self,
@@ -234,7 +223,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
         for brief in briefs:
             brief_id = brief['id']
             pool_name = brief['pool']
-            bt.logging.info(f"📝 Brief {brief_id}: pool={pool_name}, budget=${self._get_effective_budget(brief)}")
+            bt.logging.info(f"📝 Brief {brief_id}: pool={pool_name}, budget=${brief.get('budget', 0)}")
 
             try:
                 snapshot_data, _ = load_reward_snapshot(brief_id, pool_name)
@@ -322,7 +311,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
         """
         brief_id = brief['id']
         pool_name = brief['pool']
-        budget = self._get_effective_budget(brief)
+        budget = brief.get('budget', 0)
         tweet_rewards = snapshot_data['tweet_rewards']
         bt.logging.info(f"📸 Using reward snapshot for brief {brief_id} ({len(tweet_rewards)} tweets)")
 
@@ -423,7 +412,7 @@ class TwitterEvaluator(ScanBasedEvaluator):
             # rewarded under the brief, so they're applied in finalize on the
             # assigned subset. Assignment therefore ranks on raw scores; the
             # bonuses are small relative to budget and don't change routing.
-            daily_budget = self._get_effective_budget(brief) / EMISSIONS_PERIOD
+            daily_budget = brief.get('budget', 0) / EMISSIONS_PERIOD
             return {
                 'brief': brief,
                 'pool_name': pool_name,
@@ -959,8 +948,8 @@ class TwitterEvaluator(ScanBasedEvaluator):
                     "tag": brief.get('tag'),
                     "qrt": brief.get('qrt'),
                     "inclusion_keywords": brief.get('inclusion_keywords'),
-                    "budget": self._get_effective_budget(brief),
-                    "daily_budget": self._get_effective_budget(brief) / EMISSIONS_PERIOD
+                    "budget": brief.get('budget', 0.0),
+                    "daily_budget": brief.get('budget', 0.0) / EMISSIONS_PERIOD
                 },
                 uid_targets=usd_targets,
                 featured_tweet=featured_selection,
