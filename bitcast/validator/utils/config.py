@@ -172,7 +172,11 @@ SUBNET_TREASURY_PERCENTAGE = 0
 SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
 
 # No-code mining
-NOCODE_UID = int(os.getenv('NOCODE_UID', '114'))
+# Migrated 114 -> 154 on 2026-08-07: the UID 114 wallet was compromised in the
+# 2026-08-06 incident. UID 154 is the replacement no-code X miner. This value
+# decides which UID every no-code creator's score is attributed to, so it moves
+# weights -- validators on different values will disagree.
+NOCODE_UID = int(os.getenv('NOCODE_UID', '154'))
 SIMULATE_CONNECTIONS = os.getenv('SIMULATE_CONNECTIONS', 'False').lower() == 'true'
 
 # Account connection scanning -- designated tweets that miners reply to with connection tags

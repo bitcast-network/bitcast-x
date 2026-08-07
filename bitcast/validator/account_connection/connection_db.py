@@ -284,7 +284,7 @@ class ConnectionDatabase:
         """
         Get account-to-UID mappings.
 
-        For no-code tags (Stitch3-{code} or legacy bitcast-x{code}), uses NOCODE_UID (68).
+        For no-code tags (Stitch3-{code} or legacy bitcast-x{code}), uses NOCODE_UID.
         For hotkey tags (Stitch-hk:{hotkey} or legacy bitcast-hk:{hotkey}), looks up UID in metagraph.
         Connections with unresolvable hotkeys have uid=None.
 
