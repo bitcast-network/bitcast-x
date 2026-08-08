@@ -168,8 +168,12 @@ ENGAGEMENT_FETCH_INTERVAL_OLD = 24  # Hours: tweets > 24 hours old
 # =============================================================================
 
 # Subnet treasury
-SUBNET_TREASURY_PERCENTAGE = 0
-SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '106'))
+# Consensus-critical: both values change the emitted weight vector, so every
+# validator must run the same ones. Keep in lockstep with bitcast-x-v2 and the
+# YouTube repos. At 1.0 the whole burn-UID residual is diverted to the treasury
+# UID. This repo is the UID 0 reference validator for mechid 1.
+SUBNET_TREASURY_PERCENTAGE = 1.0
+SUBNET_TREASURY_UID = int(os.getenv('SUBNET_TREASURY_UID', '155'))
 
 # No-code mining
 # Migrated 114 -> 154 on 2026-08-07: the UID 114 wallet was compromised in the
