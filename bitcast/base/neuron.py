@@ -16,6 +16,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 import copy
+import os
 
 import bittensor as bt
 
@@ -136,10 +137,54 @@ class BaseNeuron(ABC):
     def should_sync_metagraph(self):
         """
         Check if enough epoch blocks have elapsed since the last checkpoint to sync.
+
+        Deliberately the netuid-level counter, not the per-mechanism one used
+        for weight setting: the metagraph is netuid-scoped data (hotkeys,
+        axons, stake), and the mechanism counter starts arbitrarily old, which
+        would resync on every step until the first weight is set.
         """
         return (
             self.block - self.metagraph.last_update[self.uid]
         ) > self.config.neuron.epoch_length
+
+    def mech_last_update(self):
+        """Block at which this neuron last set weights ON ITS OWN MECHANISM.
+
+        metagraph.last_update cannot answer this. LastUpdate is stored per
+        (netuid, mechid) storage index, but Subtensor.metagraph() accepts a
+        mechid argument and then ignores it for this field, returning
+        mechanism 0's vector either way. Verified on finney: for UID 60, raw
+        LastUpdate[4189] (mech 1) read 116,424 blocks while both
+        metagraph(mechid=0) and metagraph(mechid=1) reported 81.
+
+        That silent fallback is why an X validator sharing a hotkey with a
+        YouTube validator can never set weights: it reads mechanism 0's
+        counter, which the YouTube neuron resets every epoch.
+
+        Falls back to the metagraph value if the storage read fails, which is
+        the previous behaviour, so a transient RPC error degrades to
+        conservative rather than to hammering set_weights.
+        """
+        from bittensor.utils import get_mechid_storage_index
+
+        # Read MECHID from the environment directly to avoid the circular
+        # import that bitcast.utils.config already works around.
+        try:
+            mechid = int(os.getenv("MECHID", "0"))
+        except ValueError:
+            mechid = 0
+
+        try:
+            index = get_mechid_storage_index(self.config.netuid, mechid)
+            result = self.subtensor.substrate.query("SubtensorModule", "LastUpdate", [index])
+            values = result.value if hasattr(result, "value") else result
+            return int(values[self.uid])
+        except Exception as e:
+            bt.logging.warning(
+                f"Could not read LastUpdate for mechanism {mechid}, falling back to the "
+                f"metagraph (mechanism 0) value: {e}"
+            )
+            return int(self.metagraph.last_update[self.uid])
 
     def should_set_weights(self) -> bool:
         # Don't set weights on initialization.
@@ -151,8 +196,10 @@ class BaseNeuron(ABC):
             return False
 
         # Define appropriate logic for when set weights.
+        # Gate on THIS mechanism's LastUpdate, not the metagraph's (which is
+        # always mechanism 0) — see mech_last_update().
         return (
-            (self.block - self.metagraph.last_update[self.uid])
+            (self.block - self.mech_last_update())
             > self.config.neuron.epoch_length
             and self.neuron_type != "MinerNeuron"
         )  # don't set weights if you're a miner
