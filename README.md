@@ -6,272 +6,162 @@
 
 # Bitcast X — Decentralized Social Mining on X.com
 
-Bitcast X is a Bittensor subnet that incentivizes X content creators to connect brands to audiences. Creators publish tweets to satisfy defined briefs and earn rewards based on engagement from influential accounts within curated social networks.
+Bitcast X is a Bittensor subnet that incentivizes X content creators to connect brands to
+audiences. Creators publish tweets to satisfy defined briefs and earn rewards based on engagement
+from influential accounts within curated social networks.
 
 ---
 
-## ⚙️ High-Level Architecture
+## ⚙️ How Bitcast X works
 
-- **Miners**: Content creators on X who connect their accounts and earn rewards for tweet performance.  
-- **Validators**: Discover social networks, track account connections, score tweet engagement, and distribute on-chain rewards.  
-- **Brands**: Define and publish content briefs for X campaigns.  
-- **Briefs Server**: Hosts the active campaign briefs.  
-- **Bittensor Network**: Manages on-chain compensation, rewarding Validators and Miners with the [Bitcast alpha token](https://www.coingecko.com/en/coins/bitcast).
+- **Brands** define campaign briefs for creator content.
+- **Creators** publish original X content for active campaign briefs.
+- **Miner platforms** coordinate creator participation and commit verifiable claims and results.
+- **Validators** independently verify submissions, score engagement, calculate rewards, and submit
+  weights.
+- **Bittensor SN93** distributes on-chain emissions according to the resulting mechanism-1 weights.
 
----
+This repository contains the Bittensor v11 miner and validator implementation. It is the complete
+public reference for released behavior: the [protocol](docs/protocol.md) defines the flow,
+attribution, scoring, rewards, and trust boundaries; the
+[compatibility policy](docs/protocol-compatibility.md) defines safe evolution; and the
+[operator runbook](docs/operator-runbook.md) defines deployment and recovery.
 
-## 🚀 Getting Started
+## ⛏️ Reference miner
 
-### For Miners
+This repository provides protocol building blocks and a deliberately basic reference miner—not a
+creator dashboard or a platform template. A miner platform owns its creator product, onboarding,
+support, payouts and acquisition; this package owns canonical claims, batching, Bittensor
+commitments, signed validator transport and crash recovery.
 
-**No code required!** There are two ways to mine on Bitcast X:
+Install and inspect the CLI:
 
-> **Eligibility:** Eligibility is determined per campaign brief. Some briefs may target all accounts in the social network, while others may limit eligibility to top-ranked accounts. Visit [x.bitcast.network](https://x.bitcast.network/) to check your eligibility for active campaigns.
-
-#### Option 1: Managed Mining
-
-Visit [x.bitcast.network](https://x.bitcast.network/) for the simplest setup:
-1. Create a Bittensor wallet. Recommended: [Talisman](https://talisman.xyz/)
-2. Go to [x.bitcast.network](https://x.bitcast.network/) and paste your wallet address
-3. Click "Generate Tag" to receive your unique connection tag
-4. Post a tweet containing your tag to link your X account
-5. Complete briefs(https://x.bitcast.network/) to start earning!
-6. Rewards are distributed daily through a managed UID (UID 114)
-
-*Note: Emissions will incur a 5% fee*
-
-#### Option 2: Self-Managed Mining
-
-Register your own UID and receive rewards directly:
-1. Register a UID on subnet 93 using `btcli subnet register --netuid 93`
-2. Post a tweet containing `bitcast-hk:{your_substrate_hotkey}`
-   - Example: `bitcast-hk:5DNmDymxKQZ5rTVkN1BLgSv2rRuUuhCpB8UL9LGNmGSJnzQq`
-3. Complete briefs(https://x.bitcast.network/) to start earning!
-4. Rewards go directly to your UID on-chain
-
-Tweets are automatically discovered and scored based on engagement from influential accounts in the network.
-
-### For Validators
-
-Validators maintain the integrity of the network by:
-- Discovering and mapping social influence networks on X using PageRank  
-- Tracking account connections via on-chain tags  
-- Scoring tweet engagement from top influencers  
-- Evaluating content against campaign briefs using LLM  
-- Distributing on-chain rewards to miners
-
-See below for detailed validator setup instructions.
-
----
-
-## 📊 Scoring & Rewards System
-
-Bitcast X employs a sophisticated, multi-layered scoring mechanism to fairly distribute emissions and incentivize high-quality participation.
-
-### 1. Social Network Discovery
-
-- **PageRank Algorithm**: Analyzes X interaction networks to identify influential accounts
-- **Pool Management**: Curated social networks (pools) like "tao", "ai_crypto", etc.
-- **Recalibration Schedule**: Network is recalibrated every 2nd Sunday to update influence rankings
-
-### 2. Influence Score
-
-- **Score Calculation**: Influence scores are derived from PageRank analysis of X interaction networks
-- **Interaction Weights**: Different engagement types contribute differently to influence:
-  - Retweets: 1.0x
-  - Mentions: 2.0x
-  - Quote tweets: 3.0x
-- **Comprehensive Rankings**: All discovered accounts are ranked by their PageRank influence scores
-
-### 3. Account Connection
-
-- **Connection Tags**: Miners post tweets with special tags to link accounts:
-  - `bitcast-hk:{substrate_hotkey}` - self-managed mining
-  - `bitcast-xabcd` - bitcast managed mining
-- **Verification**: Validators scan pool member tweets to discover and verify connections
-- **Tag Replacement**: New connection tags automatically replace previous ones for the same account
-
-### 4. Tweet Scoring
-
-- **Engagement Analysis**: Tracks retweets and quote tweets from the most influential accounts (configurable per pool, typically 300+) over the past 30 days
-- **Weighted Scoring**:
-  - `score = (author_influence × 2) + Σ(influencer_score × engagement_weight)`
-  - Retweet contribution: `influence_score × 1.0`
-  - Quote tweet contribution: `influence_score × 3.0`
-- **Quality Focus**: Only engagement from verified influential accounts counts
-- **Interaction Limits**: Maximum of 1 connection per direction between miners (prevents gaming through repeated interactions)
-
-### 5. Brief Evaluation
-
-- **LLM Content Matching**: Each scored tweet is evaluated against brief requirements for topic, format, and brand alignment
-- **Tag Requirements**: Some briefs require tweets to contain specific tags
-- **Quote Tweet Requirements**: Some briefs require quote tweets of specific posts
-- **Quality Filter**: Tweets portraying sponsors negatively will fail evaluation
-
-### 6. Referral Program
-
-- **Referral Codes**: Miners can refer others by appending a referral code to their connection tag:
-  - `bitcast-hk:{substrate_hotkey}-{referral_code}`
-  - `bitcast-x{identifier}-{referral_code}`
-- **Referral Code Format**: A Base64url-encoded X handle of the referrer (e.g., `@bitcast_network` → `Yml0Y2FzdF9uZXR3b3Jr`)
-- **Activation**: Referral bonuses activate once the referee participates in a brief (has tweets passing the filter)
-- **Bonus Payout**: Both referee and referrer receive a $50 bonus, paid out the day after activation
-
-### 7. Reward Distribution
-
-- **Budget Allocation**: Each brief has a daily budget distributed over 7-day emissions period
-- **Delay Period**: 1-day delay after brief closes before rewards begin (for engagement verification)
-- **Proportional Distribution**: Rewards distributed based on relative tweet scores
-- **Treasury Allocation**: Unclaimed emissions go to subnet treasury
-
----
-
-## 💻 Validator Setup
-
-### System Requirements
-
-- **Operating System**: Linux
-- **CPU**: 1 cores  
-- **RAM**: 2 GB
-
-### API Setup Requirements
-
-Choose your mode based on desired level of independence:
-
-**Weight Copy Mode (Recommended - Default)**
-- No API keys required
-
-**Standard & Discovery Modes (Independent Validation / Full Independence)**
-
-To run in either Standard or Discovery mode, you need these API keys and subscriptions:
-- **Twitter API Provider**: Choose one  
-  - **Desearch.ai** (Recommended): [Desearch.ai](https://desearch.ai) — modern Twitter data API  
-  - **RapidAPI** (Alternative): [twitter-v24](https://rapidapi.com/Glavier/api/twitter-v24) (Mega Plan)
-- **Chutes API Key**: [Chutes.ai](https://chutes.ai/) (Plus subscription ~$10/month)
-- **Weights & Biases API Key**: [wandb.ai](https://wandb.ai/) — for monitoring and debugging
-
-_Discovery mode additionally requires higher API Quota_
-
----
-
-## 🚀 Installation & Setup
-
-### 1. Clone Repository
 ```bash
-git clone https://github.com/bitcast-network/bitcast-x.git
-cd bitcast-x
+uv sync --all-extras
+uv run bitcast-x --help
 ```
 
-### 2. Setup Environment
+For a least-privilege source or PM2 installation, start with
+[`config/miner.env.example`](config/miner.env.example) or
+[`config/validator.env.example`](config/validator.env.example). The root `.env.example` is the
+exhaustive reference for both roles and optional integrations. Published network and protocol
+values are already populated; replace only the public IP, wallet hotkey/path, state paths and
+provider credentials that differ for your host. Existing Bittensor keys are loaded from the
+configured wallet directory and are never created or copied by the Python application. The durable
+state directory must survive process restarts. The
+[operator runbook](docs/operator-runbook.md#pm2-source-install) contains checked PM2 commands and
+upgrade/rollback steps.
+
+Start the signed endpoint and advertise it through the registered miner hotkey:
+
 ```bash
-chmod +x scripts/setup_env.sh
-./scripts/setup_env.sh
+uv run bitcast-x run-miner
 ```
 
-This creates a Python virtual environment at `../venv_bitcast_x/` and installs dependencies.
+The minimal creator journey can be exercised from the same installation:
 
-### 3. Configure Environment
-
-Copy the example environment file and edit it with your configuration:
 ```bash
-cp bitcast/validator/.env.example bitcast/validator/.env
+uv run bitcast-x campaigns
+uv run bitcast-x claim --campaign-id CAMPAIGN --creator-x-id 123 --draft "Private draft"
+uv run bitcast-x claim-status CLAIM_ID
+uv run bitcast-x submit --campaign-id CAMPAIGN --tweet-id 123456789 --claim-id CLAIM_ID
+uv run bitcast-x submission-status SUBMISSION_ID
+uv run bitcast-x qualification
 ```
 
-Edit `bitcast/validator/.env` and set your wallet information:
-- `WALLET_NAME`: Your Bittensor wallet name (coldkey)
-- `HOTKEY_NAME`: Your validator hotkey name
-- `VALIDATOR_MODE`: Choose validator mode (see below)
+`claim` returns `safe_to_post` only after finalization and exact storage verification. A null claim
+is the exclusive-campaign submission shape; validators independently enforce the campaign feed,
+exclusive hotkey, X authorship, qualification and attribution rules.
 
-**Validator Modes (choose based on desired level of independence):**
+## 🛡️ Validator operation
 
-- `weight_copy` (default): Minimal independence - fetches pre-calculated weights from reference validator via API. Requires no API keys. **Use this if you want to participate with minimal setup and resources.**
+The validator ingests and verifies miner commitments, reconciles campaigns, calculates the complete
+weight vector, and persists reproducible results. Use an RPC that can read the historical
+commitment blocks reported by miners, then run:
 
-- `standard` (independent validation): Medium independence - performs full validation (account scanning, tweet scoring, filtering, rewards) using social maps downloaded from reference validator. Downloads maps at startup if missing, then periodically refreshes. Requires Twitter, Chutes, and WandB API keys. **Use this if you want to compute your own weights independently while relying on others for social mapping.**
-
-- `discovery` (full independence): Complete independence - performs full validation including social discovery/mapping. Downloads social maps at startup for quick start, then generates fresh maps bi-weekly via social discovery. Requires all API keys. **Use this if you want complete independence.**
-
-All modes can be run from zero state and will automatically download necessary data at startup.
-
-For **standard and discovery modes**, also set:
-- `TWITTER_API_PROVIDER`: Choose provider: `desearch` (default) or `rapidapi`
-- `DESEARCH_API_KEY`: Your Desearch.ai API key (format: dt_$YOUR_KEY) - required if using Desearch
-- `RAPID_API_KEY`: Your RapidAPI key - only required if using RapidAPI provider
-- `CHUTES_API_KEY`: Your Chutes API key
-- `WANDB_API_KEY`: Your Weights & Biases API key (for monitoring and debugging)
-
-### 4. Register on Bittensor Network
-
-Activate the virtual environment:
 ```bash
-source ../venv_bitcast_x/bin/activate
+uv run bitcast-x run-validator
 ```
 
-Register your validator:
+For a validator managed by PM2, the supported quick start is:
+
 ```bash
-btcli subnet register \
-  --netuid 93 \
-  --wallet.name <WALLET_NAME> \
-  --wallet.hotkey <HOTKEY_NAME>
+npm install --global pm2@latest
+./scripts/setup-pm2-validator.sh
+# Edit the generated .env, then:
+./scripts/start-pm2-validator.sh
 ```
 
----
+The setup script installs the locked runtime and creates a private validator environment without
+overwriting an existing `.env`. The launch script validates the required settings, starts or
+restarts only `bitcast-x-validator`, waits for local health, and then saves the PM2 process list.
+See the [PM2 runbook](docs/operator-runbook.md#pm2-source-install) for prerequisites and upgrades.
 
-## 🚀 Running the Validator
+Source installs do not update automatically; optional update behavior and manual upgrade
+instructions are documented in the [operator runbook](docs/operator-runbook.md).
 
-### Start Validator Service
+The validator discovers endpoints from finalized metagraph state; it does not accept manually
+configured miner URLs. It requests only batches beyond each durable per-miner cursor, verifies the
+reported finalized position against the exact historical block, and independently compares the
+completed history with the miner's latest on-chain envelope. Unreachable miners retain their prior
+state and heal on a later poll; gaps or conflicting history quarantine only that miner's current
+reconciliation run. One unavailable or incompatible miner never prevents the validator from
+processing verified histories, becoming ready, or producing the current cycle. Weight submission
+is enabled by default and follows the configured on-chain cadence.
+
+Accepted scoring-close evidence, optimistic brief verdicts, engagement scores, participant
+exclusions, and performance/featured bonuses are frozen in the validator database. The complete
+normalized campaign record is bound to its campaign ID before commitments are reconciled or scored;
+any change to its public, access, timing, scoring, or economic terms requires a new campaign ID.
+Semantic evaluation requires the selected Chutes or OpenRouter key; provider availability never
+becomes a content rejection. During the configured seven-day emission block window, the validator
+calculates the complete proposed vector and stores it durably for inspection and reproducibility,
+whether or not submission is enabled. Campaign feed records can
+also carry the proven tag, quote-ID, inclusion-keyword and prompt-version filters. Tweet language
+remains observed evidence but does not affect eligibility.
+Open-campaign attribution excludes all public campaign text, required tags, inclusion keywords and
+the canonical quoted-post identity from its private token-overlap component.
+By default, the validator publishes each frozen campaign once through the hotkey-signed
+`/api/v1/brief-tweets` DEEBLY ingestion contract and submits the same durable vector to mechanism 1
+at the configured cadence. Operators can disable either output independently for diagnostics. The
+public network default requires 15,000 alpha conviction toward the
+qualification owner hotkey. If either setting could economically activate an eligible campaign,
+the validator fails closed while the effective qualification threshold is zero. The v11 chain
+adapter uses Bittensor's `SetWeights` intent—which performs the current subnet conformance and
+commit-reveal selection.
+
+The packaged container runs as UID 10001 and stores all mutable state under
+`/var/lib/bitcast-x`. Validator liveness/readiness/metrics are served on port 8096. Create
+consistent live backups with `bitcast-x backup-state --output PATH`; inspect integrity and schema
+versions with `bitcast-x state-info`. Compare independent validators using the deterministic hashes
+from `bitcast-x shadow-report`.
+
+Platforms can run the same miner as an authenticated, single-writer service with
+`bitcast-x run-miner-api`. It exposes generic `/api/campaigns`, `/api/qualification`,
+`/api/claims`, and `/api/submissions` control routes alongside the signed validator batch protocol
+on the same port.
+Configure a 32-character-or-longer
+`BITCAST_X_MINER_API_TOKEN`; control routes require it as a bearer token, while validator routes
+continue to use Bittensor hotkey authentication. The command contains no platform branding,
+user/session logic, payment policy, or deployment-provider assumptions.
+
+## 🧰 Development
+
 ```bash
-./scripts/run_validator.sh
+uv sync --all-extras
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy
+uv run pytest
 ```
 
-The validator automatically detects your configuration and runs in the appropriate mode (weight_copy, standard, or discovery).
+## 📄 License, security, and support
 
-### Process Management with PM2
+Bitcast X is open-source software under the [MIT License](LICENSE). Contributions are accepted
+under the same license; see [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and licensing
+expectations.
 
-The validator runs under PM2 for process management:
-
----
-
-## 📁 Project Structure
-
-```
-bitcast-x/
-├── bitcast/validator/
-│   ├── social_discovery/     # PageRank-based social network discovery
-│   ├── account_connection/   # Connection tag scanning and tracking
-│   ├── tweet_scoring/        # Engagement-based tweet scoring
-│   ├── tweet_filtering/      # LLM-based brief evaluation
-│   ├── reward_engine/        # Reward calculation and distribution
-│   ├── weight_copy/          # Weight copy mode implementation
-│   ├── api/                  # Weights API for weight_copy validators
-│   ├── clients/              # External API clients (Twitter, LLM)
-│   └── utils/                # Shared utilities and configuration
-├── scripts/                  # Setup and run scripts
-└── neurons/                  # Bittensor neuron entry points
-```
-
----
-
-## ℹ️ General Notes
-
-- **Auto-updates**: Enabled by default for security and feature updates
-- **Subnet ID**: 93 (Bittensor mainnet)
-- **Account Connection Scan**: Every 1 hour
-- **Reward Distribution**: Every 1 hour
-- **Social Discovery**: Bi-weekly (every other Sunday)
-
----
-
-## 🤝 Contact & Support
-
-For assistance or questions, join our Discord support channel:
-
-[Bitcast Support on Bittensor Discord](https://discord.com/channels/799672011265015819/1362489640841380045)
-
----
-
-## 🔗 Links
-
-- **Website**: [bitcast.network](https://www.bitcast.network/)
-- **Mining Platform**: [x.bitcast.network](https://x.bitcast.network/)
-- **Token**: [Bitcast on CoinGecko](https://www.coingecko.com/en/coins/bitcast)
-- **Validator Logs**: [wandb](https://wandb.ai/bitcast_network/bitcast-X_vali_logs)
+The current software release is `2.0.0`. Software release numbers are separate from the protocol
+versions described in the protocol documentation. See the
+[changelog](CHANGELOG.md), [release policy](docs/release-policy.md),
+[security policy](SECURITY.md), and [support guide](SUPPORT.md).
