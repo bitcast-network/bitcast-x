@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+      - run: pip install uv==0.11.23
+      - run: uv sync --locked --all-extras
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
+      - run: uv run mypy src
+      - run: uv run pytest -q
+      - run: uvx --from semgrep==1.172.0 semgrep scan --config p/python --error --no-git-ignore src
+
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Build container
+        env:
+          IMAGE_VERSION: "2.0.0"
+          SOURCE_REVISION: ${{ github.sha }}
+        run: >-
+          docker build
+          --build-arg VERSION="${IMAGE_VERSION}"
+          --build-arg REVISION="${SOURCE_REVISION}"
+          -t bitcast-x:test .
+      - run: docker run --rm bitcast-x:test --help
+      - run: test "$(docker run --rm bitcast-x:test --version)" = "bitcast-x 2.0.0"
+      - run: test "$(docker run --rm --entrypoint id bitcast-x:test -u)" = "10001"
+      - run: docker run --rm --entrypoint python bitcast-x:test -c 'import bitcast_x; print(bitcast_x.__version__)'
+      - run: test "$(docker inspect bitcast-x:test --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "2.0.0"
+      - name: Verify revision label
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+        run: test "$(docker inspect bitcast-x:test --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "${SOURCE_REVISION}"
