@@ -24,6 +24,8 @@ from influential accounts within curated social networks.
 This repository contains the Bittensor v11 miner and validator implementation. It is the complete
 public reference for released behavior: the [protocol](docs/protocol.md) defines the flow,
 attribution, scoring, rewards, and trust boundaries; the
+[core tweet flow testing plan](docs/tweet-flow-testing.md) describes deterministic claim,
+submission, and validation coverage without publishing new X posts; the
 [compatibility policy](docs/protocol-compatibility.md) defines safe evolution; and the
 [operator runbook](docs/operator-runbook.md) defines deployment and recovery.
 
