@@ -1,4 +1,4 @@
-"""A credential-free open-campaign journey through the real miner and validator code."""
+"""Credential-free core tweet journeys through the real miner and validator code."""
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -44,6 +44,7 @@ DRAFT = (
     "I spent a week testing the wallet. Fast confirmations help, but the recovery flow "
     "is what won me over. #Launch"
 )
+EXCLUSIVE_TWEET = "The wallet launch is live, and the recovery flow stands out. #Launch"
 
 
 class InMemoryChain:
@@ -159,13 +160,14 @@ def create_wallet(path: Path, name: str) -> bt.Wallet:
     return wallet
 
 
-def campaign_feed(now: datetime) -> CampaignFeed:
+def campaign_feed(now: datetime, *, exclusive_miner_hotkey: str | None = None) -> CampaignFeed:
     campaign = CampaignRecord(
         access=CampaignAccess(
             campaign_id=CAMPAIGN_ID,
             mechanism_id=1,
             mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=20,
+            exclusive_miner_hotkey=exclusive_miner_hotkey,
         ),
         display="Fixture launch",
         brief="Describe your experience with the wallet in your own words.",
@@ -200,14 +202,22 @@ def campaign_feed(now: datetime) -> CampaignFeed:
 
 
 @pytest.mark.asyncio
-async def test_open_tweet_flows_from_claim_to_published_reward(tmp_path: Path) -> None:
+@pytest.mark.parametrize("exclusive", [False, True], ids=["open", "exclusive"])
+async def test_tweet_flows_from_miner_api_to_published_reward(
+    tmp_path: Path,
+    *,
+    exclusive: bool,
+) -> None:
     now = datetime.now(UTC)
-    feed = campaign_feed(now)
-    campaign = feed.campaigns[0]
     miner_wallet = create_wallet(tmp_path, "miner")
     validator_wallet = create_wallet(tmp_path, "validator")
     miner_hotkey = miner_wallet.hotkey.ss58_address
     validator_hotkey = validator_wallet.hotkey.ss58_address
+    feed = campaign_feed(
+        now,
+        exclusive_miner_hotkey=miner_hotkey if exclusive else None,
+    )
+    campaign = feed.campaigns[0]
     chain = InMemoryChain(miner_hotkey, first_timestamp=now + timedelta(minutes=1))
     miner_store = MinerStore(tmp_path / "miner.sqlite3")
     engine = MinerEngine(
@@ -237,24 +247,27 @@ async def test_open_tweet_flows_from_claim_to_published_reward(tmp_path: Path) -
         base_url="http://miner.test",
         headers={"Authorization": f"Bearer {INTERNAL_TOKEN}"},
     ) as control_client:
-        claim_response = await control_client.post(
-            "/api/claims",
-            json={
-                "campaign_id": CAMPAIGN_ID,
-                "creator_x_id": CREATOR_X_ID,
-                "draft": DRAFT,
-            },
-        )
-        assert claim_response.status_code == 200
-        claim = claim_response.json()
-        assert claim["status"] == "safe_to_post"
+        claim_id = None
+        if not exclusive:
+            claim_response = await control_client.post(
+                "/api/claims",
+                json={
+                    "campaign_id": CAMPAIGN_ID,
+                    "creator_x_id": CREATOR_X_ID,
+                    "draft": DRAFT,
+                },
+            )
+            assert claim_response.status_code == 200
+            claim = claim_response.json()
+            assert claim["status"] == "safe_to_post"
+            claim_id = claim["claim_id"]
 
         submission_response = await control_client.post(
             "/api/submissions",
             json={
                 "campaign_id": CAMPAIGN_ID,
                 "tweet_id": TWEET_ID,
-                "claim_id": claim["claim_id"],
+                "claim_id": claim_id,
             },
         )
         assert submission_response.status_code == 200
@@ -283,8 +296,9 @@ async def test_open_tweet_flows_from_claim_to_published_reward(tmp_path: Path) -
         client_factory=client_factory,
     ).reconcile(MinerEndpoint(miner_hotkey, "http://miner.test"))
 
-    assert ingestion.batches_verified == 2
-    assert ingestion.cursor == 2
+    expected_batches = 1 if exclusive else 2
+    assert ingestion.batches_verified == expected_batches
+    assert ingestion.cursor == expected_batches
     assert ingestion.quarantined is False
 
     evidence = FixtureXProvider(
@@ -294,7 +308,7 @@ async def test_open_tweet_flows_from_claim_to_published_reward(tmp_path: Path) -
                     tweet_id=TWEET_ID,
                     author_x_id=CREATOR_X_ID,
                     created_at=now + timedelta(minutes=2),
-                    text=DRAFT,
+                    text=EXCLUSIVE_TWEET if exclusive else DRAFT,
                     author="creator",
                 ),
                 provider_available=True,
@@ -337,7 +351,7 @@ async def test_open_tweet_flows_from_claim_to_published_reward(tmp_path: Path) -
 
     assert len(attributions) == 1
     assert attributions[0].accepted is True
-    assert attributions[0].claim_id == claim["claim_id"]
+    assert attributions[0].claim_id == claim_id
     assert attributions[0].submission_id == submission["submission_id"]
     assert attributions[0].miner_hotkey == miner_hotkey
     assert len(scored) == 1
