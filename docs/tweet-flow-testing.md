@@ -145,10 +145,37 @@ Normal pull-request tests should use the in-memory adapter. They must not submit
 or require funded wallets.
 
 Before a release that changes chain integration, commitment encoding, authentication, or historical
-verification, run the existing opt-in local-Subtensor tests and extend one of them to consume the
-same synthetic tweet scenario. This uses real Bittensor calls, signatures, finalization, historical
-read-back, and signed miner transport against a disposable local node. It still does not touch
-mainnet or testnet.
+verification, run the opt-in local-Subtensor tests. The creator journey consumes the same kind of
+synthetic tweet evidence as the fast harness while using real Bittensor calls, signatures,
+finalization, historical read-back, signed miner transport, validator ingestion, qualification,
+and attribution against a disposable local node. Chain-independent scoring, rewards, and
+publication remain in the fast harness. Neither test touches mainnet or testnet.
+
+With Docker installed, run the localnet and tests from one shell:
+
+```bash
+LOCALNET_CONTAINER=bitcast-x-localnet
+docker run --rm -d --name "$LOCALNET_CONTAINER" \
+  -p 9944:9944 -p 9945:9945 \
+  ghcr.io/raofoundation/subtensor-localnet:devnet
+trap 'docker stop "$LOCALNET_CONTAINER" >/dev/null' EXIT
+for _attempt in $(seq 1 60); do
+  if curl -fsS http://127.0.0.1:9944 \
+    -H 'content-type: application/json' \
+    --data '{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}' \
+    >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+curl -fsS http://127.0.0.1:9944 \
+  -H 'content-type: application/json' \
+  --data '{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}' >/dev/null
+BITCAST_X_RUN_LOCALNET=1 uv run pytest -q tests/integration/test_localnet_round_trip.py
+```
+
+The test creates only ephemeral local wallets and subnet registrations. The container owns the
+chain state and `--rm` removes it when the shell exits.
 
 A public testnet smoke test is optional and should be reserved for SDK or network-behavior changes
 that a local node cannot faithfully reproduce. It is not part of every pull request.
@@ -167,6 +194,24 @@ those concerns separate:
 
 These canaries must not block ordinary contributor tests, and they never need to publish a tweet.
 
+The repository includes an opt-in Desearch canary with a known historical tweet and an environment
+override for operators who prefer a different fixture:
+
+```bash
+BITCAST_X_RUN_DESEARCH_CANARY=1 \
+DESEARCH_API_KEY=... \
+uv run pytest -q tests/integration/test_desearch_canary.py
+
+# Optional: select another existing public post.
+BITCAST_X_RUN_DESEARCH_CANARY=1 \
+DESEARCH_API_KEY=... \
+BITCAST_X_CANARY_TWEET_ID=1234567890 \
+uv run pytest -q tests/integration/test_desearch_canary.py
+```
+
+The canary performs only read requests. It verifies provider availability and stable normalized
+identity fields plus the engagement response shape; it does not assert mutable engagement counts.
+
 ## What the completed harness proves
 
 The combined public harness should cover claim creation and finalization, submission persistence,
@@ -174,9 +219,9 @@ batch hashing and transport, validator chain verification, campaign and author e
 draft matching, qualification, attribution, engagement scoring, reward construction, restart
 recovery, and the validator's published result.
 
-It does not prove that production infrastructure, a hosted X-data provider, an LLM provider, or a
-public Bittensor network is currently healthy. Small operational canaries may cover those separate
-boundaries without becoming part of the deterministic core harness.
+It does not prove that production infrastructure, an LLM provider, or a public Bittensor network is
+currently healthy. The opt-in canaries show that an external boundary is healthy when they run;
+they are not part of the deterministic core harness.
 
 ## Contributor workflow and completion criteria
 

@@ -5,15 +5,20 @@ import hashlib
 import json
 import os
 import socket
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import bittensor as bt
+import httpx
 import pytest
 import uvicorn
 from bittensor.keyfiles import Keypair
 from bittensor.result import ChainError, ErrorCode
+from fixture_x import FixtureXProvider
 
+from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap
 from bitcast_x.chain import BittensorChain
 from bitcast_x.miner import (
     BatchPolicy,
@@ -23,7 +28,12 @@ from bitcast_x.miner import (
     MinerSdk,
     MinerStore,
 )
-from bitcast_x.protocol import CommitmentEnvelope
+from bitcast_x.protocol import CampaignAccess, CommitmentEnvelope, MiningProtocol
+from bitcast_x.qualification import (
+    HistoricalQualificationChecker,
+    QualificationConfig,
+    QualificationReader,
+)
 from bitcast_x.transport import (
     BatchPageRequest,
     BatchPageResponse,
@@ -31,10 +41,22 @@ from bitcast_x.transport import (
     SignedMinerClient,
     create_miner_app,
 )
+from bitcast_x.validator.ingestion import MinerEndpoint, ValidatorIngestor
+from bitcast_x.validator.reconciliation import CampaignReconciler
+from bitcast_x.validator.store import ValidatorStore
+from bitcast_x.x_provider import Tweet, TweetFetch
 
 pytestmark = pytest.mark.skipif(
     os.getenv("BITCAST_X_RUN_LOCALNET") != "1",
     reason="set BITCAST_X_RUN_LOCALNET=1 with a local chain on port 9944",
+)
+
+CAMPAIGN_ID = "localnet-campaign"
+CREATOR_X_ID = "456"
+TWEET_ID = "999"
+DRAFT = (
+    "I spent a week testing the wallet. Fast confirmations help, but the recovery flow "
+    "is what won me over. #Launch"
 )
 
 
@@ -199,13 +221,17 @@ async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_real_creator_journey_survives_forced_miner_restart(tmp_path: Path) -> None:
+async def test_real_creator_journey_survives_restart_and_reaches_attribution(
+    tmp_path: Path,
+) -> None:
     miner = create_wallet(tmp_path, "journey-miner")
+    validator_wallet = create_wallet(tmp_path, "journey-validator")
     netuid = 1
     database = tmp_path / "miner.sqlite3"
 
     async with bt.Subtensor("local") as client:
         await fund_and_register(client, miner, netuid)
+        await fund_and_register(client, validator_wallet, netuid)
         chain = BittensorChain(client, netuid=netuid)
         policy = BatchPolicy(max_age_seconds=5, max_events=100, max_batch_bytes=100_000)
         first_engine = MinerEngine(
@@ -216,11 +242,12 @@ async def test_real_creator_journey_survives_forced_miner_restart(tmp_path: Path
         )
         first_sdk = MinerSdk(first_engine)
         claim_id = first_sdk.create_claim(
-            campaign_id="campaign",
-            creator_x_id="123",
-            draft="A private draft before publication",
+            campaign_id=CAMPAIGN_ID,
+            creator_x_id=CREATOR_X_ID,
+            draft=DRAFT,
         )
-        await first_engine.commit_ready(force=True)
+        claim_batch = await first_engine.commit_ready(force=True)
+        assert claim_batch is not None
         assert first_sdk.claim_status(claim_id) is EventStatus.SAFE_TO_POST
 
         # Rebuild every in-memory miner object over the same durable database.
@@ -232,16 +259,116 @@ async def test_real_creator_journey_survives_forced_miner_restart(tmp_path: Path
         )
         restarted_sdk = MinerSdk(restarted_engine)
         submission_id = restarted_sdk.submit_tweet(
-            campaign_id="campaign",
-            tweet_id="2077430743559499785",
+            campaign_id=CAMPAIGN_ID,
+            tweet_id=TWEET_ID,
             claim_id=claim_id,
         )
-        await restarted_engine.commit_ready(force=True)
+        submission_batch = await restarted_engine.commit_ready(force=True)
+        assert submission_batch is not None
         page = await restarted_engine.batch_page(
             BatchPageRequest(after_sequence=0, max_batches=50),
             caller_hotkey="validator",
         )
+        assert restarted_sdk.submission_status(submission_id) is EventStatus.VERIFICATION_PENDING
+        assert [batch.batch["sequence"] for batch in page.batches] == [1, 2]
+        assert page.batches[1].batch["reveals"][0]["claim_id"] == claim_id
 
-    assert restarted_sdk.submission_status(submission_id) is EventStatus.VERIFICATION_PENDING
-    assert [batch.batch["sequence"] for batch in page.batches] == [1, 2]
-    assert page.batches[1].batch["reveals"][0]["claim_id"] == claim_id
+        async def authorize(hotkey: str) -> bool:
+            return hotkey == validator_wallet.hotkey.ss58_address
+
+        app = create_miner_app(
+            miner_hotkey=miner.hotkey.ss58_address,
+            provider=restarted_engine.batch_page,
+            authorize_validator=authorize,
+        )
+
+        def client_factory(endpoint: MinerEndpoint) -> SignedMinerClient:
+            return SignedMinerClient(
+                validator_wallet,
+                miner_hotkey=endpoint.hotkey,
+                base_url=endpoint.base_url,
+                transport=httpx.ASGITransport(app=app),
+            )
+
+        validator_store = ValidatorStore(
+            tmp_path / "validator.sqlite3",
+            start_block=page.batches[0].position.block,
+        )
+        ingestion = await ValidatorIngestor(
+            chain,
+            validator_store,
+            client_factory=client_factory,
+        ).reconcile(MinerEndpoint(miner.hotkey.ss58_address, "http://miner.test"))
+        assert ingestion.batches_verified == 2
+        assert ingestion.cursor == 2
+        assert ingestion.quarantined is False
+
+        claim_anchor = await chain.commitment_at_position(
+            miner.hotkey.ss58_address,
+            page.batches[0].position,
+        )
+        scoring_close_block = page.batches[1].position.block
+        tweet_created_at = claim_anchor.timestamp + timedelta(microseconds=1)
+        campaign = CampaignRecord(
+            access=CampaignAccess(
+                campaign_id=CAMPAIGN_ID,
+                mechanism_id=1,
+                mining_protocol=MiningProtocol.PRECLAIM_V2,
+                scoring_close_block=scoring_close_block,
+            ),
+            display="Localnet launch",
+            brief="Describe your experience with the wallet in your own words.",
+            pools=("ecosystem",),
+            opens_at=claim_anchor.timestamp - timedelta(hours=1),
+            closes_at=claim_anchor.timestamp + timedelta(hours=1),
+            reward_pool_usd="1000.00",
+            required_terms=("#Launch",),
+        )
+        feed = CampaignFeed(
+            snapshot_id="localnet-snapshot",
+            published_at=claim_anchor.timestamp - timedelta(hours=1),
+            campaigns=(campaign,),
+            ecosystem_maps=(
+                EcosystemMap(
+                    ecosystem_id="ecosystem",
+                    name="Localnet ecosystem",
+                    eligible_creator_x_ids=(CREATOR_X_ID,),
+                    updated_at=claim_anchor.timestamp - timedelta(hours=1),
+                ),
+            ),
+        )
+        evidence = FixtureXProvider(
+            tweets={
+                TWEET_ID: TweetFetch(
+                    tweet=Tweet(
+                        tweet_id=TWEET_ID,
+                        author_x_id=CREATOR_X_ID,
+                        created_at=tweet_created_at,
+                        text=DRAFT,
+                        author="creator",
+                    ),
+                    provider_available=True,
+                )
+            },
+        )
+        qualification = HistoricalQualificationChecker(
+            QualificationReader(
+                chain,
+                QualificationConfig(
+                    owner_hotkey=validator_wallet.hotkey.ss58_address,
+                    minimum_conviction_alpha=Decimal("0"),
+                    effective_block=0,
+                ),
+            )
+        )
+        attributions = await CampaignReconciler(
+            validator_store,
+            evidence,
+            qualification,
+        ).reconcile_feed(feed, finalized_block=scoring_close_block)
+
+    assert len(attributions) == 1
+    assert attributions[0].accepted is True
+    assert attributions[0].claim_id == claim_id
+    assert attributions[0].submission_id == submission_id
+    assert attributions[0].miner_hotkey == miner.hotkey.ss58_address
