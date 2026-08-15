@@ -65,7 +65,13 @@ and expected result. Handwritten synthetic fixtures are preferred to large captu
 
 ## Required journeys
 
-The first version should prove two happy paths:
+The deterministic integration module
+[`tests/integration/test_tweet_flow.py`](../tests/integration/test_tweet_flow.py) proves both happy
+paths through the same production components. Run it directly while developing tweet-flow changes:
+
+```bash
+uv run pytest -q tests/integration/test_tweet_flow.py
+```
 
 ### Open `preclaim_v2` campaign
 
@@ -101,6 +107,37 @@ The initial edge-case table should stay focused on failures that cross more than
 
 Focused unit tests remain the right place for exhaustive schema validation, matcher vectors,
 pagination limits, retry permutations, and individual scoring formulas.
+
+## Current failure coverage
+
+The edge cases above are covered at the narrowest layer that still proves the complete invariant:
+
+- Unfinalized claims and restart-safe miner state are covered in
+  [`tests/test_miner_api.py`](../tests/test_miner_api.py) and
+  [`tests/test_miner_sdk.py`](../tests/test_miner_sdk.py).
+- Claim timing, changed reveals, open-claim author identity, matching, content eligibility, late
+  submissions, exclusive-miner identity, qualification transitions, authoritative tweet absence,
+  and provider outages are covered in
+  [`tests/test_reconciliation.py`](../tests/test_reconciliation.py).
+- Commitment encoding, batch hashes, sequence links, and claim lifecycle rules are covered in
+  [`tests/test_commitments.py`](../tests/test_commitments.py),
+  [`tests/test_protocol_models.py`](../tests/test_protocol_models.py), and
+  [`tests/test_protocol_state.py`](../tests/test_protocol_state.py).
+- Signed-request authentication, replay protection, receiver binding, rate limiting, and response
+  bounds are covered in [`tests/test_transport.py`](../tests/test_transport.py).
+- Exact historical commitment verification, manifest gaps, miner isolation, outages, and validator
+  cursor recovery are covered in
+  [`tests/test_validator_ingestion.py`](../tests/test_validator_ingestion.py).
+- Engagement scoring, reward allocation, frozen economics, and publication idempotency are covered
+  in [`tests/test_attribution_scoring.py`](../tests/test_attribution_scoring.py),
+  [`tests/test_reward_coordinator.py`](../tests/test_reward_coordinator.py), and
+  [`tests/test_publishing.py`](../tests/test_publishing.py), with the accepted full result also
+  asserted by the deterministic integration journey.
+
+Add a case to the full journey when a change crosses a public boundary or changes the ordering of
+claim, commitment, submission, ingestion, validation, scoring, or publication. Add a focused test
+when one component's input/output contract is enough to prove the behavior. This keeps failures
+easy to diagnose without duplicating the complete setup for every rejection reason.
 
 ## Chain coverage
 
@@ -141,17 +178,17 @@ It does not prove that production infrastructure, a hosted X-data provider, an L
 public Bittensor network is currently healthy. Small operational canaries may cover those separate
 boundaries without becoming part of the deterministic core harness.
 
-## Implementation order and completion criteria
+## Contributor workflow and completion criteria
 
-Implement this incrementally:
+The repository now includes the fast harness, reusable synthetic evidence, both happy paths, and
+the cross-component failures that were not previously covered. For an ordinary change:
 
-1. Add reusable synthetic evidence builders and `FixtureXProvider` under `tests/`.
-2. Add the open and exclusive end-to-end scenarios using the in-memory chain adapter.
-3. Add only the cross-component failure cases in the table above that are not already covered.
-4. Run the harness as part of the existing `pytest` command and CI job.
-5. Extend the opt-in local-Subtensor journey only after the fast harness is stable.
+1. Run the deterministic integration module while iterating.
+2. Add or update a focused test for the exact changed invariant.
+3. Extend the complete journey only if the change crosses one of its real boundaries.
+4. Run the standard checks in [CONTRIBUTING.md](../CONTRIBUTING.md) before opening a pull request.
+5. Run or extend the opt-in local-Subtensor journey when chain integration itself changes.
 
-The initial work is complete when a clean checkout can run the ordinary repository checks and
-deterministically prove both claim/submission journeys without credentials, network access, a
-public-chain transaction, or an X post. Contributors should need no separate setup beyond the
-development dependencies already documented in [CONTRIBUTING.md](../CONTRIBUTING.md).
+A clean checkout can deterministically prove both claim/submission journeys without credentials,
+network access, a public-chain transaction, or an X post. Contributors need no separate setup
+beyond the development dependencies documented in [CONTRIBUTING.md](../CONTRIBUTING.md).

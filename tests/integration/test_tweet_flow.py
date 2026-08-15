@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import bittensor as bt
 import httpx
@@ -36,7 +37,7 @@ from bitcast_x.validator.scoring import AttributionScorer
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 
-CAMPAIGN_ID = "fixture-open-campaign"
+CAMPAIGN_ID = "fixture-campaign"
 CREATOR_X_ID = "456"
 TWEET_ID = "999"
 INTERNAL_TOKEN = "test-internal-token-that-is-at-least-32-chars"  # noqa: S105
@@ -121,6 +122,17 @@ class InMemoryChain:
     ) -> tuple[str | None, str | None, int]:
         del block
         return None, None, 0
+
+    async def metagraph(self, *, block: int | None = None) -> SimpleNamespace:
+        del block
+        return SimpleNamespace(
+            neurons=[
+                SimpleNamespace(
+                    hotkey=self._miner_hotkey,
+                    axon="miner.test:80",
+                )
+            ]
+        )
 
 
 class CampaignSource:
@@ -290,11 +302,14 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
             transport=httpx.ASGITransport(app=app),
         )
 
-    ingestion = await ValidatorIngestor(
+    validator = ValidatorIngestor(
         chain,  # type: ignore[arg-type]
         validator_store,
         client_factory=client_factory,
-    ).reconcile(MinerEndpoint(miner_hotkey, "http://miner.test"))
+    )
+    endpoints = await validator.discover(block=30)
+    assert endpoints == [MinerEndpoint(miner_hotkey, "http://miner.test:80")]
+    ingestion = await validator.reconcile(endpoints[0], block=30)
 
     expected_batches = 1 if exclusive else 2
     assert ingestion.batches_verified == expected_batches

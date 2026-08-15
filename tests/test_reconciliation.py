@@ -197,9 +197,10 @@ def open_history(
     *,
     claim_timestamp: datetime = NOW + timedelta(minutes=1),
     draft: str | None = None,
+    revealed_draft: str | None = None,
 ) -> ValidatorStore:
     store = ValidatorStore(path, start_block=10)
-    reveal = DraftReveal(
+    claim_reveal = DraftReveal(
         claim_id="01" * 16,
         draft=draft
         or (
@@ -208,12 +209,21 @@ def open_history(
         ),
         nonce="02" * 32,
     )
+    submitted_reveal = (
+        claim_reveal
+        if revealed_draft is None
+        else DraftReveal(
+            claim_id=claim_reveal.claim_id,
+            draft=revealed_draft,
+            nonce=claim_reveal.nonce,
+        )
+    )
     claim = ClaimEvent(
-        claim_id=reveal.claim_id,
+        claim_id=claim_reveal.claim_id,
         campaign_id="campaign",
         creator_x_id="456",
         created_at=claim_timestamp,
-        draft_commitment=reveal.commitment(),
+        draft_commitment=claim_reveal.commitment(),
     )
     first = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -233,7 +243,7 @@ def open_history(
         sequence=2,
         previous_batch_hash=first.batch_hash,
         events=(submission,),
-        reveals=(reveal,),
+        reveals=(submitted_reveal,),
     )
     persist_batch(store, first, block=10, timestamp=claim_timestamp)
     persist_batch(store, second, block=11, timestamp=NOW + timedelta(minutes=20))
@@ -447,6 +457,82 @@ async def test_claim_finalized_after_publication_is_rejected(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_changed_reveal_is_rejected_against_the_committed_open_claim(tmp_path: Path) -> None:
+    store = open_history(
+        tmp_path / "validator.sqlite3",
+        revealed_draft="A different draft was revealed after publication. #Launch",
+    )
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
+
+    assert result.accepted is False
+    assert result.reason.value == "draft_reveal_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    submission = SubmissionEvent(
+        submission_id="03" * 16,
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id="04" * 16,
+        miner_hotkey=MINER,
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(submission,),
+    )
+    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
+
+    assert result.accepted is False
+    assert result.reason.value == "claim_not_active"
+
+
+@pytest.mark.asyncio
+async def test_eligible_tweet_author_must_match_the_open_claim(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign()
+    snapshot = feed(record).model_copy(
+        update={
+            "ecosystem_maps": (
+                EcosystemMap(
+                    ecosystem_id="ecosystem",
+                    name="Ecosystem",
+                    eligible_creator_x_ids=("456", "789"),
+                    updated_at=NOW,
+                ),
+            )
+        }
+    )
+    other_author = tweet().model_copy(update={"author_x_id": "789", "author": "othercreator"})
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=other_author, provider_available=True)}),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(record, snapshot))[0]
+
+    assert result.accepted is False
+    assert result.reason.value == "author_mismatch"
+
+
+@pytest.mark.asyncio
 async def test_tweet_published_after_campaign_close_is_rejected(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     late_tweet = tweet(created_at=NOW + timedelta(days=1, seconds=1))
@@ -572,6 +658,36 @@ async def test_exclusive_campaign_skips_claim_and_matcher(tmp_path: Path) -> Non
     assert result.claim_id is None
     assert result.miner_hotkey == MINER
     assert qualification.calls == [10, 20]
+
+
+@pytest.mark.asyncio
+async def test_exclusive_campaign_rejects_a_different_miner(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    submission = SubmissionEvent(
+        submission_id="03" * 16,
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=None,
+        miner_hotkey=MINER,
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(submission,),
+    )
+    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    record = campaign(exclusive=OTHER_MINER)
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
+
+    assert result.accepted is False
+    assert result.reason.value == "wrong_exclusive_miner"
 
 
 @pytest.mark.asyncio
@@ -755,6 +871,8 @@ def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
 @pytest.mark.asyncio
 async def test_provider_outage_preserves_campaign_as_unreconciled(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign()
+    snapshot = feed(record)
     reconciler = CampaignReconciler(
         store,
         FakeX({"999": TweetFetch(tweet=None, provider_available=False)}),
@@ -762,7 +880,45 @@ async def test_provider_outage_preserves_campaign_as_unreconciled(tmp_path: Path
     )
 
     with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
-        await reconciler.reconcile_campaign(campaign(), feed(campaign()))
+        await reconciler.reconcile_campaign(record, snapshot)
+
+    assert await reconciler.reconcile_feed(snapshot, finalized_block=20) == []
+    assert (
+        store.reconciliation(
+            snapshot.snapshot_id,
+            record.access.campaign_id,
+            record.model_dump_json(),
+        )
+        is None
+    )
+    assert len(store.verified_batches()) == 2
+
+
+@pytest.mark.asyncio
+async def test_authoritative_tweet_absence_freezes_a_rejection(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign()
+    snapshot = feed(record)
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=None, provider_available=True)}),
+        FakeQualification(),
+    )
+
+    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.accepted is False
+    assert result.reason.value == "tweet_not_found"
+    assert (
+        store.reconciliation(
+            snapshot.snapshot_id,
+            record.access.campaign_id,
+            record.model_dump_json(),
+        )
+        == results
+    )
 
 
 def _exclusive_final_campaign(campaign_id: str) -> CampaignRecord:
