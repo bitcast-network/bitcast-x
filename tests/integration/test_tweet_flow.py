@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fixture_x import FixtureXProvider
 
+from bitcast_x.brief_filter import BriefEvaluation
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap, SocialAccount
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
@@ -165,6 +166,21 @@ class CapturingPublisher:
         return True
 
 
+class PassingBriefFilter:
+    """Stand in for the external LLM while exercising the production scoring seam."""
+
+    async def evaluate(
+        self,
+        _campaign: CampaignRecord,
+        _tweet: Tweet,
+    ) -> BriefEvaluation:
+        return BriefEvaluation(
+            meets_brief=True,
+            reasoning="Fixture satisfies the campaign brief",
+            checks_used=1,
+        )
+
+
 def create_wallet(path: Path, name: str) -> bt.Wallet:
     wallet = bt.Wallet(name=name, hotkey="default", path=str(path))
     wallet.create_new_coldkey(use_password=False, suppress=True)
@@ -220,7 +236,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     *,
     exclusive: bool,
 ) -> None:
-    now = datetime.now(UTC)
+    now = datetime(2026, 1, 15, 12, tzinfo=UTC)
     miner_wallet = create_wallet(tmp_path, "miner")
     validator_wallet = create_wallet(tmp_path, "validator")
     miner_hotkey = miner_wallet.hotkey.ss58_address
@@ -348,7 +364,10 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         evidence,
         qualification,
     ).reconcile_feed(feed, finalized_block=30)
-    coordinator = RewardCoordinator(validator_store, AttributionScorer(evidence))
+    coordinator = RewardCoordinator(
+        validator_store,
+        AttributionScorer(evidence, brief_filter=PassingBriefFilter()),
+    )
     scored = await coordinator.freeze_scores(feed, attributions)
     weights, rewards = coordinator.shadow_weights(
         feed,
@@ -371,9 +390,15 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     assert attributions[0].miner_hotkey == miner_hotkey
     assert len(scored) == 1
     assert scored[0].score == 20.0
+    assert scored[0].meets_brief is True
+    assert scored[0].llm_checks_used == 1
     assert weights == {0: 0.0, 7: 1.0}
     assert len(rewards) == 1
     assert published == 1
+    tweets = publisher.payloads[0]["tweets"]
+    assert isinstance(tweets, list)
+    assert tweets[0]["meets_brief"] is True
+    assert tweets[0]["reasoning"] == "Fixture satisfies the campaign brief"
     decisions = publisher.payloads[0]["attribution_decisions"]
     assert isinstance(decisions, list)
     assert decisions[0]["reward_status"] == "rewarded"

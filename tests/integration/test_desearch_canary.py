@@ -11,7 +11,8 @@ pytestmark = pytest.mark.skipif(
     reason="set BITCAST_X_RUN_DESEARCH_CANARY=1 with a Desearch API key",
 )
 
-DEFAULT_TWEET_ID = "2070290556647883174"
+DEFAULT_TWEET_ID = "2082462415942533125"
+DEFAULT_AUTHOR_X_ID = "1908181343290200064"
 
 
 @pytest.mark.asyncio
@@ -34,6 +35,8 @@ async def test_desearch_normalizes_stable_historical_tweet_evidence() -> None:
     assert evidence.tweet.author
     assert evidence.tweet.text.strip()
     assert evidence.tweet.created_at.utcoffset() is not None
+    if tweet_id == DEFAULT_TWEET_ID:
+        assert evidence.tweet.author_x_id == DEFAULT_AUTHOR_X_ID
     assert engagements.provider_available is True
     assert all(
         username and kind in {"quote", "retweet"}

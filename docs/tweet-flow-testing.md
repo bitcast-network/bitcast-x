@@ -39,13 +39,15 @@ downstream consumers are outside this plan. No new repository or shared testing 
 
 ## Smallest useful harness
 
-Add one integration test module that composes the existing production components with two narrow
+Add one integration test module that composes the existing production components with three narrow
 test doubles:
 
 1. A `FixtureXProvider` implements the existing normalized X-provider interface from immutable
    synthetic `Tweet`, `TweetFetch`, and `EngagementFetch` values.
 2. An in-memory chain adapter records commitment envelopes, finalized positions, qualification
    state, and the metagraph information needed by the miner and validator.
+3. A deterministic brief filter stands in for the external LLM while exercising the production
+   scoring and publication seam.
 
 Everything between those boundaries should be real application code:
 
@@ -154,24 +156,29 @@ publication remain in the fast harness. Neither test touches mainnet or testnet.
 With Docker installed, run the localnet and tests from one shell:
 
 ```bash
-LOCALNET_CONTAINER=bitcast-x-localnet
-docker run --rm -d --name "$LOCALNET_CONTAINER" \
-  -p 9944:9944 -p 9945:9945 \
-  ghcr.io/raofoundation/subtensor-localnet:devnet
-trap 'docker stop "$LOCALNET_CONTAINER" >/dev/null' EXIT
-for _attempt in $(seq 1 60); do
-  if curl -fsS http://127.0.0.1:9944 \
+(
+  set -euo pipefail
+  localnet_image="ghcr.io/raofoundation/subtensor-localnet@sha256:f68b9a1744401fca244a25ec579f461926944c6addac252a89af88a9e9271510"
+  localnet_id="$(
+    docker run --rm -d \
+      -p 9944:9944 -p 9945:9945 \
+      "$localnet_image"
+  )"
+  trap 'docker stop "$localnet_id" >/dev/null' EXIT
+  for _attempt in {1..60}; do
+    if curl -fsS http://127.0.0.1:9944 \
+      -H 'content-type: application/json' \
+      --data '{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}' \
+      >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  curl -fsS http://127.0.0.1:9944 \
     -H 'content-type: application/json' \
-    --data '{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}' \
-    >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-curl -fsS http://127.0.0.1:9944 \
-  -H 'content-type: application/json' \
-  --data '{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}' >/dev/null
-BITCAST_X_RUN_LOCALNET=1 uv run pytest -q tests/integration/test_localnet_round_trip.py
+    --data '{"id":1,"jsonrpc":"2.0","method":"chain_getHeader","params":[]}' >/dev/null
+  BITCAST_X_RUN_LOCALNET=1 uv run pytest -q tests/integration/test_localnet_round_trip.py
+)
 ```
 
 The test creates only ephemeral local wallets and subnet registrations. The container owns the
@@ -194,8 +201,9 @@ those concerns separate:
 
 These canaries must not block ordinary contributor tests, and they never need to publish a tweet.
 
-The repository includes an opt-in Desearch canary with a known historical tweet and an environment
-override for operators who prefer a different fixture:
+The repository includes an opt-in Desearch canary using a historical post controlled by the
+official Bitcast X account, with an environment override for operators who prefer a different
+fixture:
 
 ```bash
 BITCAST_X_RUN_DESEARCH_CANARY=1 \
@@ -214,7 +222,7 @@ identity fields plus the engagement response shape; it does not assert mutable e
 
 ## What the completed harness proves
 
-The combined public harness should cover claim creation and finalization, submission persistence,
+The combined public harness covers claim creation and finalization, submission persistence,
 batch hashing and transport, validator chain verification, campaign and author eligibility,
 draft matching, qualification, attribution, engagement scoring, reward construction, restart
 recovery, and the validator's published result.
