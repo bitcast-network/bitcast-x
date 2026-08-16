@@ -17,6 +17,10 @@ uv run mypy src
 uv run pytest -q
 ```
 
+Changes to claims, submissions, attribution, tweet validation, scoring, or their external
+boundaries should follow the [tweet flow testing plan](docs/tweet-flow-testing.md). It describes
+the intended deterministic integration coverage and which live checks remain separate.
+
 Dependencies and other third-party components retain their own copyrights and licenses. New
 dependencies must have licensing compatible with distribution of this project under MIT and must
 be recorded in the lockfile.
