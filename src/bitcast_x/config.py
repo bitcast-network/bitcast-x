@@ -7,9 +7,9 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL
 from bitcast_x.legacy.constants import LEGACY_NOCODE_UID
 
-CAMPAIGN_FEED_URL = "https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest"
 LEGACY_CONNECTION_TWEET_IDS = "2031383975088836738"
 QUALIFICATION_OWNER_HOTKEY = "5DAoDtMxVqtMu2Nd5E7QhPEGXDMgrySvE1b3rRT5ARDhfNNK"
 

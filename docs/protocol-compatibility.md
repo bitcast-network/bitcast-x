@@ -11,6 +11,12 @@ strings are consensus-visible contracts.
 
 - Validators reject unsupported protocol versions, malformed extra fields, broken sequence links
   and changed historical batches. They do not guess through incompatibility.
+- Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
+  available unchanged during rollout; updated clients prefer v4 and fall back to v3 only when the
+  v4 endpoint has not yet been published. A v3 response containing the new field is invalid.
+- Adding the first published cutoff does not rewrite already frozen campaign results. Once a
+  non-null cutoff has been observed, changing it is a campaign-contract mutation and is rejected
+  after final results freeze.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version.

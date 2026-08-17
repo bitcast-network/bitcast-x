@@ -248,6 +248,37 @@ def test_complete_campaign_contract_cannot_change_after_results_freeze(
         store.bind_campaign_protocols((mutate_campaign_contract(original, field),))
 
 
+def test_rank_cutoff_upgrade_preserves_already_frozen_campaign_results(tmp_path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    original = campaign("same", MiningProtocol.PRECLAIM_V2)
+    ranked = original.model_copy(update={"max_members": 150})
+    store.bind_campaign_protocols((original,))
+    store.persist_reconciliation(
+        snapshot_id="frozen",
+        campaign_id="same",
+        campaign_json=original.model_dump_json(),
+        results=[],
+    )
+
+    assert store.bind_campaign_protocols((ranked,)) == (ranked,)
+
+
+def test_published_rank_cutoff_cannot_change_after_results_freeze(tmp_path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 150})
+    changed = original.model_copy(update={"max_members": 151})
+    store.bind_campaign_protocols((original,))
+    store.persist_reconciliation(
+        snapshot_id="frozen",
+        campaign_id="same",
+        campaign_json=original.model_dump_json(),
+        results=[],
+    )
+
+    with pytest.raises(ProtocolError, match="changed after final results froze"):
+        store.bind_campaign_protocols((changed,))
+
+
 def test_identical_campaign_contract_can_be_observed_repeatedly(tmp_path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     original = campaign("same", MiningProtocol.PRECLAIM_V2)

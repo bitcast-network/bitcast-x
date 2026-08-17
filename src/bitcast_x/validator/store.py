@@ -34,9 +34,12 @@ def _same_campaign_contract(first: str, second: str) -> bool:
     from bitcast_x.campaigns import CampaignRecord
 
     try:
-        return CampaignRecord.model_validate_json(first) == CampaignRecord.model_validate_json(
-            second
-        )
+        first_record = CampaignRecord.model_validate_json(first)
+        second_record = CampaignRecord.model_validate_json(second)
+        if (first_record.max_members is None) != (second_record.max_members is None):
+            first_record = first_record.model_copy(update={"max_members": None})
+            second_record = second_record.model_copy(update={"max_members": None})
+        return first_record == second_record
     except ValueError:
         return False
 
