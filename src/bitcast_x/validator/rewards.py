@@ -61,7 +61,11 @@ class RewardCoordinator:
                 continue
             campaign_results = [item for item in attributions if item.campaign_id == campaign_id]
             try:
-                scored = await self._scorer.score(feed, campaign_results)
+                scored = await self._scorer.score(
+                    feed,
+                    campaign_results,
+                    defer_unavailable_tweets=True,
+                )
             except ReconciliationUnavailableError as exc:
                 LOGGER.warning(
                     "final scoring deferred campaign=%s error=%s",

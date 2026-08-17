@@ -21,8 +21,8 @@ consensus-visible rule.
   verifies every batch against historical chain state, independently obtains public X evidence,
   freezes attribution and scoring, and calculates mechanism-1 weights.
 - X-data and LLM providers are availability and evidence dependencies. Their failure does not
-  become a rejection or an empty reward result; the affected campaign remains unreconciled and the
-  last authoritative state is retained.
+  become a rejection. An unavailable tweet remains explicitly pending while independently
+  verifiable campaign tweets continue through final scoring and rewards.
 
 The campaign publisher, X provider, and configured LLM are not decentralized by this protocol.
 Validators independently verify miner history and repeat the scoring rules, but they consume the
@@ -164,7 +164,9 @@ is:
 A winner needs a score of at least `0.70` and a margin of at least `0.10` over the runner-up. An
 exact tie, weak match, or narrow margin abstains rather than assigning the tweet.
 
-Every submitted tweet receives a stable accepted or rejected reason. The complete reason enum and
+Every submitted tweet receives a stable accepted, pending, or rejected reason. Evidence that is
+unavailable at final reconciliation is frozen as `evidence_unavailable` pending rather than
+rejecting the tweet or blocking the campaign. The complete reason enum and
 model are in [`src/bitcast_x/protocol/models.py`](../src/bitcast_x/protocol/models.py); the replay
 rules are in
 [`src/bitcast_x/validator/reconciliation.py`](../src/bitcast_x/validator/reconciliation.py), and
@@ -175,8 +177,9 @@ the matcher is in [`src/bitcast_x/matcher.py`](../src/bitcast_x/matcher.py).
 Only accepted attributions that pass the campaign's semantic brief evaluation enter rewards.
 Engagement evidence is taken from the configured X provider and frozen for the campaign. The
 validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
-passes the tweet. Total provider failure leaves the campaign unavailable rather than rejecting the
-tweet. Prompt text and parsing behavior are shipped in this repository.
+passes the tweet. Unavailable engagement or semantic evidence leaves only that tweet's reward
+disposition pending; available tweets continue without translating the outage into rejection.
+Prompt text and parsing behavior are shipped in this repository.
 
 The engagement score starts at twice the author's influence. Retweets from considered accounts add
 `1 * influence`; quotes add `3 * influence`. When a positive relationship score exists from an

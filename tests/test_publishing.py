@@ -343,6 +343,55 @@ def test_payload_publishes_unqualified_preview_as_pending() -> None:
     assert payload["attribution_decisions"][0]["reward_status"] == "pending"  # type: ignore[index]
 
 
+def test_final_payload_keeps_unavailable_evidence_pending() -> None:
+    pending = AttributionResult(
+        tweet_id="124",
+        campaign_id="campaign",
+        accepted=False,
+        reason=AttributionReason.EVIDENCE_UNAVAILABLE,
+        pending=True,
+        miner_hotkey=MINER,
+        submission_id="02" * 16,
+    )
+
+    payload = create_brief_tweets_payload(
+        campaign(),
+        [],
+        {},
+        {MINER: 7},
+        attributions=[pending],
+        reward_decisions=[],
+        timestamp=NOW,
+    )
+
+    decision = payload["attribution_decisions"][0]  # type: ignore[index]
+    assert decision["status"] == "pending"
+    assert decision["reason"] == "evidence_unavailable"
+    assert decision["reward_status"] == "pending"
+    assert decision["reward_reason"] == "evidence_unavailable"
+    assert decision["daily_usd_floor"] is None
+
+
+def test_final_payload_keeps_unavailable_scoring_pending() -> None:
+    accepted = scored().attribution
+
+    payload = create_brief_tweets_payload(
+        campaign(),
+        [],
+        {},
+        {MINER: 7},
+        attributions=[accepted],
+        reward_decisions=[],
+        timestamp=NOW,
+    )
+
+    decision = payload["attribution_decisions"][0]  # type: ignore[index]
+    assert decision["status"] == "accepted"
+    assert decision["reward_status"] == "pending"
+    assert decision["reward_reason"] == "evidence_unavailable"
+    assert decision["daily_usd_floor"] is None
+
+
 def test_final_payload_distinguishes_attribution_from_duplicate_reward_rejection() -> None:
     accepted = scored()
     duplicate = RewardDecision(

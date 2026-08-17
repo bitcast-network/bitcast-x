@@ -102,12 +102,34 @@ def test_attribution_acceptance_must_match_reason() -> None:
         )
 
 
-def test_only_miner_qualification_can_be_pending() -> None:
-    with pytest.raises(ValidationError, match="only an unqualified miner"):
+def test_evidence_unavailable_can_remain_pending() -> None:
+    result = AttributionResult(
+        tweet_id="1",
+        campaign_id="campaign",
+        accepted=False,
+        reason=AttributionReason.EVIDENCE_UNAVAILABLE,
+        pending=True,
+    )
+
+    assert result.pending is True
+
+
+def test_unsupported_reason_cannot_be_pending() -> None:
+    with pytest.raises(ValidationError, match="supported non-final reason"):
         AttributionResult(
             tweet_id="1",
             campaign_id="campaign",
             accepted=False,
             reason=AttributionReason.AMBIGUOUS_MATCH,
             pending=True,
+        )
+
+
+def test_evidence_unavailable_cannot_be_rejected() -> None:
+    with pytest.raises(ValidationError, match="must remain pending"):
+        AttributionResult(
+            tweet_id="1",
+            campaign_id="campaign",
+            accepted=False,
+            reason=AttributionReason.EVIDENCE_UNAVAILABLE,
         )

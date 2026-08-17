@@ -16,7 +16,14 @@ NOW = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
 
 
 class UnusedScorer:
-    async def score(self, _feed: object, _results: object) -> list[ScoredAttribution]:
+    async def score(
+        self,
+        _feed: object,
+        _results: object,
+        *,
+        defer_unavailable_tweets: bool = False,
+    ) -> list[ScoredAttribution]:
+        del defer_unavailable_tweets
         raise AssertionError("scoring is not used by shadow_weights")
 
 
@@ -28,8 +35,10 @@ class CountingScorer:
         self,
         feed: CampaignFeed,
         results: list[AttributionResult],
+        *,
+        defer_unavailable_tweets: bool = False,
     ) -> list[ScoredAttribution]:
-        del feed
+        del feed, defer_unavailable_tweets
         self.campaign_ids.extend(sorted({item.campaign_id for item in results}))
         return []
 
