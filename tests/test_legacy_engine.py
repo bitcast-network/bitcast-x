@@ -131,6 +131,36 @@ async def test_connected_eligible_tweet_is_attributed_locally(tmp_path: Path) ->
     assert scorer.feed.campaigns[0].access.mining_protocol is MiningProtocol.LEGACY_CONNECTION
 
 
+def test_legacy_attribution_enforces_top_n_on_the_tweet_time_map() -> None:
+    snapshot = _feed()
+    campaign = snapshot.campaigns[0].model_copy(update={"max_members": 1})
+    ecosystem = snapshot.ecosystem_maps[0].model_copy(
+        update={
+            "eligible_creator_x_ids": ("1", "2"),
+            "accounts": (
+                SocialAccount(x_id="2", username="bob", influence=2),
+                SocialAccount(x_id="1", username="alice", influence=1),
+            ),
+        }
+    )
+    tweet = Tweet(
+        tweet_id="123",
+        author_x_id="1",
+        created_at=datetime(2026, 8, 2, tzinfo=UTC),
+        text="#legacy",
+        author="alice",
+    )
+
+    assert (
+        LegacyAttributionEngine._eligible(
+            snapshot.model_copy(update={"campaigns": (campaign,), "ecosystem_maps": (ecosystem,)}),
+            campaign,
+            tweet,
+        )
+        is False
+    )
+
+
 async def test_unavailable_search_reuses_cumulative_tweet_store(tmp_path: Path) -> None:
     scorer = Scorer()
     store_path = tmp_path / "tweets"

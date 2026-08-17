@@ -1244,6 +1244,38 @@ async def test_eligibility_uses_map_active_at_tweet_publication(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign().model_copy(update={"max_members": 1})
+    snapshot = feed(record).model_copy(
+        update={
+            "ecosystem_maps": (
+                EcosystemMap(
+                    ecosystem_id="ecosystem",
+                    name="Active map",
+                    eligible_creator_x_ids=("123", "456"),
+                    updated_at=NOW,
+                    accounts=(
+                        SocialAccount(x_id="123", username="leader", influence=2.0),
+                        SocialAccount(x_id="456", username="creator", influence=1.0),
+                    ),
+                ),
+            )
+        }
+    )
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(record, snapshot))[0]
+
+    assert result.accepted is False
+    assert result.reason is AttributionReason.CAMPAIGN_INELIGIBLE
+
+
+@pytest.mark.asyncio
 async def test_missing_historical_map_keeps_campaign_unreconciled(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()

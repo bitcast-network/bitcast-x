@@ -34,7 +34,7 @@ Several version numbers cover different boundaries and must not be conflated:
 
 | Boundary | Current version | Meaning |
 | --- | --- | --- |
-| Campaign manifest | `3` | Campaign index with separately fetched, SHA-256-addressed ecosystem maps |
+| Campaign manifest | `4` | Adds each campaign's required top-`max_members` creator-rank cutoff |
 | Validator-to-miner HTTP | `3` | `/v3/batches` includes each batch's claimed finalized chain position |
 | Temporary HTTP overlap | `2` | `/v2/batches` returns the same complete batches without positions |
 | Claim, submission, and batch content | `2` | Strict event schemas, canonical hashing, and `DX2` on-chain envelopes |
@@ -48,7 +48,7 @@ commitment envelope is in
 
 ## Public campaign input
 
-The configured campaign URL returns a v3 manifest. Each map reference includes its ecosystem ID,
+The configured campaign URL returns a v4 manifest. Each map reference includes its ecosystem ID,
 activation time, byte size, path, and `sha256-<hex>` digest. Miners may list campaigns without
 downloading maps. Validators download the maps needed for scoring, enforce the response-size bound,
 verify each digest before caching, and select the map active when a tweet was published.
@@ -58,7 +58,7 @@ Each campaign configures:
 - `campaign_id`, `mechanism_id`, and `mining_protocol`;
 - the UTC open/close interval and finalized `scoring_close_block`;
 - an optional `exclusive_miner_hotkey`;
-- eligible ecosystem pools and their historical maps;
+- eligible ecosystem pools, their historical maps, and a positive `max_members` cutoff;
 - brief text, required terms, language, tag, quoted-tweet, keyword, and prompt-version rules;
 - reward pool, optional per-creator tweet limit, and emission block interval.
 
@@ -153,7 +153,8 @@ the miner can still qualify.
 Before attribution, the validator independently fetches the tweet and requires:
 
 - publication within the inclusive campaign UTC window;
-- an author X ID eligible in at least one configured ecosystem map active at publication;
+- an author X ID ranked within the campaign's top `max_members` in at least one configured
+  ecosystem map active at publication;
 - all required terms and any configured tag or quoted tweet;
 - at least one configured inclusion keyword, when present;
 - the configured language, except unknown/undetermined provider values;
@@ -181,6 +182,11 @@ model are in [`src/bitcast_x/protocol/models.py`](../src/bitcast_x/protocol/mode
 rules are in
 [`src/bitcast_x/validator/reconciliation.py`](../src/bitcast_x/validator/reconciliation.py), and
 the matcher is in [`src/bitcast_x/matcher.py`](../src/bitcast_x/matcher.py).
+
+Rank is deterministic: accounts are ordered by influence descending and immutable numeric X ID
+ascending for ties. Being present elsewhere in the full ecosystem map is not campaign eligibility,
+and prior participation does not bypass the cutoff for a later tweet. Results frozen before the v4
+cutoff was published remain immutable rather than being recalculated retroactively.
 
 ## Scoring and rewards
 

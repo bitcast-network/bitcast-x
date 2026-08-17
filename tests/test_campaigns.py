@@ -8,7 +8,16 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient, EcosystemMap, _map_digest
+from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
+from bitcast_x.campaigns import (
+    CampaignFeed,
+    CampaignFeedClient,
+    CampaignManifest,
+    EcosystemMap,
+    SocialAccount,
+    _map_digest,
+    eligible_creator_ids_in_map,
+)
 
 FEED = {
     "protocol_version": 2,
@@ -38,19 +47,30 @@ FEED = {
             "name": "Example",
             "eligible_creator_x_ids": ["123"],
             "updated_at": "2026-08-05T12:00:00Z",
+            "accounts": [
+                {
+                    "x_id": "123",
+                    "username": "example",
+                    "influence": 1.0,
+                    "followers_count": 10,
+                }
+            ],
         }
     ],
 }
 
 
-def _manifest() -> dict[str, object]:
+def _manifest(*, protocol_version: int = 3) -> dict[str, object]:
     ecosystem_map = EcosystemMap.model_validate(FEED["ecosystem_maps"][0])  # type: ignore[index]
     digest = _map_digest(ecosystem_map)
+    campaigns = deepcopy(FEED["campaigns"])
+    if protocol_version == 4:
+        campaigns[0]["max_members"] = 1  # type: ignore[index]
     return {
-        "protocol_version": 3,
+        "protocol_version": protocol_version,
         "snapshot_id": "snapshot-1",
         "published_at": FEED["published_at"],
-        "campaigns": FEED["campaigns"],
+        "campaigns": campaigns,
         "ecosystem_maps": [
             {
                 "ecosystem_id": "example",
@@ -92,6 +112,33 @@ def test_campaign_contract_accepts_prompt_v5_and_rejects_unknown_versions() -> N
     payload["campaigns"][0]["prompt_version"] = 6  # type: ignore[index]
     with pytest.raises(ValidationError, match="less than or equal to 5"):
         CampaignFeed.model_validate(payload)
+
+
+def test_manifest_v4_requires_rank_cutoff_on_every_campaign() -> None:
+    ranked = CampaignManifest.model_validate(_manifest(protocol_version=4))
+
+    assert ranked.campaigns[0].max_members == 1
+
+    missing = _manifest(protocol_version=4)
+    missing["campaigns"][0].pop("max_members")  # type: ignore[index]
+    with pytest.raises(ValidationError, match="must define max_members"):
+        CampaignManifest.model_validate(missing)
+
+
+def test_rank_cutoff_uses_influence_then_immutable_id_for_ties() -> None:
+    ecosystem = EcosystemMap(
+        ecosystem_id="example",
+        name="Example",
+        eligible_creator_x_ids=("30", "20", "10"),
+        updated_at="2026-08-05T12:00:00Z",
+        accounts=(
+            SocialAccount(x_id="30", username="third", influence=1.0),
+            SocialAccount(x_id="20", username="second", influence=2.0),
+            SocialAccount(x_id="10", username="first", influence=2.0),
+        ),
+    )
+
+    assert eligible_creator_ids_in_map(ecosystem, 2) == frozenset({"10", "20"})
 
 
 @pytest.mark.asyncio
@@ -165,6 +212,36 @@ async def test_campaign_listing_does_not_download_manifest_maps(tmp_path: Path) 
 
     assert campaigns[0].access.campaign_id == "campaign-1"
     assert requests == ["/api/v2/public/x/campaign-manifest"]
+
+
+@pytest.mark.asyncio
+async def test_canonical_v4_manifest_falls_back_to_v3_only_while_unpublished(
+    tmp_path: Path,
+) -> None:
+    requests: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path.endswith("campaign-manifest-v4"):
+            return httpx.Response(404)
+        return httpx.Response(200, json=_manifest())
+
+    client = CampaignFeedClient(
+        LEGACY_CAMPAIGN_FEED_URL,
+        cache_path=tmp_path / "feed.json",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        campaigns = await client.fetch_campaigns()
+    finally:
+        await client.close()
+
+    assert client.url == CAMPAIGN_FEED_URL
+    assert campaigns[0].max_members is None
+    assert requests == [
+        "/api/v2/public/x/campaign-manifest-v4",
+        "/api/v2/public/x/campaign-manifest",
+    ]
 
 
 @pytest.mark.asyncio

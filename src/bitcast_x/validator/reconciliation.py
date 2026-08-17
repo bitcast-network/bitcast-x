@@ -6,7 +6,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
-from bitcast_x.campaigns import CampaignFeed, CampaignRecord, ecosystem_map_at
+from bitcast_x.campaigns import (
+    CampaignFeed,
+    CampaignRecord,
+    ecosystem_map_at,
+    eligible_creator_ids_in_map,
+)
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.matcher import MatchCandidate, choose_match, normalize_match_text
 from bitcast_x.protocol import (
@@ -327,9 +332,10 @@ class CampaignReconciler:
                 f"no ecosystem map active when tweet {tweet.tweet_id} was published"
             )
         if not any(
-            tweet.author_x_id in ecosystem.eligible_creator_x_ids for ecosystem in ecosystems
+            tweet.author_x_id in eligible_creator_ids_in_map(ecosystem, campaign.max_members)
+            for ecosystem in ecosystems
         ):
-            return AttributionReason.AUTHOR_MISMATCH
+            return AttributionReason.CAMPAIGN_INELIGIBLE
         normalized = normalize_match_text(tweet.text)
         if any(normalize_match_text(term) not in normalized for term in campaign.required_terms):
             return AttributionReason.CAMPAIGN_INELIGIBLE

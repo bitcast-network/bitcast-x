@@ -9,7 +9,7 @@ def test_public_protocol_defaults_match_the_published_network() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.campaign_feed_url == (
-        "https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest"
+        "https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest-v4"
     )
     assert settings.legacy_nocode_uid == 154
     assert settings.legacy_connection_tweet_ids == "2031383975088836738"
