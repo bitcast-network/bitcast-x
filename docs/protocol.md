@@ -67,6 +67,16 @@ windows, and incomplete emission bounds. The `campaign_id` is the stable identit
 results exist, validators adopt the latest complete record published for that ID, including routing
 and content-rule corrections. The contract stored with final reconciliation is immutable.
 
+`prompt_version` explicitly selects one of five frozen semantic-evaluation templates. Versions 1
+and 2 evaluate conventional sponsored coverage, version 3 evaluates unsponsored conversational
+topics, and version 4 permits critical sponsored coverage. Version 5 evaluates honest product or
+service reviews: positive, neutral, mixed, critical, and negative conclusions are equally valid;
+the post must instead make the product or service its primary subject, contain a specific
+assessment with supporting substance, and meet the brief's objective coverage requirements.
+Sentiment, ratings, and conclusions prescribed by a version-5 brief are not eligibility
+requirements. Existing prompt text remains byte-stable and each template is pinned by a golden
+SHA-256 test.
+
 The schema and digest checks are implemented in
 [`src/bitcast_x/campaigns.py`](../src/bitcast_x/campaigns.py).
 
@@ -179,7 +189,9 @@ Engagement evidence is taken from the configured X provider and frozen for the c
 validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
 passes the tweet. Unavailable engagement or semantic evidence leaves only that tweet's reward
 disposition pending; available tweets continue without translating the outage into rejection.
-Prompt text and parsing behavior are shipped in this repository.
+Prompt text and parsing behavior are shipped in this repository. A new prompt version is dormant
+until selected by a campaign; changing an existing version would change its durable cache key and
+evaluation behavior.
 
 The engagement score starts at twice the author's influence. Retweets from considered accounts add
 `1 * influence`; quotes add `3 * influence`. When a positive relationship score exists from an

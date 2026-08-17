@@ -81,6 +81,19 @@ def test_campaign_contract_accepts_legacy_null_language_as_noop() -> None:
     assert "language" not in parsed.campaigns[0].model_dump()
 
 
+def test_campaign_contract_accepts_prompt_v5_and_rejects_unknown_versions() -> None:
+    payload = deepcopy(FEED)
+    payload["campaigns"][0]["prompt_version"] = 5  # type: ignore[index]
+
+    parsed = CampaignFeed.model_validate(payload)
+
+    assert parsed.campaigns[0].prompt_version == 5
+
+    payload["campaigns"][0]["prompt_version"] = 6  # type: ignore[index]
+    with pytest.raises(ValidationError, match="less than or equal to 5"):
+        CampaignFeed.model_validate(payload)
+
+
 @pytest.mark.asyncio
 async def test_fetches_valid_snapshot_and_reuses_etag_cache(tmp_path: Path) -> None:
     calls = 0

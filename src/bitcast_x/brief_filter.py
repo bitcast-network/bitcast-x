@@ -182,11 +182,12 @@ class LlmBriefFilter:
 
 
 def parse_brief_evaluation(text: str, *, checks_used: int) -> BriefEvaluation:
-    """Parse v2's markdown verdict, breakdown, and summary fields."""
+    """Parse the versioned markdown verdict, breakdown, and summary fields."""
 
     verdict = re.search(r"## Verdict\s*\n\s*(YES|NO)", text, re.IGNORECASE)
     breakdown = re.search(
-        r"## Requirement-by-Requirement[ \t]*\n(.*?)(?:\n## Verdict|\n## |$)",
+        r"## (?:Requirement-by-Requirement|Objective Requirements)[ \t]*\n"
+        r"(.*?)(?:\n## Verdict|\n## |$)",
         text,
         re.DOTALL | re.IGNORECASE,
     )

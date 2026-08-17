@@ -78,12 +78,13 @@ def completion(verdict: str, summary: str) -> dict[str, Any]:
     }
 
 
-def test_prompt_versions_are_byte_identical_to_v2_oracle() -> None:
+def test_prompt_versions_have_frozen_hashes() -> None:
     expected = {
         1: "193ca82cc622774a2cb142bb724378b33fbdbf8ec113cc16778a1153297849a0",
         2: "f2d2d4c2cf16821be3decbf5ae2478ec5ff821abfb7cc289b96e106066efbcaf",
         3: "2cd4cd1a4009c26a7c89900dfaaddee845c56206b6880bbd71fe5ae727c10f5a",
         4: "78e7381236ca3c3e815105a721360f1cb76d9275518b33e53cd54b7d9ae8343b",
+        5: "4a079a65ae1e2fdd5bddf3f42d334813d05056d749c3ae04178ecd414f4c5394",
     }
     brief = {"brief": "Talk about Bitcast and tag @bitcast_network"}
 
@@ -99,6 +100,24 @@ def test_prompt_versions_are_byte_identical_to_v2_oracle() -> None:
     }
 
     assert actual == expected
+
+
+def test_honest_review_prompt_is_sentiment_neutral_and_requires_substance() -> None:
+    prompt = generate_brief_evaluation_prompt(
+        {"brief": "Review Example Cloud after trying its deployment workflow."},
+        "Example Cloud was quick to deploy, but its logs were difficult to navigate.",
+        5,
+    )
+
+    assert (
+        "Positive, neutral, mixed, critical, and negative reviews are equally acceptable" in prompt
+    )
+    assert (
+        "Generic praise, promotional slogans, or a passing mention do not constitute a review"
+        in prompt
+    )
+    assert "Relevant comparisons with alternatives count as on-topic" in prompt
+    assert "must not be negative or critical" not in prompt
 
 
 @pytest.mark.asyncio
@@ -238,5 +257,21 @@ def test_response_parser_preserves_v2_fields() -> None:
         meets_brief=True,
         reasoning="All requirements met.",
         detailed_breakdown="- Req 1: Met",
+        checks_used=1,
+    )
+
+
+def test_response_parser_preserves_v5_objective_requirements() -> None:
+    result = parse_brief_evaluation(
+        '## Objective Requirements\n- Req 1: Met — "quick to deploy"\n'
+        "## Review Quality\n- Relevance: Met\n- Substance: Met\n"
+        "## Verdict\nYES\n## Summary\nA specific mixed review.",
+        checks_used=1,
+    )
+
+    assert result == BriefEvaluation(
+        meets_brief=True,
+        reasoning="A specific mixed review.",
+        detailed_breakdown='- Req 1: Met — "quick to deploy"',
         checks_used=1,
     )
