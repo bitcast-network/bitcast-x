@@ -14,6 +14,9 @@ strings are consensus-visible contracts.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version.
+- An additive LLM prompt version does not change the miner-validator wire version when existing
+  prompts remain byte-stable, the campaign selects the new version explicitly, and a golden digest
+  pins its exact text. Removing or rewriting a prompt version remains a compatibility change.
 - Final `preclaim_v2` publications keep attribution and economic disposition separate: each
   attribution decision includes `reward_status`, `reward_reason` and `daily_usd_floor`. Preview
   publications leave the economic disposition pending. Final publications also retain a pending

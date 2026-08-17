@@ -118,7 +118,7 @@ class CampaignRecord(BaseModel):
     tag: str | None = Field(default=None, min_length=1, max_length=256)
     quoted_tweet_id: str | None = Field(default=None, pattern=r"^[0-9]+$")
     inclusion_keywords: tuple[str, ...] = ()
-    prompt_version: int = Field(default=1, ge=1, le=4)
+    prompt_version: int = Field(default=1, ge=1, le=5)
     max_tweets_per_creator: int | None = Field(default=None, ge=1)
     cap: float | None = Field(default=None, gt=0, le=1)
     emission_start_block: int | None = Field(default=None, ge=0)
