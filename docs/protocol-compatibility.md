@@ -16,8 +16,10 @@ strings are consensus-visible contracts.
 - Additive internal database or operator API changes do not change the protocol version.
 - Final `preclaim_v2` publications keep attribution and economic disposition separate: each
   attribution decision includes `reward_status`, `reward_reason` and `daily_usd_floor`. Preview
-  publications leave the economic disposition pending. Legacy `alpha_target` and `weight` fields
-  are null because preclaim economics do not share their established meanings.
+  publications leave the economic disposition pending. Final publications also retain a pending
+  disposition for an individual tweet whose required evidence was unavailable; independently
+  verified tweets still freeze. Legacy `alpha_target` and `weight` fields are null because
+  preclaim economics do not share their established meanings.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version, golden vectors and a shadow overlap period.
 - During an overlap, validators may read explicitly supported old and new versions but must produce

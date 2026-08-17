@@ -220,6 +220,7 @@ class AttributionReason(StrEnum):
     AMBIGUOUS_MATCH = "ambiguous_match"
     DUPLICATE_TWEET = "duplicate_tweet"
     WRONG_EXCLUSIVE_MINER = "wrong_exclusive_miner"
+    EVIDENCE_UNAVAILABLE = "evidence_unavailable"
 
 
 class AttributionResult(ProtocolModel):
@@ -240,8 +241,12 @@ class AttributionResult(ProtocolModel):
     def keep_acceptance_consistent(self) -> "AttributionResult":
         if self.accepted != (self.reason is AttributionReason.ACCEPTED):
             raise ValueError("accepted must agree with the attribution reason")
-        if self.pending and (
-            self.accepted or self.reason is not AttributionReason.MINER_NOT_QUALIFIED
-        ):
-            raise ValueError("only an unqualified miner result can be pending")
+        pending_reasons = {
+            AttributionReason.EVIDENCE_UNAVAILABLE,
+            AttributionReason.MINER_NOT_QUALIFIED,
+        }
+        if self.pending and (self.accepted or self.reason not in pending_reasons):
+            raise ValueError("pending results require a supported non-final reason")
+        if self.reason is AttributionReason.EVIDENCE_UNAVAILABLE and not self.pending:
+            raise ValueError("unavailable evidence must remain pending")
         return self

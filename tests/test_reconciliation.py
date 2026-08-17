@@ -10,6 +10,7 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap, Soci
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError, ReconciliationUnavailableError
 from bitcast_x.protocol import (
+    AttributionReason,
     CampaignAccess,
     ClaimEvent,
     CommitmentEnvelope,
@@ -869,7 +870,7 @@ def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
 
 
 @pytest.mark.asyncio
-async def test_provider_outage_preserves_campaign_as_unreconciled(tmp_path: Path) -> None:
+async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
     snapshot = feed(record)
@@ -882,14 +883,19 @@ async def test_provider_outage_preserves_campaign_as_unreconciled(tmp_path: Path
     with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
         await reconciler.reconcile_campaign(record, snapshot)
 
-    assert await reconciler.reconcile_feed(snapshot, finalized_block=20) == []
+    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result.pending is True
+    assert result.reason is AttributionReason.EVIDENCE_UNAVAILABLE
     assert (
         store.reconciliation(
             snapshot.snapshot_id,
             record.access.campaign_id,
             record.model_dump_json(),
         )
-        is None
+        == results
     )
     assert len(store.verified_batches()) == 2
 
@@ -978,7 +984,79 @@ def _two_campaign_finalization(
 
 
 @pytest.mark.asyncio
-async def test_finalization_isolates_an_unavailable_campaign(tmp_path: Path) -> None:
+async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    record = _exclusive_final_campaign("campaign")
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(
+            SubmissionEvent(
+                submission_id="03" * 16,
+                campaign_id="campaign",
+                tweet_id="998",
+                claim_id=None,
+                miner_hotkey=MINER,
+            ),
+            SubmissionEvent(
+                submission_id="04" * 16,
+                campaign_id="campaign",
+                tweet_id="999",
+                claim_id=None,
+                miner_hotkey=MINER,
+            ),
+        ),
+    )
+    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    snapshot = feed(record).model_copy(
+        update={
+            "ecosystem_maps": (
+                EcosystemMap(
+                    ecosystem_id="ecosystem",
+                    name="Ecosystem",
+                    eligible_creator_x_ids=("456",),
+                    updated_at=NOW,
+                    accounts=(SocialAccount(x_id="456", username="creator", influence=10.0),),
+                ),
+            )
+        }
+    )
+    provider = FakeX(
+        {
+            "998": TweetFetch(tweet=None, provider_available=False),
+            "999": TweetFetch(tweet=tweet("999"), provider_available=True),
+        }
+    )
+    attributions = await CampaignReconciler(
+        store,
+        provider,
+        FakeQualification(),
+    ).reconcile_feed(snapshot, finalized_block=30)
+    coordinator = RewardCoordinator(store, AttributionScorer(provider))
+
+    scored = await coordinator.freeze_scores(snapshot, attributions)
+    weights, floors = coordinator.shadow_weights(
+        snapshot,
+        scored,
+        block=35,
+        hotkey_to_uid={MINER: 7},
+        uids=[0, 7],
+        persist=False,
+    )
+
+    results_by_tweet = {item.tweet_id: item for item in attributions}
+    assert results_by_tweet["998"].pending is True
+    assert results_by_tweet["998"].reason is AttributionReason.EVIDENCE_UNAVAILABLE
+    assert results_by_tweet["999"].accepted is True
+    assert [item.tweet_id for item in floors] == ["999"]
+    assert floors[0].daily_usd_floor == pytest.approx(1000 / 7)
+    assert weights == {0: 0.0, 7: 1.0}
+    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+
+
+@pytest.mark.asyncio
+async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
     provider = FakeX(
         {
@@ -1006,15 +1084,17 @@ async def test_finalization_isolates_an_unavailable_campaign(tmp_path: Path) -> 
         endpoint="https://ingestion.example/api/v1/brief-tweets",
     ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
 
-    assert [item.campaign_id for item in attributions] == ["campaign-b"]
-    assert (
-        store.reconciliation(
-            snapshot.snapshot_id,
-            "campaign-a",
-            campaign_a.model_dump_json(),
-        )
-        is None
+    assert [item.campaign_id for item in attributions] == ["campaign-a", "campaign-b"]
+    campaign_a_results = store.reconciliation(
+        snapshot.snapshot_id,
+        "campaign-a",
+        campaign_a.model_dump_json(),
     )
+    assert campaign_a_results is not None
+    assert campaign_a_results[0].pending is True
+    assert campaign_a_results[0].reason is AttributionReason.EVIDENCE_UNAVAILABLE
+    assert campaign_a_results[0].miner_hotkey == MINER
+    assert campaign_a_results[0].submission_id == "03" * 16
     assert (
         store.reconciliation(
             snapshot.snapshot_id,
@@ -1024,15 +1104,19 @@ async def test_finalization_isolates_an_unavailable_campaign(tmp_path: Path) -> 
         is not None
     )
     assert weights == {0: 0.0, 7: 1.0}
-    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ("campaign-a",)
-    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
+    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) == ([], [])
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
-    assert published == 1
-    assert publisher.run_ids == ["v3:snapshot:campaign-b"]
+    assert published == 2
+    assert publisher.run_ids == ["v3:snapshot:campaign-a", "v3:snapshot:campaign-b"]
+    campaign_a_decision = publisher.payloads[0]["attribution_decisions"][0]  # type: ignore[index]
+    assert campaign_a_decision["status"] == "pending"
+    assert campaign_a_decision["reason"] == "evidence_unavailable"
+    assert campaign_a_decision["reward_status"] == "pending"
 
 
 @pytest.mark.asyncio
-async def test_final_scoring_isolates_an_unavailable_campaign(tmp_path: Path) -> None:
+async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
     class SelectiveEngagementProvider(FakeX):
@@ -1066,10 +1150,10 @@ async def test_final_scoring_isolates_an_unavailable_campaign(tmp_path: Path) ->
     )
 
     assert [item.attribution.campaign_id for item in scored] == ["campaign-b"]
-    assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-a") is None
+    assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-a") == []
     assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-b") is not None
-    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ("campaign-a",)
-    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
+    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) == ([], [])
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
 
 
@@ -1117,9 +1201,13 @@ async def test_preview_defers_only_the_tweet_with_unavailable_evidence(tmp_path:
         defer_unavailable_tweets=True,
     )
 
-    assert [item.tweet_id for item in results] == ["999"]
+    assert [item.tweet_id for item in results] == ["999", "998"]
     assert results[0].accepted is True
     assert results[0].submission_id == "04" * 16
+    assert results[1].pending is True
+    assert results[1].reason is AttributionReason.EVIDENCE_UNAVAILABLE
+    assert results[1].miner_hotkey == MINER
+    assert results[1].submission_id == "03" * 16
 
 
 @pytest.mark.asyncio

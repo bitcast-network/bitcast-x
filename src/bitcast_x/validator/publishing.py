@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
-from bitcast_x.protocol import AttributionResult
+from bitcast_x.protocol import AttributionReason, AttributionResult
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
 from bitcast_x.rewards import RewardDecision, TweetReward
 from bitcast_x.validator.scoring import ScoredAttribution
@@ -318,7 +318,11 @@ def _attribution_decision(
     meets_brief: bool | None,
 ) -> dict[str, object]:
     miner_hotkey = attribution.miner_hotkey
-    if not finalized:
+    if attribution.pending:
+        reward_status = "pending"
+        reward_reason = attribution.reason.value
+        daily_usd_floor = None
+    elif not finalized:
         reward_status = "pending"
         reward_reason = None
         daily_usd_floor = None
@@ -327,17 +331,18 @@ def _attribution_decision(
         reward_reason = reward_decision.reason.value
         daily_usd_floor = reward_decision.daily_usd_floor
     else:
-        if attribution.accepted and meets_brief is True:
-            raise ProtocolError(
-                f"accepted tweet {attribution.tweet_id} has no frozen reward decision"
+        if attribution.accepted and meets_brief is None:
+            reward_status = "pending"
+            reward_reason = AttributionReason.EVIDENCE_UNAVAILABLE.value
+            daily_usd_floor = None
+        else:
+            reward_status = "not_rewarded"
+            reward_reason = (
+                "brief_filter_rejected"
+                if attribution.accepted and meets_brief is False
+                else attribution.reason.value
             )
-        reward_status = "not_rewarded"
-        reward_reason = (
-            "brief_filter_rejected"
-            if attribution.accepted and meets_brief is False
-            else attribution.reason.value
-        )
-        daily_usd_floor = 0.0
+            daily_usd_floor = 0.0
     return {
         "tweet_id": attribution.tweet_id,
         "campaign_id": attribution.campaign_id,

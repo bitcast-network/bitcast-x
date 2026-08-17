@@ -68,7 +68,7 @@ class AttributionScorer:
         tweet_evidence: dict[str, Tweet] | None = None,
         defer_unavailable_tweets: bool = False,
     ) -> list[ScoredAttribution]:
-        """Score accepted results, optionally deferring unavailable tweets during previews."""
+        """Score accepted results, optionally deferring unavailable tweet evidence."""
 
         accepted = [result for result in attributions if result.accepted]
         tweet_ids = sorted({item.tweet_id for item in accepted})
@@ -90,7 +90,7 @@ class AttributionScorer:
                 if not defer_unavailable_tweets:
                     raise
                 LOGGER.warning(
-                    "tweet scoring unavailable; deferring preview campaign=%s tweet_id=%s error=%s",
+                    "tweet scoring unavailable; deferring campaign=%s tweet_id=%s error=%s",
                     item.campaign_id,
                     item.tweet_id,
                     exc,
@@ -98,7 +98,7 @@ class AttributionScorer:
         if self._brief_filter is not None:
             evaluations = await asyncio.gather(
                 *(
-                    self._evaluate_for_preview(
+                    self._evaluate_with_deferral(
                         feed,
                         item,
                         defer_unavailable=defer_unavailable_tweets,
@@ -128,7 +128,7 @@ class AttributionScorer:
             ),
         )
 
-    async def _evaluate_for_preview(
+    async def _evaluate_with_deferral(
         self,
         feed: CampaignFeed,
         item: ScoredAttribution,
@@ -141,7 +141,7 @@ class AttributionScorer:
             if not defer_unavailable:
                 raise
             LOGGER.warning(
-                "brief evaluation unavailable; deferring preview campaign=%s tweet_id=%s error=%s",
+                "brief evaluation unavailable; deferring campaign=%s tweet_id=%s error=%s",
                 item.attribution.campaign_id,
                 item.attribution.tweet_id,
                 exc,

@@ -130,6 +130,7 @@ class CampaignReconciler:
                         campaign,
                         feed,
                         through_block=finalized_block,
+                        defer_unavailable_tweets=True,
                     )
                 except ReconciliationUnavailableError as exc:
                     LOGGER.warning(
@@ -156,7 +157,7 @@ class CampaignReconciler:
         through_block: int | None = None,
         defer_unavailable_tweets: bool = False,
     ) -> list[AttributionResult]:
-        """Replay one campaign, optionally omitting tweets whose evidence is unavailable."""
+        """Replay one campaign, optionally preserving unavailable tweets as pending."""
 
         records = self.store.verified_batches(
             through_block=(
@@ -206,7 +207,7 @@ class CampaignReconciler:
                 if defer_unavailable_tweets:
                     unavailable_tweet_ids.add(tweet_id)
                     LOGGER.warning(
-                        "tweet evidence unavailable; deferring preview campaign=%s tweet_id=%s",
+                        "tweet evidence unavailable; deferring campaign=%s tweet_id=%s",
                         campaign.access.campaign_id,
                         tweet_id,
                     )
@@ -220,13 +221,19 @@ class CampaignReconciler:
             value = fetched.get(tweet_id)
             return (value.created_at if value is not None else campaign.closes_at, tweet_id)
 
-        ordered_tweets = sorted(
-            (tweet_id for tweet_id in by_tweet if tweet_id not in unavailable_tweet_ids),
-            key=tweet_order,
-        )
+        ordered_tweets = sorted(by_tweet, key=tweet_order)
         for tweet_id in ordered_tweets:
             all_candidates = sorted(by_tweet[tweet_id], key=lambda item: item.order)
             exclusive_submission = self._exclusive_submission(campaign, all_candidates)
+            if tweet_id in unavailable_tweet_ids:
+                output.append(
+                    self._pending_evidence(
+                        tweet_id,
+                        campaign,
+                        submission=exclusive_submission,
+                    )
+                )
+                continue
             candidates = [
                 item
                 for item in all_candidates
@@ -287,11 +294,17 @@ class CampaignReconciler:
                 if not defer_unavailable_tweets:
                     raise
                 LOGGER.warning(
-                    "tweet reconciliation unavailable; deferring preview "
-                    "campaign=%s tweet_id=%s error=%s",
+                    "tweet reconciliation unavailable; deferring campaign=%s tweet_id=%s error=%s",
                     campaign.access.campaign_id,
                     tweet_id,
                     exc,
+                )
+                output.append(
+                    self._pending_evidence(
+                        tweet_id,
+                        campaign,
+                        submission=exclusive_submission,
+                    )
                 )
                 continue
             output.append(result)
@@ -577,6 +590,25 @@ class CampaignReconciler:
             campaign_id=campaign.access.campaign_id,
             accepted=False,
             reason=reason,
+            miner_hotkey=submission.miner_hotkey if submission is not None else None,
+            submission_id=submission.submission_id if submission is not None else None,
+        )
+
+    @staticmethod
+    def _pending_evidence(
+        tweet_id: str,
+        campaign: CampaignRecord,
+        *,
+        submission: SubmissionEvent | None = None,
+    ) -> AttributionResult:
+        """Keep unavailable evidence explicit without turning it into rejection."""
+
+        return AttributionResult(
+            tweet_id=tweet_id,
+            campaign_id=campaign.access.campaign_id,
+            accepted=False,
+            reason=AttributionReason.EVIDENCE_UNAVAILABLE,
+            pending=True,
             miner_hotkey=submission.miner_hotkey if submission is not None else None,
             submission_id=submission.submission_id if submission is not None else None,
         )
