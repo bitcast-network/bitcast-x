@@ -352,6 +352,22 @@ def eligible_creator_ids_in_map(
     return frozenset(account.x_id for account in ranked[:max_members])
 
 
+def eligible_creator_ids_for_campaign(
+    feed: CampaignFeed,
+    campaign: CampaignRecord,
+    *,
+    ecosystem_id: str | None = None,
+) -> frozenset[str]:
+    """Union the top-ranked creator IDs from every map active during the campaign."""
+
+    return frozenset(
+        creator_x_id
+        for ecosystem in ecosystem_maps_for_campaign(feed, campaign)
+        if ecosystem_id is None or ecosystem.ecosystem_id == ecosystem_id
+        for creator_x_id in eligible_creator_ids_in_map(ecosystem, campaign.max_members)
+    )
+
+
 def considered_accounts_for_campaign(
     feed: CampaignFeed,
     campaign: CampaignRecord,

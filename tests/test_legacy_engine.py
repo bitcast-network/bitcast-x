@@ -131,12 +131,21 @@ async def test_connected_eligible_tweet_is_attributed_locally(tmp_path: Path) ->
     assert scorer.feed.campaigns[0].access.mining_protocol is MiningProtocol.LEGACY_CONNECTION
 
 
-def test_legacy_attribution_enforces_top_n_on_the_tweet_time_map() -> None:
+def test_legacy_attribution_keeps_creator_eligible_after_rank_drop() -> None:
     snapshot = _feed()
     campaign = snapshot.campaigns[0].model_copy(update={"max_members": 1})
-    ecosystem = snapshot.ecosystem_maps[0].model_copy(
+    old_map = snapshot.ecosystem_maps[0].model_copy(
         update={
             "eligible_creator_x_ids": ("1", "2"),
+            "accounts": (
+                SocialAccount(x_id="1", username="alice", influence=2),
+                SocialAccount(x_id="2", username="bob", influence=1),
+            ),
+        }
+    )
+    new_map = old_map.model_copy(
+        update={
+            "updated_at": datetime(2026, 8, 3, tzinfo=UTC),
             "accounts": (
                 SocialAccount(x_id="2", username="bob", influence=2),
                 SocialAccount(x_id="1", username="alice", influence=1),
@@ -146,18 +155,20 @@ def test_legacy_attribution_enforces_top_n_on_the_tweet_time_map() -> None:
     tweet = Tweet(
         tweet_id="123",
         author_x_id="1",
-        created_at=datetime(2026, 8, 2, tzinfo=UTC),
+        created_at=datetime(2026, 8, 4, tzinfo=UTC),
         text="#legacy",
         author="alice",
     )
 
     assert (
         LegacyAttributionEngine._eligible(
-            snapshot.model_copy(update={"campaigns": (campaign,), "ecosystem_maps": (ecosystem,)}),
+            snapshot.model_copy(
+                update={"campaigns": (campaign,), "ecosystem_maps": (old_map, new_map)}
+            ),
             campaign,
             tweet,
         )
-        is False
+        is True
     )
 
 

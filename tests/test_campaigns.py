@@ -2,6 +2,7 @@
 
 import json
 from copy import deepcopy
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -16,6 +17,7 @@ from bitcast_x.campaigns import (
     EcosystemMap,
     SocialAccount,
     _map_digest,
+    eligible_creator_ids_for_campaign,
     eligible_creator_ids_in_map,
 )
 
@@ -139,6 +141,45 @@ def test_rank_cutoff_uses_influence_then_immutable_id_for_ties() -> None:
     )
 
     assert eligible_creator_ids_in_map(ecosystem, 2) == frozenset({"10", "20"})
+
+
+def test_campaign_rank_eligibility_unions_top_n_across_overlapping_maps() -> None:
+    campaign = CampaignFeed.model_validate(FEED).campaigns[0].model_copy(update={"max_members": 1})
+    old_map = EcosystemMap(
+        ecosystem_id="example",
+        name="Old map",
+        eligible_creator_x_ids=("10", "20"),
+        updated_at="2026-08-01T12:00:00Z",
+        accounts=(
+            SocialAccount(x_id="10", username="incumbent", influence=2.0),
+            SocialAccount(x_id="20", username="challenger", influence=1.0),
+        ),
+    )
+    new_map = EcosystemMap(
+        ecosystem_id="example",
+        name="New map",
+        eligible_creator_x_ids=("10", "20"),
+        updated_at="2026-08-08T12:00:00Z",
+        accounts=(
+            SocialAccount(x_id="20", username="challenger", influence=3.0),
+            SocialAccount(x_id="10", username="incumbent", influence=1.0),
+        ),
+    )
+    after_campaign = EcosystemMap(
+        ecosystem_id="example",
+        name="After campaign",
+        eligible_creator_x_ids=("30",),
+        updated_at=new_map.updated_at + timedelta(days=5),
+        accounts=(SocialAccount(x_id="30", username="latecomer", influence=4.0),),
+    )
+    snapshot = CampaignFeed.model_validate(FEED).model_copy(
+        update={
+            "campaigns": (campaign,),
+            "ecosystem_maps": (old_map, new_map, after_campaign),
+        }
+    )
+
+    assert eligible_creator_ids_for_campaign(snapshot, campaign) == frozenset({"10", "20"})
 
 
 @pytest.mark.asyncio

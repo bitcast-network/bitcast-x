@@ -1211,30 +1211,45 @@ async def test_preview_defers_only_the_tweet_with_unavailable_evidence(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_eligibility_uses_map_active_at_tweet_publication(tmp_path: Path) -> None:
+async def test_eligibility_remains_after_creator_drops_below_rank_cutoff(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
-    record = campaign()
+    record = campaign().model_copy(update={"max_members": 1})
     snapshot = feed(record).model_copy(
         update={
             "ecosystem_maps": (
                 EcosystemMap(
                     ecosystem_id="ecosystem",
-                    name="Active map",
-                    eligible_creator_x_ids=("456",),
+                    name="Initially eligible",
+                    eligible_creator_x_ids=("123", "456"),
                     updated_at=NOW,
+                    accounts=(
+                        SocialAccount(x_id="456", username="creator", influence=2.0),
+                        SocialAccount(x_id="123", username="leader", influence=1.0),
+                    ),
                 ),
                 EcosystemMap(
                     ecosystem_id="ecosystem",
-                    name="Future map",
-                    eligible_creator_x_ids=(),
+                    name="Rank dropped",
+                    eligible_creator_x_ids=("123", "456"),
                     updated_at=NOW + timedelta(hours=1),
+                    accounts=(
+                        SocialAccount(x_id="123", username="leader", influence=2.0),
+                        SocialAccount(x_id="456", username="creator", influence=1.0),
+                    ),
                 ),
             )
         }
     )
     reconciler = CampaignReconciler(
         store,
-        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeX(
+            {
+                "999": TweetFetch(
+                    tweet=tweet(created_at=NOW + timedelta(hours=2)),
+                    provider_available=True,
+                )
+            }
+        ),
         FakeQualification(),
     )
 
@@ -1284,9 +1299,9 @@ async def test_missing_historical_map_keeps_campaign_unreconciled(tmp_path: Path
             "ecosystem_maps": (
                 EcosystemMap(
                     ecosystem_id="ecosystem",
-                    name="Future map",
+                    name="After campaign",
                     eligible_creator_x_ids=("456",),
-                    updated_at=NOW + timedelta(hours=1),
+                    updated_at=NOW + timedelta(days=2),
                 ),
             )
         }
@@ -1297,7 +1312,7 @@ async def test_missing_historical_map_keeps_campaign_unreconciled(tmp_path: Path
         FakeQualification(),
     )
 
-    with pytest.raises(ReconciliationUnavailableError, match="no ecosystem map active"):
+    with pytest.raises(ReconciliationUnavailableError, match="no ecosystem map overlaps"):
         await reconciler.reconcile_campaign(record, snapshot)
 
 
