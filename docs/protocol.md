@@ -52,7 +52,8 @@ The configured campaign URL returns a v4 manifest. Each map reference includes i
 activation time, byte size, path, and `sha256-<hex>` digest. Miners may list campaigns without
 downloading maps. Validators download the maps needed for scoring, enforce the response-size bound,
 and verify each digest before caching. Rank eligibility unions the qualifying creators from every map
-whose active interval overlaps the campaign; influence scoring remains time-pinned.
+whose active interval overlaps the campaign. For scoring, validators still select the map active when
+the tweet was published as the tweet-time influence input.
 
 Each campaign configures:
 
