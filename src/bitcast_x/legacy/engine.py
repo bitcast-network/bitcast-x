@@ -13,7 +13,7 @@ from bitcast_x.legacy.constants import LEGACY_NOCODE_UID
 from bitcast_x.legacy.tweet_store import LegacyTweetStore
 from bitcast_x.protocol import AttributionReason, AttributionResult, MiningProtocol
 from bitcast_x.validator.scoring import AttributionScorer, ScoredAttribution
-from bitcast_x.x_provider import Tweet, XProvider
+from bitcast_x.x_provider import Tweet, TweetFetch, XProvider
 
 LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ class LegacyAttributionEngine:
         self,
         feed: CampaignFeed,
         *,
+        block: int,
         hotkey_to_uid: dict[str, int],
     ) -> list[ScoredAttribution]:
         """Return independently scored legacy attributions for the complete feed."""
@@ -80,6 +81,7 @@ class LegacyAttributionEngine:
         account_to_uid = self._connections.resolve_uids(hotkey_to_uid, nocode_uid=self._nocode_uid)
         attributions: list[AttributionResult] = []
         tweet_evidence: dict[str, Tweet] = {}
+        force_refresh_ids: set[str] = set()
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
             if campaign.access.mining_protocol is not MiningProtocol.LEGACY_CONNECTION:
                 continue
@@ -96,6 +98,8 @@ class LegacyAttributionEngine:
                     self._tweets.merge(result.tweets)
             for tweet in self._tweets.campaign_tweets(feed, campaign):
                 tweet_evidence[tweet.tweet_id] = tweet
+                if block >= campaign.access.scoring_close_block:
+                    force_refresh_ids.add(tweet.tweet_id)
                 miner_uid = account_to_uid.get(tweet.author.casefold())
                 miner_hotkey = uid_to_hotkey.get(miner_uid) if miner_uid is not None else None
                 if miner_hotkey is None or not self._eligible(feed, campaign, tweet):
@@ -118,10 +122,19 @@ class LegacyAttributionEngine:
                 )
             }
         )
+        cached_evidence = {
+            tweet_id: (
+                TweetFetch(tweet=tweet, provider_available=True),
+                self._tweets.cached_engagements(tweet_id),
+            )
+            for tweet_id, tweet in tweet_evidence.items()
+            if tweet_id not in force_refresh_ids and not self._tweets.engagement_refresh_due(tweet)
+        }
         return await self._scorer.score(
             legacy_feed,
             attributions,
             tweet_evidence=tweet_evidence,
+            cached_evidence=cached_evidence,
         )
 
     @staticmethod

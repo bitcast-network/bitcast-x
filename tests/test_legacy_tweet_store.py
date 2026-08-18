@@ -1,6 +1,6 @@
 """Frozen v1/v2 cumulative tweet-store cutover tests."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -195,4 +195,56 @@ def test_engagements_are_cumulative_and_survive_provider_failure(tmp_path: Path)
         persisted = cache.get("engagements:1")
     assert set(persisted["retweeters"]) == {"Alice", "carol"}
     assert set(persisted["quoters"]) == {"Bob", "alice"}
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("tweet_age", "fetch_age", "expected"),
+    (
+        (timedelta(minutes=30), timedelta(minutes=59), False),
+        (timedelta(minutes=30), timedelta(hours=1), True),
+        (timedelta(hours=12), timedelta(hours=3, minutes=59), False),
+        (timedelta(hours=12), timedelta(hours=4), True),
+        (timedelta(days=2), timedelta(hours=23, minutes=59), False),
+        (timedelta(days=2), timedelta(hours=24), True),
+    ),
+)
+def test_engagement_refresh_uses_v2_age_tiers(
+    tmp_path: Path,
+    tweet_age: timedelta,
+    fetch_age: timedelta,
+    expected: bool,
+) -> None:
+    with Cache(tmp_path) as cache:
+        cache.set(
+            "engagements:1",
+            {"tweet_id": "1", "retweeters": {}, "quoters": {}},
+        )
+        cache.set("engagement_fetch:1", (NOW - fetch_age).isoformat())
+    tweet = Tweet(
+        tweet_id="1",
+        author_x_id="99",
+        created_at=NOW - tweet_age,
+        text="#legacy",
+        author="alice",
+    )
+    store = LegacyTweetStore(tmp_path)
+
+    assert store.engagement_refresh_due(tweet, now=NOW) is expected
+    store.close()
+
+
+def test_engagement_refresh_is_due_without_cached_evidence(tmp_path: Path) -> None:
+    with Cache(tmp_path) as cache:
+        cache.set("engagement_fetch:1", NOW.isoformat())
+    tweet = Tweet(
+        tweet_id="1",
+        author_x_id="99",
+        created_at=NOW,
+        text="#legacy",
+        author="alice",
+    )
+    store = LegacyTweetStore(tmp_path)
+
+    assert store.engagement_refresh_due(tweet, now=NOW) is True
     store.close()

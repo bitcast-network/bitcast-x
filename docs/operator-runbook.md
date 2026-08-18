@@ -50,6 +50,13 @@ replay its fixed tweet rewards and may publish them, but do not rediscover tweet
 or invoke the LLM for that campaign. Legacy campaigns without a snapshot continue cumulative
 discovery and scoring until their first-emission rewards are frozen.
 
+### Desearch activity budget
+
+Pre-close preview publication is disabled. Legacy tweet engagements use the v2 refresh schedule:
+hourly for tweets under one hour old, every four hours until 24 hours old, and daily thereafter.
+The first post-close scoring pass always refreshes evidence before freezing rewards. Frozen legacy
+campaigns contribute no further search or scoring calls.
+
 ## Runtime contract
 
 - Use the immutable image tag or digest produced from a reviewed `main` commit; never deploy

@@ -14,8 +14,8 @@ from bitcast_x.legacy import (
     legacy_search_queries,
 )
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
-from bitcast_x.validator.scoring import ScoredAttribution
-from bitcast_x.x_provider import Tweet, TweetSearchFetch
+from bitcast_x.validator.scoring import AttributionScorer, ScoredAttribution
+from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch, TweetSearchFetch
 
 HOTKEY = "5FLSigC9H8sTAQG4q4FUFz3FK8t9vM7uU5KZJf5LrG1xVJdC"
 
@@ -55,6 +55,10 @@ def _feed() -> CampaignFeed:
 
 
 class Provider:
+    def __init__(self) -> None:
+        self.tweet_fetches = 0
+        self.engagement_fetches = 0
+
     async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch:
         assert query == "#legacy since:2026-08-01 until:2026-08-08"
         assert count == 100
@@ -71,6 +75,23 @@ class Provider:
             ),
         )
 
+    async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
+        self.tweet_fetches += 1
+        return TweetFetch(
+            provider_available=True,
+            tweet=Tweet(
+                tweet_id=tweet_id,
+                author_x_id="1",
+                created_at=datetime(2026, 8, 2, tzinfo=UTC),
+                text="#legacy",
+                author="alice",
+            ),
+        )
+
+    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+        self.engagement_fetches += 1
+        return EngagementFetch(engagements={}, provider_available=True)
+
 
 class UnavailableProvider:
     async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch:
@@ -86,10 +107,12 @@ class Scorer:
         attributions: list[object],
         *,
         tweet_evidence: dict[str, Tweet] | None = None,
+        cached_evidence: dict[str, tuple[TweetFetch, EngagementFetch]] | None = None,
     ) -> list[ScoredAttribution]:
         self.feed = feed
         self.attributions = attributions
         self.tweet_evidence = tweet_evidence
+        self.cached_evidence = cached_evidence
         return []
 
 
@@ -124,7 +147,7 @@ async def test_connected_eligible_tweet_is_attributed_locally(tmp_path: Path) ->
         scorer,  # type: ignore[arg-type]
         LegacyTweetStore(store_path),
     )
-    await engine.score_feed(_feed(), hotkey_to_uid={HOTKEY: 7})
+    await engine.score_feed(_feed(), block=1, hotkey_to_uid={HOTKEY: 7})
     attribution = scorer.attributions[0]
     assert attribution.miner_hotkey == HOTKEY  # type: ignore[attr-defined]
     assert scorer.tweet_evidence["123"].author == "alice"
@@ -184,7 +207,7 @@ async def test_unavailable_search_reuses_cumulative_tweet_store(tmp_path: Path) 
         Provider(),  # type: ignore[arg-type]
         scorer,  # type: ignore[arg-type]
         tweet_store,
-    ).score_feed(_feed(), hotkey_to_uid={HOTKEY: 7})
+    ).score_feed(_feed(), block=1, hotkey_to_uid={HOTKEY: 7})
 
     scorer = Scorer()
     await LegacyAttributionEngine(
@@ -192,7 +215,7 @@ async def test_unavailable_search_reuses_cumulative_tweet_store(tmp_path: Path) 
         UnavailableProvider(),  # type: ignore[arg-type]
         scorer,  # type: ignore[arg-type]
         tweet_store,
-    ).score_feed(_feed(), hotkey_to_uid={HOTKEY: 7})
+    ).score_feed(_feed(), block=1, hotkey_to_uid={HOTKEY: 7})
 
     assert scorer.attributions[0].tweet_id == "123"  # type: ignore[attr-defined]
 
@@ -249,9 +272,35 @@ async def test_qrt_campaign_issues_both_v2_searches(tmp_path: Path) -> None:
         provider,  # type: ignore[arg-type]
         Scorer(),  # type: ignore[arg-type]
         LegacyTweetStore(store_path),
-    ).score_feed(feed, hotkey_to_uid={HOTKEY: 7})
+    ).score_feed(feed, block=1, hotkey_to_uid={HOTKEY: 7})
 
     assert provider.queries == [
         "quoted_tweet_id:99 since:2026-08-01 until:2026-08-08",
         "#legacy since:2026-08-01 until:2026-08-08",
     ]
+
+
+async def test_legacy_scoring_reuses_cache_but_refreshes_at_close(tmp_path: Path) -> None:
+    store_path = tmp_path / "tweets"
+    Cache(store_path).close()
+    provider = Provider()
+    tweet_store = LegacyTweetStore(store_path)
+    scorer = AttributionScorer(
+        provider,  # type: ignore[arg-type]
+        engagement_merger=tweet_store.merge_engagements,
+    )
+    engine = LegacyAttributionEngine(
+        _connections(tmp_path / "c.db"),
+        provider,  # type: ignore[arg-type]
+        scorer,
+        tweet_store,
+    )
+
+    await engine.score_feed(_feed(), block=1, hotkey_to_uid={HOTKEY: 7})
+    await engine.score_feed(_feed(), block=2, hotkey_to_uid={HOTKEY: 7})
+    assert provider.tweet_fetches == 1
+    assert provider.engagement_fetches == 1
+
+    await engine.score_feed(_feed(), block=10, hotkey_to_uid={HOTKEY: 7})
+    assert provider.tweet_fetches == 2
+    assert provider.engagement_fetches == 2

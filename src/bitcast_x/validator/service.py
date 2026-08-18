@@ -387,36 +387,6 @@ class ValidatorService:
                             hotkey_to_uid = {
                                 str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons
                             }
-                            if result_publisher is not None:
-                                for campaign in feed.campaigns:
-                                    if finalized_block >= campaign.access.scoring_close_block:
-                                        continue
-                                    try:
-                                        preview_attributions = await reconciler.reconcile_campaign(
-                                            campaign,
-                                            feed,
-                                            through_block=finalized_block,
-                                            defer_unavailable_tweets=True,
-                                        )
-                                        preview_scores = await reward_coordinator.preview_scores(
-                                            feed, preview_attributions
-                                        )
-                                        if preview_attributions:
-                                            await result_publisher.publish_preview(
-                                                feed,
-                                                campaign,
-                                                preview_scores,
-                                                preview_attributions,
-                                                block=finalized_block,
-                                                hotkey_to_uid=hotkey_to_uid,
-                                            )
-                                    except ReconciliationUnavailableError as exc:
-                                        LOGGER.warning(
-                                            "preview unavailable campaign=%s block=%s error=%s",
-                                            campaign.access.campaign_id,
-                                            finalized_block,
-                                            exc,
-                                        )
                             productive_weights, floors = reward_coordinator.shadow_weights(
                                 feed,
                                 scored,
@@ -475,6 +445,7 @@ class ValidatorService:
                                         )
                                     legacy_scored = await legacy_engine.score_feed(
                                         legacy_scoring_feed,
+                                        block=finalized_block,
                                         hotkey_to_uid=hotkey_to_uid,
                                     )
                                     pricing = await legacy_pricing.fetch(block=finalized_block)
