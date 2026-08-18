@@ -50,6 +50,19 @@ replay its fixed tweet rewards and may publish them, but do not rediscover tweet
 or invoke the LLM for that campaign. Legacy campaigns without a snapshot continue cumulative
 discovery and scoring until their first-emission rewards are frozen.
 
+### Desearch activity budget
+
+Mutable pre-close previews are optional monitoring output and run at most once every 20 minutes,
+matching the outgoing validator's scoring cadence. Final reconciliation and score freezing remain
+block-driven and are never delayed by the preview cadence. Each accepted tweet currently requires
+two exact-post requests, one retweeter request and one quote search per preview pass: reconciliation
+independently verifies the post, then scoring refreshes the post and its engagements. The normal
+steady-state budget is therefore at most 12 Desearch requests per accepted open tweet per hour,
+plus one exact-post request per rejected submission, bounded connection intake and transient
+retries. At the current 44 accepted tweets this is about 528 requests per hour; investigate a
+sustained rate above 650 requests per hour. Campaign close can add one bounded final-scoring burst.
+Frozen legacy campaigns must contribute no scoring calls.
+
 ## Runtime contract
 
 - Use the immutable image tag or digest produced from a reviewed `main` commit; never deploy

@@ -45,6 +45,7 @@ from bitcast_x.qualification import (
     QualificationSchedule,
 )
 from bitcast_x.release import source_revision
+from bitcast_x.validator.cadence import PreviewCadence
 from bitcast_x.validator.ingestion import (
     ValidatorIngestor,
     signed_client_factory,
@@ -206,6 +207,7 @@ class ValidatorService:
             legacy_engine: LegacyAttributionEngine | None = None
             legacy_rewards: LegacyRewardCoordinator | None = None
             legacy_cadence = LegacyCadence()
+            preview_cadence = PreviewCadence()
             cached_legacy_weights: dict[int, float] | None = None
             result_publisher: ShadowResultPublisher | None = None
             legacy_result_publisher: LegacyResultPublisher | None = None
@@ -387,7 +389,13 @@ class ValidatorService:
                             hotkey_to_uid = {
                                 str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons
                             }
-                            if result_publisher is not None:
+                            if result_publisher is not None and preview_cadence.due():
+                                LOGGER.info(
+                                    "pre-close preview scoring due interval_seconds=%s "
+                                    "campaigns=%s",
+                                    preview_cadence.interval_seconds,
+                                    len(feed.campaigns),
+                                )
                                 for campaign in feed.campaigns:
                                     if finalized_block >= campaign.access.scoring_close_block:
                                         continue
