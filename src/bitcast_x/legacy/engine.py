@@ -6,8 +6,7 @@ from datetime import timedelta
 from bitcast_x.campaigns import (
     CampaignFeed,
     CampaignRecord,
-    ecosystem_map_at,
-    eligible_creator_ids_in_map,
+    eligible_creator_ids_for_campaign,
 )
 from bitcast_x.legacy.connections import ConnectionStore
 from bitcast_x.legacy.constants import LEGACY_NOCODE_UID
@@ -129,8 +128,4 @@ class LegacyAttributionEngine:
     def _eligible(feed: CampaignFeed, campaign: CampaignRecord, tweet: Tweet) -> bool:
         if not campaign.opens_at <= tweet.created_at <= campaign.closes_at:
             return False
-        return any(
-            tweet.author_x_id in eligible_creator_ids_in_map(ecosystem, campaign.max_members)
-            for pool in campaign.pools
-            if (ecosystem := ecosystem_map_at(feed, pool, tweet.created_at)) is not None
-        )
+        return tweet.author_x_id in eligible_creator_ids_for_campaign(feed, campaign)

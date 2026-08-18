@@ -9,8 +9,8 @@ from typing import Protocol
 from bitcast_x.campaigns import (
     CampaignFeed,
     CampaignRecord,
-    ecosystem_map_at,
-    eligible_creator_ids_in_map,
+    ecosystem_maps_for_campaign,
+    eligible_creator_ids_for_campaign,
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.matcher import MatchCandidate, choose_match, normalize_match_text
@@ -322,19 +322,12 @@ class CampaignReconciler:
     ) -> AttributionReason | None:
         if not campaign.opens_at <= tweet.created_at <= campaign.closes_at:
             return AttributionReason.CAMPAIGN_INELIGIBLE
-        ecosystems = tuple(
-            ecosystem
-            for pool in campaign.pools
-            if (ecosystem := ecosystem_map_at(feed, pool, tweet.created_at)) is not None
-        )
+        ecosystems = ecosystem_maps_for_campaign(feed, campaign)
         if not ecosystems:
             raise ReconciliationUnavailableError(
-                f"no ecosystem map active when tweet {tweet.tweet_id} was published"
+                f"no ecosystem map overlaps campaign {campaign.access.campaign_id}"
             )
-        if not any(
-            tweet.author_x_id in eligible_creator_ids_in_map(ecosystem, campaign.max_members)
-            for ecosystem in ecosystems
-        ):
+        if tweet.author_x_id not in eligible_creator_ids_for_campaign(feed, campaign):
             return AttributionReason.CAMPAIGN_INELIGIBLE
         normalized = normalize_match_text(tweet.text)
         if any(normalize_match_text(term) not in normalized for term in campaign.required_terms):

@@ -14,7 +14,7 @@ from bitcast_x.campaigns import (
     EcosystemMap,
     considered_accounts_for_campaign,
     ecosystem_map_at,
-    eligible_creator_ids_in_map,
+    eligible_creator_ids_for_campaign,
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionResult
@@ -274,7 +274,11 @@ def _campaign_map_at(feed: CampaignFeed, campaign: CampaignRecord, tweet: Tweet)
         if ecosystem is None:
             continue
         available.append(ecosystem)
-        if tweet.author_x_id in eligible_creator_ids_in_map(ecosystem, campaign.max_members):
+        if tweet.author_x_id in eligible_creator_ids_for_campaign(
+            feed,
+            campaign,
+            ecosystem_id=pool,
+        ):
             return ecosystem
     if not available:
         raise ReconciliationUnavailableError(

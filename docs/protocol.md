@@ -51,7 +51,8 @@ commitment envelope is in
 The configured campaign URL returns a v4 manifest. Each map reference includes its ecosystem ID,
 activation time, byte size, path, and `sha256-<hex>` digest. Miners may list campaigns without
 downloading maps. Validators download the maps needed for scoring, enforce the response-size bound,
-verify each digest before caching, and select the map active when a tweet was published.
+and verify each digest before caching. Rank eligibility unions the qualifying creators from every map
+whose active interval overlaps the campaign; influence scoring remains time-pinned.
 
 Each campaign configures:
 
@@ -154,7 +155,7 @@ Before attribution, the validator independently fetches the tweet and requires:
 
 - publication within the inclusive campaign UTC window;
 - an author X ID ranked within the campaign's top `max_members` in at least one configured
-  ecosystem map active at publication;
+  ecosystem map whose active interval overlaps the campaign;
 - all required terms and any configured tag or quoted tweet;
 - at least one configured inclusion keyword, when present;
 - the configured language, except unknown/undetermined provider values;
