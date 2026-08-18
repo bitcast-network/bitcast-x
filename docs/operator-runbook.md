@@ -72,10 +72,10 @@ manually.
 
 Publish qualification changes as the complete ordered
 `BITCAST_X_QUALIFICATION_SCHEDULE_JSON` history. Each entry has an immutable `version`, owner
-hotkey, conviction threshold and `effective_block`; append a later entry when reducing the launch
-threshold. Never replace an earlier entry, because validators use the rule active at each claim,
-submission and scoring-close block. The individual qualification variables remain the single-entry
-launch fallback only.
+hotkey, conviction threshold, optional owner-to-miner self-stake threshold and `effective_block`;
+append a later entry when changing either path. Never replace an earlier entry, because validators
+use the rule active at each claim, submission and scoring-close block. The individual qualification
+variables remain the single-entry launch fallback only.
 
 ## Start and verify
 

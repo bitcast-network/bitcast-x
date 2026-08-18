@@ -120,9 +120,10 @@ class InMemoryChain:
         _miner_hotkey: str,
         *,
         block: int | None = None,
-    ) -> tuple[str | None, str | None, int]:
-        del block
-        return None, None, 0
+        include_self_stake: bool = False,
+    ) -> tuple[str | None, str | None, int, int]:
+        del block, include_self_stake
+        return None, None, 0, 0
 
     async def metagraph(self, *, block: int | None = None) -> SimpleNamespace:
         del block

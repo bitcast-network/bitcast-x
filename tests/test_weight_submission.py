@@ -120,6 +120,27 @@ def test_zero_threshold_remains_available_for_shadow_and_legacy_only_cycles() ->
     )
 
 
+def test_positive_self_stake_threshold_satisfies_preclaim_guard() -> None:
+    schedule = QualificationSchedule(
+        configurations=(
+            QualificationConfig(
+                owner_hotkey=OWNER,
+                minimum_conviction_alpha=Decimal("0"),
+                minimum_self_stake_alpha=Decimal("15000"),
+                effective_block=0,
+            ),
+        )
+    )
+
+    ensure_preclaim_economics_qualified(
+        schedule,
+        block=100,
+        preclaim_active=True,
+        data_publish_enabled=True,
+        weight_submission_enabled=True,
+    )
+
+
 def test_preclaim_guard_uses_threshold_version_effective_at_finalized_block() -> None:
     schedule = _qualification_schedule((0, "100"), (200, "0"))
 

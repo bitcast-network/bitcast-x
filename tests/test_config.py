@@ -17,6 +17,7 @@ def test_public_protocol_defaults_match_the_published_network() -> None:
         "5DAoDtMxVqtMu2Nd5E7QhPEGXDMgrySvE1b3rRT5ARDhfNNK"
     )
     assert settings.qualification_minimum_alpha == "15000"
+    assert settings.qualification_minimum_self_stake_alpha is None
 
 
 def test_secrets_remain_unconfigured_and_production_outputs_are_enabled() -> None:

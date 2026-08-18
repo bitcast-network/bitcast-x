@@ -146,11 +146,20 @@ The implementation is in [`src/bitcast_x/miner/engine.py`](../src/bitcast_x/mine
 ## Qualification and attribution
 
 Qualification is evaluated from finalized historical chain state. A versioned qualification entry
-contains an owner hotkey, minimum conviction in alpha, and effective block. A miner qualifies when
-its controlling coldkey's lock targets that owner hotkey with at least the required conviction. A
-zero threshold explicitly disables the lock-target and owner checks. The final attribution check
-uses the rule effective at the campaign's scoring close; pre-close results may remain pending while
-the miner can still qualify.
+contains an owner hotkey, minimum conviction in alpha, an optional minimum self-stake in alpha, and
+an effective block. A miner qualifies through either enabled path:
+
+- its controlling coldkey's lock targets the configured owner hotkey with at least the required
+  conviction; or
+- its controlling coldkey has at least the required alpha staked directly to that miner hotkey.
+
+The self-stake read is coldkey/hotkey pair-specific, so stake nominated by third parties does not
+count. A missing or zero threshold disables only its corresponding path; when both paths are
+disabled, qualification is explicitly disabled. Existing schedule entries without
+`minimum_self_stake_alpha` therefore remain lock-only. The explanatory qualification endpoint adds
+`self_stake_alpha`, `required_self_stake_alpha`, and `qualified_via` to its existing fields. The
+final attribution check uses the rule effective at the campaign's scoring close; pre-close results
+may remain pending while the miner can still qualify.
 
 Before attribution, the validator independently fetches the tweet and requires:
 

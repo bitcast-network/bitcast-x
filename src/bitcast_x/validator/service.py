@@ -97,7 +97,7 @@ def ensure_preclaim_economics_qualified(
     """Fail closed when preclaim economics could run with qualification disabled."""
 
     economics_enabled = data_publish_enabled or weight_submission_enabled
-    if preclaim_active and economics_enabled and schedule.at(block).minimum_conviction_rao == 0:
+    if preclaim_active and economics_enabled and not schedule.at(block).financial_barrier_enabled:
         raise ProtocolError(
             "preclaim publication or weight submission requires a non-zero qualification threshold"
         )
@@ -242,6 +242,11 @@ class ValidatorService:
                     qualification_policy = QualificationConfig(
                         owner_hotkey=owner_hotkey,
                         minimum_conviction_alpha=Decimal(self.settings.qualification_minimum_alpha),
+                        minimum_self_stake_alpha=(
+                            Decimal(self.settings.qualification_minimum_self_stake_alpha)
+                            if self.settings.qualification_minimum_self_stake_alpha is not None
+                            else None
+                        ),
                         effective_block=self.settings.qualification_effective_block,
                     )
                 qualification_reader = QualificationReader(chain, qualification_policy)

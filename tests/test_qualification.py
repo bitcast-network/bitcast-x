@@ -17,14 +17,26 @@ COLDKEY = "5DAAnrj7VHTz5f4tY8cnLXbd3P4H8R3fP8y4oPmEoQWmWZJv"
 
 
 class FakeChain:
-    def __init__(self, target: str | None, conviction_rao: int, coldkey: str | None = COLDKEY):
-        self.inputs = (coldkey, target, conviction_rao)
+    def __init__(
+        self,
+        target: str | None,
+        conviction_rao: int,
+        coldkey: str | None = COLDKEY,
+        self_stake_rao: int = 0,
+    ):
+        self.inputs = (coldkey, target, conviction_rao, self_stake_rao)
 
     async def miner_qualification_inputs(
-        self, miner_hotkey: str, *, block: int | None = None
-    ) -> tuple[str | None, str | None, int]:
+        self,
+        miner_hotkey: str,
+        *,
+        block: int | None = None,
+        include_self_stake: bool = False,
+    ) -> tuple[str | None, str | None, int, int]:
         assert miner_hotkey == MINER
         assert block is not None
+        if self.inputs[3] > 0:
+            assert include_self_stake is True
         return self.inputs
 
 
@@ -44,8 +56,69 @@ async def test_qualifies_exact_threshold_without_float_rounding() -> None:
 
     assert result.eligible is True
     assert result.reason == "eligible"
+    assert result.qualified_via == "owner_lock"
     assert result.config_version == 1
     assert result.conviction_alpha == Decimal("250.5")
+    assert result.self_stake_alpha == Decimal("0")
+    assert result.required_self_stake_alpha is None
+
+
+@pytest.mark.asyncio
+async def test_self_stake_to_owned_miner_hotkey_is_an_alternative_path() -> None:
+    policy = config().model_copy(update={"minimum_self_stake_alpha": Decimal("250.5")})
+
+    result = await QualificationReader(
+        FakeChain(MINER, 0, self_stake_rao=250_500_000_000), policy
+    ).read(MINER, block=100)
+
+    assert result.eligible is True
+    assert result.reason == "eligible"
+    assert result.qualified_via == "self_stake"
+    assert result.self_stake_alpha == Decimal("250.5")
+    assert result.required_self_stake_alpha == Decimal("250.5")
+
+
+@pytest.mark.asyncio
+async def test_third_party_stake_is_not_part_of_self_stake_input() -> None:
+    policy = config().model_copy(update={"minimum_self_stake_alpha": Decimal("250.5")})
+
+    result = await QualificationReader(FakeChain(MINER, 0), policy).read(MINER, block=100)
+
+    assert result.eligible is False
+    assert result.reason == "neither_qualification_path_met"
+    assert result.qualified_via is None
+
+
+@pytest.mark.asyncio
+async def test_self_stake_only_policy_qualifies_without_an_owner_lock() -> None:
+    policy = QualificationConfig(
+        owner_hotkey=OWNER,
+        minimum_conviction_alpha=Decimal("0"),
+        minimum_self_stake_alpha=Decimal("250.5"),
+        effective_block=90,
+    )
+
+    result = await QualificationReader(
+        FakeChain(None, 0, self_stake_rao=250_500_000_000), policy
+    ).read(MINER, block=100)
+
+    assert result.eligible is True
+    assert result.qualified_via == "self_stake"
+
+
+@pytest.mark.asyncio
+async def test_self_stake_only_policy_reports_below_minimum() -> None:
+    policy = QualificationConfig(
+        owner_hotkey=OWNER,
+        minimum_conviction_alpha=Decimal("0"),
+        minimum_self_stake_alpha=Decimal("250.5"),
+        effective_block=90,
+    )
+
+    result = await QualificationReader(FakeChain(None, 0), policy).read(MINER, block=100)
+
+    assert result.eligible is False
+    assert result.reason == "self_stake_below_minimum"
 
 
 @pytest.mark.asyncio
@@ -83,6 +156,7 @@ async def test_zero_threshold_disables_lock_target_and_owner_checks(chain: FakeC
 
     assert result.eligible is True
     assert result.reason == "qualification_disabled"
+    assert result.qualified_via is None
 
 
 @pytest.mark.asyncio
@@ -99,6 +173,7 @@ async def test_historical_block_selects_immutable_threshold_version() -> None:
                 version=2,
                 owner_hotkey=OWNER,
                 minimum_conviction_alpha=Decimal("200"),
+                minimum_self_stake_alpha=Decimal("200"),
                 effective_block=100,
             ),
         )
@@ -110,6 +185,8 @@ async def test_historical_block_selects_immutable_threshold_version() -> None:
 
     assert (before_reduction.config_version, before_reduction.eligible) == (1, False)
     assert (after_reduction.config_version, after_reduction.eligible) == (2, True)
+    assert before_reduction.required_self_stake_alpha is None
+    assert after_reduction.required_self_stake_alpha == Decimal("200")
 
 
 def test_schedule_rejects_reordered_or_duplicate_history() -> None:
