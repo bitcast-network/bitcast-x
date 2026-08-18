@@ -20,6 +20,9 @@ _METRICS = (
     "bookmark_count",
     "views_count",
 )
+_NEW_TWEET_REFRESH = 1
+_RECENT_TWEET_REFRESH = 4
+_OLD_TWEET_REFRESH = 24
 
 
 class LegacyTweetStore:
@@ -132,20 +135,47 @@ class LegacyTweetStore:
             {str(username).casefold(): "quote" for username in quoters if str(username)}
         )
         if fresh.provider_available:
-            now = datetime.now(UTC).isoformat()
+            now = datetime.now(UTC)
             for username, kind in fresh.engagements.items():
                 target = quoters if kind == "quote" else retweeters
-                target.setdefault(username.casefold(), {"first_seen": now})
+                target.setdefault(username.casefold(), {"first_seen": now.isoformat()})
             record["retweeters"] = retweeters
             record["quoters"] = quoters
-            record["last_updated"] = now
+            record["last_updated"] = now.isoformat()
             cache.set(key, record)
+            cache.set(f"engagement_fetch:{tweet_id}", now.isoformat())
             engagements = {username.casefold(): "retweet" for username in retweeters}
             engagements.update({username.casefold(): "quote" for username in quoters})
         return EngagementFetch(
             engagements=engagements,
             provider_available=fresh.provider_available or cached_known,
         )
+
+    def cached_engagements(self, tweet_id: str) -> EngagementFetch:
+        """Return cumulative evidence without contacting the provider."""
+
+        return self.merge_engagements(
+            tweet_id,
+            EngagementFetch(engagements={}, provider_available=False),
+        )
+
+    def engagement_refresh_due(self, tweet: Tweet, *, now: datetime | None = None) -> bool:
+        """Apply v2's 1h/4h/24h engagement refresh schedule."""
+
+        if not self.cached_engagements(tweet.tweet_id).provider_available:
+            return True
+        last_fetch = self._timestamp(self._open().get(f"engagement_fetch:{tweet.tweet_id}"))
+        if last_fetch is None:
+            return True
+        current = now or datetime.now(UTC)
+        age_hours = max((current - tweet.created_at).total_seconds() / 3600, 0)
+        if age_hours < 1:
+            interval_hours = _NEW_TWEET_REFRESH
+        elif age_hours < 24:
+            interval_hours = _RECENT_TWEET_REFRESH
+        else:
+            interval_hours = _OLD_TWEET_REFRESH
+        return (current - last_fetch).total_seconds() >= interval_hours * 3600
 
     def _to_tweet(
         self,
