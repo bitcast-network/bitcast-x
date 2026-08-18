@@ -174,27 +174,33 @@ class BittensorChain:
         miner_hotkey: str,
         *,
         block: int | None = None,
-    ) -> tuple[str | None, str | None, int]:
-        """Read owner coldkey, lock target, and rolled conviction in alpha rao."""
+        include_self_stake: bool = False,
+    ) -> tuple[str | None, str | None, int, int]:
+        """Read owner, lock conviction, and owner-to-miner stake in alpha rao."""
 
         client = await self._client.at(block) if block is not None else self._client
         coldkey = await client.neurons.hotkey_owner(miner_hotkey)
         if coldkey is None:
-            return None, None, 0
+            return None, None, 0, 0
+        coldkey_ss58 = str(coldkey)
+        self_stake_rao = 0
+        if include_self_stake:
+            self_stake = await client.staking.get(coldkey_ss58, miner_hotkey, self.netuid)
+            self_stake_rao = int(self_stake.rao)
         lock = await client.locks.coldkey_lock(coldkey, self.netuid)
         if lock is None:
-            return str(coldkey), None, 0
+            return coldkey_ss58, None, 0, self_stake_rao
         target = str(lock["hotkey"])
         state = await client.runtime(
             runtime_api.StakeInfoRuntimeApi.get_coldkey_lock,
-            [str(coldkey), self.netuid],
+            [coldkey_ss58, self.netuid],
         )
         conviction = state.get("conviction", 0) if isinstance(state, Mapping) else 0
         if isinstance(conviction, Mapping):
             conviction_rao = int(conviction.get("bits", 0)) >> 64
         else:
             conviction_rao = int(conviction)
-        return str(coldkey), target, conviction_rao
+        return coldkey_ss58, target, conviction_rao, self_stake_rao
 
     async def legacy_daily_miner_alpha(self, *, block: int | None = None) -> float:
         """Return v2's mechanism-pinned daily miner emission amount in alpha."""

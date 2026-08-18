@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     legacy_fasttrack_url: str = "https://www.stitch3.ai/api/fast-track"
     qualification_owner_hotkey: str | None = QUALIFICATION_OWNER_HOTKEY
     qualification_minimum_alpha: str = "15000"
+    qualification_minimum_self_stake_alpha: str | None = None
     qualification_effective_block: int = Field(default=0, ge=0)
     qualification_schedule_json: str | None = Field(default=None, repr=False)
     batch_max_age_seconds: float = Field(default=5.0, gt=0)

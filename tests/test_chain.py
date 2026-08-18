@@ -204,6 +204,68 @@ class BlockClient:
         )
 
 
+class QualificationClient:
+    """Expose one historical owner-lock and owner-to-miner stake snapshot."""
+
+    def __init__(self, *, lock: dict[str, str] | None) -> None:
+        self.neurons = self
+        self.locks = self
+        self.staking = self
+        self.lock = lock
+        self.at_block: int | None = None
+        self.stake_args: tuple[str, str, int] | None = None
+
+    async def at(self, block: int) -> "QualificationClient":
+        self.at_block = block
+        return self
+
+    async def hotkey_owner(self, _hotkey: str) -> str:
+        return "coldkey"
+
+    async def get(self, coldkey: str, hotkey: str, netuid: int) -> Any:
+        self.stake_args = (coldkey, hotkey, netuid)
+        return SimpleNamespace(rao=15_000_000_000_000)
+
+    async def coldkey_lock(self, _coldkey: str, _netuid: int) -> dict[str, str] | None:
+        return self.lock
+
+    async def runtime(self, _api: Any, _params: list[Any]) -> dict[str, Any]:
+        return {"conviction": {"bits": 15_000_000_000_000 << 64}}
+
+
+@pytest.mark.asyncio
+async def test_qualification_reads_pair_specific_self_stake_at_historical_block() -> None:
+    client = QualificationClient(lock={"hotkey": "owner"})
+    chain = BittensorChain(client, netuid=93)
+
+    inputs = await chain.miner_qualification_inputs("miner", block=123, include_self_stake=True)
+
+    assert inputs == ("coldkey", "owner", 15_000_000_000_000, 15_000_000_000_000)
+    assert client.at_block == 123
+    assert client.stake_args == ("coldkey", "miner", 93)
+
+
+@pytest.mark.asyncio
+async def test_qualification_still_reads_self_stake_without_a_lock() -> None:
+    client = QualificationClient(lock=None)
+    chain = BittensorChain(client, netuid=93)
+
+    inputs = await chain.miner_qualification_inputs("miner", block=123, include_self_stake=True)
+
+    assert inputs == ("coldkey", None, 0, 15_000_000_000_000)
+
+
+@pytest.mark.asyncio
+async def test_lock_only_qualification_skips_unused_self_stake_read() -> None:
+    client = QualificationClient(lock={"hotkey": "owner"})
+    chain = BittensorChain(client, netuid=93)
+
+    inputs = await chain.miner_qualification_inputs("miner", block=123)
+
+    assert inputs == ("coldkey", "owner", 15_000_000_000_000, 0)
+    assert client.stake_args is None
+
+
 def commitment_extrinsic(hotkey: str) -> dict[str, Any]:
     return {
         "address": hotkey,

@@ -170,12 +170,19 @@ async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) ->
             await fund_and_register(client, miner, netuid)
             await fund_and_register(client, validator, netuid)
             chain = BittensorChain(client, netuid=netuid)
-            coldkey, lock_target, conviction_rao = await chain.miner_qualification_inputs(
-                miner.hotkey.ss58_address
+            (
+                coldkey,
+                lock_target,
+                conviction_rao,
+                self_stake_rao,
+            ) = await chain.miner_qualification_inputs(
+                miner.hotkey.ss58_address,
+                include_self_stake=True,
             )
             assert coldkey == miner.coldkeypub.ss58_address
             assert lock_target is None
             assert conviction_rao == 0
+            assert self_stake_rao == 0
             await chain.advertise_endpoint(miner, ip=host_ip, port=port)
             envelope = CommitmentEnvelope(sequence=1, event_count=1, batch_hash=batch_hash)
             submitter = BittensorCommitmentSubmitter(chain, miner)

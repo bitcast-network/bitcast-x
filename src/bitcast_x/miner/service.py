@@ -69,6 +69,11 @@ async def build_sdk(
         qualification_policy = QualificationConfig(
             owner_hotkey=settings.qualification_owner_hotkey,
             minimum_conviction_alpha=Decimal(settings.qualification_minimum_alpha),
+            minimum_self_stake_alpha=(
+                Decimal(settings.qualification_minimum_self_stake_alpha)
+                if settings.qualification_minimum_self_stake_alpha is not None
+                else None
+            ),
             effective_block=settings.qualification_effective_block,
         )
     else:
