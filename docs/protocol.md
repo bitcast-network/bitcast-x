@@ -147,7 +147,9 @@ The implementation is in [`src/bitcast_x/miner/engine.py`](../src/bitcast_x/mine
 
 Qualification is evaluated from finalized historical chain state. A versioned qualification entry
 contains an owner hotkey, minimum conviction in alpha, an optional minimum self-stake in alpha, and
-an effective block. A miner qualifies through either enabled path:
+an effective block. The complete Finney netuid 93 history is release-pinned in the shared miner and
+validator package rather than independently configured by operators. A miner qualifies through
+either enabled path:
 
 - its controlling coldkey's lock targets the configured owner hotkey with at least the required
   conviction; or

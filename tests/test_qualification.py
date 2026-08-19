@@ -6,9 +6,11 @@ import pytest
 from pydantic import ValidationError
 
 from bitcast_x.qualification import (
+    PUBLIC_FINNEY_QUALIFICATION_SCHEDULE,
     QualificationConfig,
     QualificationReader,
     QualificationSchedule,
+    resolve_qualification_policy,
 )
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -46,6 +48,66 @@ def config() -> QualificationConfig:
         minimum_conviction_alpha=Decimal("250.5"),
         effective_block=90,
     )
+
+
+def test_public_finney_schedule_ships_with_both_qualification_paths() -> None:
+    before = PUBLIC_FINNEY_QUALIFICATION_SCHEDULE.at(8_873_999)
+    active = PUBLIC_FINNEY_QUALIFICATION_SCHEDULE.at(8_874_000)
+
+    assert before.version == 1
+    assert before.minimum_self_stake_alpha is None
+    assert active.version == 2
+    assert active.minimum_conviction_alpha == Decimal("15000")
+    assert active.minimum_self_stake_alpha == Decimal("15000")
+
+
+def test_finney_ignores_stale_environment_qualification_policy() -> None:
+    stale_schedule = QualificationSchedule(
+        configurations=(
+            QualificationConfig(
+                version=1,
+                owner_hotkey=OWNER,
+                minimum_conviction_alpha=Decimal("250"),
+                effective_block=0,
+            ),
+        )
+    ).model_dump_json()
+
+    policy = resolve_qualification_policy(
+        network="finney",
+        netuid=93,
+        schedule_json=stale_schedule,
+        owner_hotkey=OWNER,
+        minimum_conviction_alpha="250",
+        minimum_self_stake_alpha=None,
+        effective_block=0,
+    )
+
+    assert policy is PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
+
+
+def test_non_finney_network_retains_explicit_qualification_schedule() -> None:
+    explicit = QualificationSchedule(
+        configurations=(
+            QualificationConfig(
+                owner_hotkey=OWNER,
+                minimum_conviction_alpha=Decimal("250"),
+                effective_block=0,
+            ),
+        )
+    )
+
+    policy = resolve_qualification_policy(
+        network="local",
+        netuid=93,
+        schedule_json=explicit.model_dump_json(),
+        owner_hotkey=None,
+        minimum_conviction_alpha="0",
+        minimum_self_stake_alpha=None,
+        effective_block=0,
+    )
+
+    assert policy == explicit
 
 
 @pytest.mark.asyncio

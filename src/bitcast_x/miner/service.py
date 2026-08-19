@@ -3,7 +3,6 @@
 import asyncio
 import logging
 from contextlib import suppress
-from decimal import Decimal
 from typing import Any
 
 import bittensor as bt
@@ -15,9 +14,7 @@ from bitcast_x.miner.chain import BittensorCommitmentSubmitter
 from bitcast_x.miner.engine import BatchPolicy, MinerEngine, MinerSdk
 from bitcast_x.miner.store import MinerStore
 from bitcast_x.qualification import (
-    QualificationConfig,
     QualificationReader,
-    QualificationSchedule,
 )
 from bitcast_x.transport import create_miner_app
 
@@ -60,24 +57,7 @@ async def build_sdk(
         ),
     )
     qualification_provider = None
-    qualification_policy: QualificationConfig | QualificationSchedule | None
-    if settings.qualification_schedule_json is not None:
-        qualification_policy = QualificationSchedule.model_validate_json(
-            settings.qualification_schedule_json
-        )
-    elif settings.qualification_owner_hotkey is not None:
-        qualification_policy = QualificationConfig(
-            owner_hotkey=settings.qualification_owner_hotkey,
-            minimum_conviction_alpha=Decimal(settings.qualification_minimum_alpha),
-            minimum_self_stake_alpha=(
-                Decimal(settings.qualification_minimum_self_stake_alpha)
-                if settings.qualification_minimum_self_stake_alpha is not None
-                else None
-            ),
-            effective_block=settings.qualification_effective_block,
-        )
-    else:
-        qualification_policy = None
+    qualification_policy = settings.qualification_policy
     if qualification_policy is not None:
         reader = QualificationReader(
             chain,
