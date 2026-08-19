@@ -1,4 +1,4 @@
-"""Deterministic owner-lock or self-stake miner qualification."""
+"""Deterministic owner-lock or aggregate miner-hotkey stake qualification."""
 
 from decimal import Decimal
 from typing import Literal, Protocol
@@ -30,7 +30,12 @@ class QualificationConfig(BaseModel):
 
     @property
     def minimum_self_stake_rao(self) -> int | None:
-        """Return the exact owner-to-miner stake threshold when that path is configured."""
+        """Return the exact miner-hotkey stake threshold when that path is configured.
+
+        The public field retains its original name for API compatibility. The
+        measured stake is the aggregate on the miner hotkey for the configured
+        subnet, regardless of which coldkey supplied it.
+        """
 
         if self.minimum_self_stake_alpha is None:
             return None

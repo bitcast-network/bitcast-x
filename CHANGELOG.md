@@ -10,6 +10,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - Finney miners and validators now use the qualification schedule bundled with the reviewed
   release, preventing stale environment files from silently retaining obsolete eligibility rules.
+- Miner-hotkey stake qualification now counts all alpha staked to the miner hotkey on the subnet,
+  rather than only stake supplied by the hotkey's controlling coldkey.
 
 ## [2.0.0] - 2026-08-13
 

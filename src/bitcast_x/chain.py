@@ -176,7 +176,7 @@ class BittensorChain:
         block: int | None = None,
         include_self_stake: bool = False,
     ) -> tuple[str | None, str | None, int, int]:
-        """Read owner, lock conviction, and owner-to-miner stake in alpha rao."""
+        """Read owner, lock conviction, and total miner-hotkey stake in alpha rao."""
 
         client = await self._client.at(block) if block is not None else self._client
         coldkey = await client.neurons.hotkey_owner(miner_hotkey)
@@ -185,8 +185,13 @@ class BittensorChain:
         coldkey_ss58 = str(coldkey)
         self_stake_rao = 0
         if include_self_stake:
-            self_stake = await client.staking.get(coldkey_ss58, miner_hotkey, self.netuid)
-            self_stake_rao = int(self_stake.rao)
+            self_stake_rao = int(
+                await client.query(
+                    bt.storage.SubtensorModule.TotalHotkeyAlpha,
+                    [miner_hotkey, self.netuid],
+                )
+                or 0
+            )
         lock = await client.locks.coldkey_lock(coldkey, self.netuid)
         if lock is None:
             return coldkey_ss58, None, 0, self_stake_rao
