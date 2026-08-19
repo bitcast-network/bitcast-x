@@ -54,6 +54,7 @@ from bitcast_x.validator.legacy import (
     has_legacy_campaigns,
     preclaim_feed,
 )
+from bitcast_x.validator.preview import PreviewStore, PreviewXProvider
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
@@ -150,6 +151,7 @@ class ValidatorService:
         x_provider: DesearchProvider | None = None
         data_publisher: DataPublisher | None = None
         brief_filter: LlmBriefFilter | None = None
+        preview_store: PreviewStore | None = None
         legacy_pricing: LegacyPricingService | None = None
         legacy_collector: LegacyConnectionCollector | None = None
         legacy_tweet_store: LegacyTweetStore | None = None
@@ -202,7 +204,9 @@ class ValidatorService:
                 page_size=self.settings.max_batches_per_page,
             )
             reconciler: CampaignReconciler | None = None
+            preview_reconciler: CampaignReconciler | None = None
             reward_coordinator: RewardCoordinator | None = None
+            preview_reward_coordinator: RewardCoordinator | None = None
             legacy_engine: LegacyAttributionEngine | None = None
             legacy_rewards: LegacyRewardCoordinator | None = None
             legacy_cadence = LegacyCadence()
@@ -253,6 +257,9 @@ class ValidatorService:
                 qualification_schedule = qualification_reader.schedule
                 qualification = HistoricalQualificationChecker(qualification_reader)
                 reconciler = CampaignReconciler(store, x_provider, qualification)
+                preview_store = PreviewStore(self.settings.state_dir / "preview-cache")
+                preview_provider = PreviewXProvider(x_provider, preview_store)
+                preview_reconciler = CampaignReconciler(store, preview_provider, qualification)
                 if self.settings.llm_provider == "chutes":
                     llm_url = "https://llm.chutes.ai/v1/chat/completions"
                     llm_model = "Qwen/Qwen3-32B"
@@ -283,6 +290,14 @@ class ValidatorService:
                     max_concurrency=self.settings.validator_max_concurrency,
                 )
                 reward_coordinator = RewardCoordinator(store, scorer)
+                preview_reward_coordinator = RewardCoordinator(
+                    store,
+                    AttributionScorer(
+                        preview_provider,
+                        brief_filter=brief_filter,
+                        max_concurrency=self.settings.validator_max_concurrency,
+                    ),
+                )
                 connection_path = (
                     self.settings.legacy_connections_path
                     or self.settings.state_dir / "connections.db"
@@ -336,6 +351,7 @@ class ValidatorService:
                         endpoint=(
                             f"{self.settings.data_client_url.rstrip('/')}/api/v1/brief-tweets"
                         ),
+                        preview_store=preview_store,
                     )
                     legacy_result_publisher = LegacyResultPublisher(
                         legacy_connections,
@@ -387,6 +403,45 @@ class ValidatorService:
                             hotkey_to_uid = {
                                 str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons
                             }
+                            if (
+                                result_publisher is not None
+                                and preview_reconciler is not None
+                                and preview_reward_coordinator is not None
+                            ):
+                                for campaign in feed.campaigns:
+                                    if finalized_block >= campaign.access.scoring_close_block:
+                                        continue
+                                    try:
+                                        preview_attributions = (
+                                            await preview_reconciler.reconcile_campaign(
+                                                campaign,
+                                                feed,
+                                                through_block=finalized_block,
+                                                defer_unavailable_tweets=True,
+                                            )
+                                        )
+                                        preview_scores = (
+                                            await preview_reward_coordinator.preview_scores(
+                                                feed,
+                                                preview_attributions,
+                                            )
+                                        )
+                                        if preview_attributions:
+                                            await result_publisher.publish_preview(
+                                                feed,
+                                                campaign,
+                                                preview_scores,
+                                                preview_attributions,
+                                                block=finalized_block,
+                                                hotkey_to_uid=hotkey_to_uid,
+                                            )
+                                    except ReconciliationUnavailableError as exc:
+                                        LOGGER.warning(
+                                            "preview unavailable campaign=%s block=%s error=%s",
+                                            campaign.access.campaign_id,
+                                            finalized_block,
+                                            exc,
+                                        )
                             productive_weights, floors = reward_coordinator.shadow_weights(
                                 feed,
                                 scored,
@@ -577,6 +632,8 @@ class ValidatorService:
                 await data_publisher.close()
             if brief_filter is not None:
                 await brief_filter.close()
+            if preview_store is not None:
+                preview_store.close()
             if legacy_pricing is not None:
                 await legacy_pricing.close()
             if legacy_collector is not None:

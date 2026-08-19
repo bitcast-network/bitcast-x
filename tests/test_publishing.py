@@ -64,6 +64,7 @@ class FakeHotkey:
 class CapturingDataPublisher:
     def __init__(self) -> None:
         self.payloads: list[dict[str, object]] = []
+        self.run_ids: list[str] = []
 
     async def publish(
         self,
@@ -75,7 +76,8 @@ class CapturingDataPublisher:
     ) -> bool:
         assert endpoint == "https://ingestion.example/api/v1/brief-tweets"
         assert payload_type == BRIEF_TWEETS_PAYLOAD_TYPE
-        assert run_id == "v3-preview:snapshot:campaign:50"
+        assert run_id.startswith("v3-preview:snapshot:campaign:")
+        self.run_ids.append(run_id)
         self.payloads.append(payload)
         return True
 
@@ -322,6 +324,56 @@ async def test_preview_omits_accepted_tweet_when_its_scoring_evidence_is_unavail
     decisions = payload["attribution_decisions"]
     assert isinstance(decisions, list)
     assert [item["tweet_id"] for item in decisions] == ["123", "125"]
+
+
+@pytest.mark.asyncio
+async def test_preview_is_not_republished_until_its_semantic_payload_changes(
+    tmp_path: Path,
+) -> None:
+    snapshot = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign(),),
+        ecosystem_maps=(),
+    )
+    data_publisher = CapturingDataPublisher()
+    publisher = ShadowResultPublisher(
+        ValidatorStore(tmp_path / "validator.sqlite3"),
+        data_publisher,  # type: ignore[arg-type]
+        endpoint="https://ingestion.example/api/v1/brief-tweets",
+    )
+
+    first = await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=50,
+        hotkey_to_uid={MINER: 7},
+    )
+    duplicate = await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=51,
+        hotkey_to_uid={MINER: 7},
+    )
+    changed_score = scored().model_copy(update={"score": scored().score + 1})
+    changed = await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [changed_score],
+        [changed_score.attribution],
+        block=52,
+        hotkey_to_uid={MINER: 7},
+    )
+
+    assert first is True
+    assert duplicate is False
+    assert changed is True
+    assert len(data_publisher.payloads) == 2
+    assert data_publisher.run_ids[0] != data_publisher.run_ids[1]
 
 
 def test_payload_publishes_unqualified_preview_as_pending() -> None:

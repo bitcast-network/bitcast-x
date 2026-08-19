@@ -52,10 +52,13 @@ discovery and scoring until their first-emission rewards are frozen.
 
 ### Desearch activity budget
 
-Pre-close preview publication is disabled. Legacy tweet engagements use the v2 refresh schedule:
+New preclaim submissions receive a replaceable pre-close verification preview. Preview tweet and
+engagement evidence is stored separately from consensus state and uses the v2 refresh schedule:
 hourly for tweets under one hour old, every four hours until 24 hours old, and daily thereafter.
-The first post-close scoring pass always refreshes evidence before freezing rewards. Frozen legacy
-campaigns contribute no further search or scoring calls.
+Unavailable evidence is retried no more than once per minute, and unchanged preview payloads are
+not republished. Preview caching never feeds final economics: the first post-close scoring pass
+always fetches fresh evidence before freezing rewards. Frozen legacy campaigns contribute no
+further search or scoring calls.
 
 ## Runtime contract
 
