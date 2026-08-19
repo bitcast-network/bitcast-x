@@ -321,30 +321,32 @@ class CampaignReconciler:
         self, campaign: CampaignRecord, feed: CampaignFeed, tweet: Tweet
     ) -> AttributionReason | None:
         if not campaign.opens_at <= tweet.created_at <= campaign.closes_at:
-            return AttributionReason.CAMPAIGN_INELIGIBLE
+            return AttributionReason.POST_OUTSIDE_CAMPAIGN_WINDOW
         ecosystems = ecosystem_maps_for_campaign(feed, campaign)
         if not ecosystems:
             raise ReconciliationUnavailableError(
                 f"no ecosystem map overlaps campaign {campaign.access.campaign_id}"
             )
         if tweet.author_x_id not in eligible_creator_ids_for_campaign(feed, campaign):
-            return AttributionReason.CAMPAIGN_INELIGIBLE
+            return AttributionReason.CREATOR_NOT_ELIGIBLE_FOR_CAMPAIGN
         normalized = normalize_match_text(tweet.text)
         if any(normalize_match_text(term) not in normalized for term in campaign.required_terms):
-            return AttributionReason.CAMPAIGN_INELIGIBLE
-        if tweet.text.startswith("RT @") or tweet.in_reply_to_status_id is not None:
-            return AttributionReason.CAMPAIGN_INELIGIBLE
+            return AttributionReason.REQUIRED_TERMS_MISSING
+        if tweet.text.startswith("RT @"):
+            return AttributionReason.RETWEET_NOT_ALLOWED
+        if tweet.in_reply_to_status_id is not None:
+            return AttributionReason.REPLY_NOT_ALLOWED
         if campaign.tag is not None and campaign.tag.casefold() not in tweet.text.casefold():
-            return AttributionReason.CAMPAIGN_INELIGIBLE
+            return AttributionReason.CAMPAIGN_TAG_MISSING
         if (
             campaign.quoted_tweet_id is not None
             and tweet.quoted_tweet_id != campaign.quoted_tweet_id
         ):
-            return AttributionReason.CAMPAIGN_INELIGIBLE
+            return AttributionReason.REQUIRED_QUOTE_MISSING_OR_INCORRECT
         if campaign.inclusion_keywords and not any(
             keyword.casefold() in tweet.text.casefold() for keyword in campaign.inclusion_keywords
         ):
-            return AttributionReason.CAMPAIGN_INELIGIBLE
+            return AttributionReason.REQUIRED_CAMPAIGN_KEYWORD_MISSING
         return None
 
     async def _exclusive(

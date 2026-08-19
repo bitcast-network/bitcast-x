@@ -546,7 +546,7 @@ async def test_tweet_published_after_campaign_close_is_rejected(tmp_path: Path) 
     result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
 
     assert result.accepted is False
-    assert result.reason.value == "campaign_ineligible"
+    assert result.reason is AttributionReason.POST_OUTSIDE_CAMPAIGN_WINDOW
 
 
 @pytest.mark.asyncio
@@ -577,7 +577,7 @@ async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path
     result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
 
     assert result.accepted is False
-    assert result.reason.value == "campaign_ineligible"
+    assert result.reason is AttributionReason.POST_OUTSIDE_CAMPAIGN_WINDOW
     assert result.miner_hotkey == MINER
     assert result.submission_id == "03" * 16
 
@@ -1287,7 +1287,7 @@ async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Pat
     result = (await reconciler.reconcile_campaign(record, snapshot))[0]
 
     assert result.accepted is False
-    assert result.reason is AttributionReason.CAMPAIGN_INELIGIBLE
+    assert result.reason is AttributionReason.CREATOR_NOT_ELIGIBLE_FOR_CAMPAIGN
 
 
 @pytest.mark.asyncio
@@ -1318,19 +1318,33 @@ async def test_missing_historical_map_keeps_campaign_unreconciled(tmp_path: Path
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("campaign_update", "tweet_update"),
+    ("campaign_update", "tweet_update", "expected_reason"),
     [
-        ({}, {"text": "RT @someone: #Launch wallet"}),
-        ({}, {"in_reply_to_status_id": "1"}),
-        ({"tag": "@bitcast"}, {}),
-        ({"quoted_tweet_id": "123"}, {"quoted_tweet_id": "456"}),
-        ({"inclusion_keywords": ("airdrop", "rewards")}, {}),
+        (
+            {"required_terms": ("required phrase",)},
+            {},
+            AttributionReason.REQUIRED_TERMS_MISSING,
+        ),
+        ({}, {"text": "RT @someone: #Launch wallet"}, AttributionReason.RETWEET_NOT_ALLOWED),
+        ({}, {"in_reply_to_status_id": "1"}, AttributionReason.REPLY_NOT_ALLOWED),
+        ({"tag": "@bitcast"}, {}, AttributionReason.CAMPAIGN_TAG_MISSING),
+        (
+            {"quoted_tweet_id": "123"},
+            {"quoted_tweet_id": "456"},
+            AttributionReason.REQUIRED_QUOTE_MISSING_OR_INCORRECT,
+        ),
+        (
+            {"inclusion_keywords": ("airdrop", "rewards")},
+            {},
+            AttributionReason.REQUIRED_CAMPAIGN_KEYWORD_MISSING,
+        ),
     ],
 )
 async def test_v2_content_prefilters_reject_ineligible_submissions(
     tmp_path: Path,
     campaign_update: dict[str, object],
     tweet_update: dict[str, object],
+    expected_reason: AttributionReason,
 ) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update=campaign_update)
@@ -1344,7 +1358,7 @@ async def test_v2_content_prefilters_reject_ineligible_submissions(
     result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
 
     assert result.accepted is False
-    assert result.reason.value == "campaign_ineligible"
+    assert result.reason is expected_reason
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,9 @@ strings are consensus-visible contracts.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version.
+- New attribution reason strings may be added without changing the wire version when they refine
+  an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
+  strings and provide a generic rejection fallback rather than treating the enum as closed.
 - An additive LLM prompt version does not change the miner-validator wire version when existing
   prompts remain byte-stable, the campaign selects the new version explicitly, and a golden digest
   pins its exact text. Removing or rewriting a prompt version remains a compatibility change.
