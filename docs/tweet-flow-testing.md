@@ -101,7 +101,7 @@ The initial edge-case table should stay focused on failures that cross more than
 | Draft reveal does not match the commitment | `draft_reveal_mismatch` |
 | Published text does not clear the matcher | `score_below_floor` or `ambiguous_match` |
 | Tweet author does not match the open claim | `author_mismatch` |
-| Tweet is outside the campaign or content rules | `campaign_ineligible` |
+| Tweet is outside the campaign or content rules | the first specific campaign requirement failure |
 | Submission is committed after scoring close | `late_submission` |
 | Miner is not qualified | pending before close, final rejection at close |
 | X provider is unavailable | campaign remains unreconciled; prior state is retained |

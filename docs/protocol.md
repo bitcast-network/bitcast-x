@@ -191,7 +191,12 @@ exact tie, weak match, or narrow margin abstains rather than assigning the tweet
 
 Every submitted tweet receives a stable accepted, pending, or rejected reason. Evidence that is
 unavailable at final reconciliation is frozen as `evidence_unavailable` pending rather than
-rejecting the tweet or blocking the campaign. The complete reason enum and
+rejecting the tweet or blocking the campaign. Campaign checks report the first failed requirement
+in deterministic evaluation order: `post_outside_campaign_window`,
+`creator_not_eligible_for_campaign`, `required_terms_missing`, `retweet_not_allowed`,
+`reply_not_allowed`, `campaign_tag_missing`, `required_quote_missing_or_incorrect`, or
+`required_campaign_keyword_missing`. The broader `campaign_ineligible` reason remains valid for
+aggregate campaign limits and incompatible campaign routing. The complete reason enum and
 model are in [`src/bitcast_x/protocol/models.py`](../src/bitcast_x/protocol/models.py); the replay
 rules are in
 [`src/bitcast_x/validator/reconciliation.py`](../src/bitcast_x/validator/reconciliation.py), and
