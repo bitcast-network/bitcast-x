@@ -15,6 +15,11 @@ from bitcast_x.miner.store import EventStatus
 
 LOGGER = logging.getLogger(__name__)
 
+# Enriching the submission list requires one central result lookup per row.
+# Bound the fan-out so status views do not serialize hundreds of HTTP round
+# trips, while still protecting the central API from an unbounded burst.
+SUBMISSION_ENRICHMENT_CONCURRENCY = 8
+
 
 class CampaignSource(Protocol):
     """Campaign operations required by a platform-facing miner."""
@@ -111,21 +116,27 @@ class MinerControlService:
         """Return durable submissions enriched with latest validator results."""
 
         submissions = self.sdk.submissions()
-        if self.results_client is None:
+        results_client = self.results_client
+        if results_client is None:
             return submissions
-        output: list[dict[str, object]] = []
-        for submission in submissions:
+
+        semaphore = asyncio.Semaphore(SUBMISSION_ENRICHMENT_CONCURRENCY)
+
+        async def enrich(submission: dict[str, object]) -> dict[str, object]:
             try:
-                result = await self.results_client.submission(str(submission["submission_id"]))
+                async with semaphore:
+                    result = await results_client.submission(str(submission["submission_id"]))
             except Exception:
                 LOGGER.exception(
                     "submission result lookup failed; returning durable local state",
                     extra={"submission_id": submission["submission_id"]},
                 )
-                output.append(submission)
-            else:
-                output.append({**submission, **result})
-        return output
+                return submission
+            return {**submission, **result}
+
+        # asyncio.gather preserves input order, so the API contract remains
+        # deterministic even though the independent lookups run concurrently.
+        return list(await asyncio.gather(*(enrich(submission) for submission in submissions)))
 
     async def sync_submission_results(self) -> None:
         """Persist final central results for locally pending submissions."""
