@@ -4,6 +4,13 @@ All notable changes to Bitcast X are recorded here. This project follows
 [Semantic Versioning](https://semver.org/); software release versions are separate from the wire,
 campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
+## [Unreleased]
+
+### Fixed
+
+- Finney miners and validators now use the qualification schedule bundled with the reviewed
+  release, preventing stale environment files from silently retaining obsolete eligibility rules.
+
 ## [2.0.0] - 2026-08-13
 
 ### Added

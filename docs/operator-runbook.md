@@ -80,12 +80,12 @@ on every later cycle. Miner availability and protocol failures are isolated: ver
 continue through reconciliation and the validator remains ready. Do not advance a miner cursor
 manually.
 
-Publish qualification changes as the complete ordered
-`BITCAST_X_QUALIFICATION_SCHEDULE_JSON` history. Each entry has an immutable `version`, owner
-hotkey, conviction threshold, optional owner-to-miner self-stake threshold and `effective_block`;
-append a later entry when changing either path. Never replace an earlier entry, because validators
-use the rule active at each claim, submission and scoring-close block. The individual qualification
-variables remain the single-entry launch fallback only.
+Finney netuid 93 qualification history ships in the reviewed software release and cannot be
+overridden by a stale environment file. Upgrade the release to adopt an appended rule. Each entry
+has an immutable `version`, owner hotkey, conviction threshold, optional owner-to-miner self-stake
+threshold and `effective_block`; never replace an earlier entry, because validators use the rule
+active at each claim, submission and scoring-close block. `BITCAST_X_QUALIFICATION_*` overrides
+remain available only for other networks and local tests.
 
 ## Start and verify
 

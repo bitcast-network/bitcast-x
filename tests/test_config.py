@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from bitcast_x.config import Settings
+from bitcast_x.qualification import PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
 
 
 def test_public_protocol_defaults_match_the_published_network() -> None:
@@ -18,7 +19,21 @@ def test_public_protocol_defaults_match_the_published_network() -> None:
     )
     assert settings.qualification_minimum_alpha == "15000"
     assert settings.qualification_minimum_self_stake_alpha is None
+    assert settings.qualification_policy is PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
     assert settings.validator_preview_max_concurrency == 2
+
+
+def test_stale_finney_environment_cannot_override_release_schedule() -> None:
+    settings = Settings(
+        _env_file=None,
+        qualification_schedule_json=(
+            '{"configurations":[{"version":1,"owner_hotkey":'
+            '"5FHneW46xGXgs5mUiveU4sbTyGBzmst2jfFvCw9zThqAXhGK",'
+            '"minimum_conviction_alpha":"1","effective_block":0}]}'
+        ),
+    )
+
+    assert settings.qualification_policy is PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
 
 
 def test_secrets_remain_unconfigured_and_production_outputs_are_enabled() -> None:
@@ -38,7 +53,8 @@ def test_environment_template_contains_real_public_protocol_values() -> None:
     assert "BITCAST_X_PROTOCOL_START_BLOCK" not in template
     assert "BITCAST_X_LEGACY_NOCODE_UID=154" in template
     assert "BITCAST_X_LEGACY_CONNECTION_TWEET_IDS=2031383975088836738" in template
-    assert "BITCAST_X_QUALIFICATION_MINIMUM_ALPHA=15000" in template
+    assert "qualification history ships with each reviewed release" in template
+    assert "BITCAST_X_QUALIFICATION_SCHEDULE_JSON=" not in template
     assert "BITCAST_X_VALIDATOR_PREVIEW_MAX_CONCURRENCY=2" in template
     assert "BITCAST_X_ENABLE_DATA_PUBLISH=true" in template
     assert "BITCAST_X_ENABLE_WEIGHT_SUBMISSION=true" in template

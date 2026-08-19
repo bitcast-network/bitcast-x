@@ -5,7 +5,6 @@ import logging
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -40,7 +39,6 @@ from bitcast_x.ops import RuntimeHealth, create_ops_app
 from bitcast_x.publishing import DataPublisher
 from bitcast_x.qualification import (
     HistoricalQualificationChecker,
-    QualificationConfig,
     QualificationReader,
     QualificationSchedule,
 )
@@ -81,7 +79,7 @@ def ensure_production_outputs_configured(settings: Settings) -> None:
             if settings.llm_provider == "chutes"
             else "BITCAST_X_OPENROUTER_API_KEY"
         )
-    if settings.qualification_schedule_json is None and settings.qualification_owner_hotkey is None:
+    if settings.qualification_policy is None:
         missing.append("BITCAST_X_QUALIFICATION_OWNER_HOTKEY")
     if missing:
         raise ValueError("production validator outputs require: " + ", ".join(missing))
@@ -217,10 +215,7 @@ class ValidatorService:
             if (
                 self.settings.campaign_feed_url is not None
                 and self.settings.desearch_api_key is not None
-                and (
-                    self.settings.qualification_schedule_json is not None
-                    or self.settings.qualification_owner_hotkey is not None
-                )
+                and self.settings.qualification_policy is not None
                 and self.settings.llm_api_key is not None
             ):
                 campaign_client = CampaignFeedClient(
@@ -233,26 +228,9 @@ class ValidatorService:
                     self.settings.desearch_api_key,
                     timeout=self.settings.request_timeout_seconds,
                 )
-                if self.settings.qualification_schedule_json is not None:
-                    qualification_policy: QualificationConfig | QualificationSchedule = (
-                        QualificationSchedule.model_validate_json(
-                            self.settings.qualification_schedule_json
-                        )
-                    )
-                else:
-                    owner_hotkey = self.settings.qualification_owner_hotkey
-                    if owner_hotkey is None:
-                        raise ValueError("qualification owner hotkey is required")
-                    qualification_policy = QualificationConfig(
-                        owner_hotkey=owner_hotkey,
-                        minimum_conviction_alpha=Decimal(self.settings.qualification_minimum_alpha),
-                        minimum_self_stake_alpha=(
-                            Decimal(self.settings.qualification_minimum_self_stake_alpha)
-                            if self.settings.qualification_minimum_self_stake_alpha is not None
-                            else None
-                        ),
-                        effective_block=self.settings.qualification_effective_block,
-                    )
+                qualification_policy = self.settings.qualification_policy
+                if qualification_policy is None:
+                    raise ValueError("qualification policy is required")
                 qualification_reader = QualificationReader(chain, qualification_policy)
                 qualification_schedule = qualification_reader.schedule
                 qualification = HistoricalQualificationChecker(qualification_reader)

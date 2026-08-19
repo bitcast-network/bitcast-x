@@ -9,9 +9,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL
 from bitcast_x.legacy.constants import LEGACY_NOCODE_UID
+from bitcast_x.qualification import (
+    PUBLIC_QUALIFICATION_OWNER_HOTKEY,
+    QualificationConfig,
+    QualificationSchedule,
+    resolve_qualification_policy,
+)
 
 LEGACY_CONNECTION_TWEET_IDS = "2031383975088836738"
-QUALIFICATION_OWNER_HOTKEY = "5DAoDtMxVqtMu2Nd5E7QhPEGXDMgrySvE1b3rRT5ARDhfNNK"
+QUALIFICATION_OWNER_HOTKEY = PUBLIC_QUALIFICATION_OWNER_HOTKEY
 
 
 class Settings(BaseSettings):
@@ -101,6 +107,20 @@ class Settings(BaseSettings):
         """Return the credential for the selected v2-compatible LLM provider."""
 
         return self.chutes_api_key if self.llm_provider == "chutes" else self.openrouter_api_key
+
+    @property
+    def qualification_policy(self) -> QualificationConfig | QualificationSchedule | None:
+        """Return the release-pinned Finney policy or a non-Finney override."""
+
+        return resolve_qualification_policy(
+            network=self.network,
+            netuid=self.netuid,
+            schedule_json=self.qualification_schedule_json,
+            owner_hotkey=self.qualification_owner_hotkey,
+            minimum_conviction_alpha=self.qualification_minimum_alpha,
+            minimum_self_stake_alpha=self.qualification_minimum_self_stake_alpha,
+            effective_block=self.qualification_effective_block,
+        )
 
 
 @lru_cache(maxsize=1)

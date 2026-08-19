@@ -6,6 +6,9 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _RAO_PER_ALPHA = Decimal(1_000_000_000)
+PUBLIC_FINNEY_NETWORK = "finney"
+PUBLIC_FINNEY_NETUID = 93
+PUBLIC_QUALIFICATION_OWNER_HOTKEY = "5DAoDtMxVqtMu2Nd5E7QhPEGXDMgrySvE1b3rRT5ARDhfNNK"
 
 
 class QualificationConfig(BaseModel):
@@ -68,6 +71,59 @@ class QualificationSchedule(BaseModel):
             return self.configurations[-1]
         applicable = [item for item in self.configurations if item.effective_block <= block]
         return applicable[-1] if applicable else self.configurations[0]
+
+
+PUBLIC_FINNEY_QUALIFICATION_SCHEDULE = QualificationSchedule(
+    configurations=(
+        QualificationConfig(
+            version=1,
+            owner_hotkey=PUBLIC_QUALIFICATION_OWNER_HOTKEY,
+            minimum_conviction_alpha=Decimal("15000"),
+            effective_block=0,
+        ),
+        QualificationConfig(
+            version=2,
+            owner_hotkey=PUBLIC_QUALIFICATION_OWNER_HOTKEY,
+            minimum_conviction_alpha=Decimal("15000"),
+            minimum_self_stake_alpha=Decimal("15000"),
+            effective_block=8_874_000,
+        ),
+    )
+)
+
+
+def resolve_qualification_policy(
+    *,
+    network: str,
+    netuid: int,
+    schedule_json: str | None,
+    owner_hotkey: str | None,
+    minimum_conviction_alpha: str,
+    minimum_self_stake_alpha: str | None,
+    effective_block: int,
+) -> QualificationConfig | QualificationSchedule | None:
+    """Return the canonical public policy or an explicit non-Finney override.
+
+    Finney mechanism participants must not silently diverge because one process
+    retained an older environment file. The immutable public schedule therefore
+    ships with the release and takes precedence over legacy environment fields.
+    Other networks retain configurable schedules for development and testing.
+    """
+
+    if network == PUBLIC_FINNEY_NETWORK and netuid == PUBLIC_FINNEY_NETUID:
+        return PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
+    if schedule_json is not None:
+        return QualificationSchedule.model_validate_json(schedule_json)
+    if owner_hotkey is None:
+        return None
+    return QualificationConfig(
+        owner_hotkey=owner_hotkey,
+        minimum_conviction_alpha=Decimal(minimum_conviction_alpha),
+        minimum_self_stake_alpha=(
+            Decimal(minimum_self_stake_alpha) if minimum_self_stake_alpha is not None else None
+        ),
+        effective_block=effective_block,
+    )
 
 
 class QualificationStatus(BaseModel):
