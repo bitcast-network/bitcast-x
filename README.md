@@ -129,8 +129,8 @@ at the configured cadence. Operators can disable either output independently for
 public network qualification schedule ships with each reviewed release so miners and validators
 cannot retain different rules through stale environment files. It requires either 15,000 alpha
 conviction toward the qualification owner hotkey or, from version 2 at block 8,874,000, 15,000
-alpha staked by the miner's controlling coldkey to that same miner hotkey. Third-party stake does
-not count.
+alpha staked to the miner hotkey on netuid 93. The stake is aggregated across every coldkey that
+supplied it; the source coldkey does not affect this path.
 If either setting could economically activate an eligible campaign, the validator fails closed
 while both effective qualification thresholds are zero. The v11 chain adapter uses Bittensor's
 `SetWeights` intent—which performs the current subnet conformance and commit-reveal selection.

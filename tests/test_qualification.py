@@ -126,7 +126,7 @@ async def test_qualifies_exact_threshold_without_float_rounding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_self_stake_to_owned_miner_hotkey_is_an_alternative_path() -> None:
+async def test_aggregate_stake_on_miner_hotkey_is_an_alternative_path() -> None:
     policy = config().model_copy(update={"minimum_self_stake_alpha": Decimal("250.5")})
 
     result = await QualificationReader(
@@ -141,10 +141,12 @@ async def test_self_stake_to_owned_miner_hotkey_is_an_alternative_path() -> None
 
 
 @pytest.mark.asyncio
-async def test_third_party_stake_is_not_part_of_self_stake_input() -> None:
+async def test_aggregate_miner_hotkey_stake_below_threshold_does_not_qualify() -> None:
     policy = config().model_copy(update={"minimum_self_stake_alpha": Decimal("250.5")})
 
-    result = await QualificationReader(FakeChain(MINER, 0), policy).read(MINER, block=100)
+    result = await QualificationReader(
+        FakeChain(MINER, 0, self_stake_rao=250_499_999_999), policy
+    ).read(MINER, block=100)
 
     assert result.eligible is False
     assert result.reason == "neither_qualification_path_met"

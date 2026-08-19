@@ -83,9 +83,10 @@ manually.
 Finney netuid 93 qualification history ships in the reviewed software release and cannot be
 overridden by a stale environment file. Upgrade the release to adopt an appended rule. Each entry
 has an immutable `version`, owner hotkey, conviction threshold, optional owner-to-miner self-stake
-threshold and `effective_block`; never replace an earlier entry, because validators use the rule
-active at each claim, submission and scoring-close block. `BITCAST_X_QUALIFICATION_*` overrides
-remain available only for other networks and local tests.
+threshold and `effective_block`; the compatibility-named self-stake value is the aggregate alpha
+staked to the miner hotkey on the subnet, from any coldkey. Never replace an earlier entry, because
+validators use the rule active at each claim, submission and scoring-close block.
+`BITCAST_X_QUALIFICATION_*` overrides remain available only for other networks and local tests.
 
 ## Start and verify
 
