@@ -18,6 +18,7 @@ def test_public_protocol_defaults_match_the_published_network() -> None:
     )
     assert settings.qualification_minimum_alpha == "15000"
     assert settings.qualification_minimum_self_stake_alpha is None
+    assert settings.validator_preview_max_concurrency == 2
 
 
 def test_secrets_remain_unconfigured_and_production_outputs_are_enabled() -> None:
@@ -38,6 +39,7 @@ def test_environment_template_contains_real_public_protocol_values() -> None:
     assert "BITCAST_X_LEGACY_NOCODE_UID=154" in template
     assert "BITCAST_X_LEGACY_CONNECTION_TWEET_IDS=2031383975088836738" in template
     assert "BITCAST_X_QUALIFICATION_MINIMUM_ALPHA=15000" in template
+    assert "BITCAST_X_VALIDATOR_PREVIEW_MAX_CONCURRENCY=2" in template
     assert "BITCAST_X_ENABLE_DATA_PUBLISH=true" in template
     assert "BITCAST_X_ENABLE_WEIGHT_SUBMISSION=true" in template
     assert "example.invalid" not in template

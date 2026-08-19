@@ -295,7 +295,7 @@ class ValidatorService:
                     AttributionScorer(
                         preview_provider,
                         brief_filter=brief_filter,
-                        max_concurrency=self.settings.validator_max_concurrency,
+                        max_concurrency=self.settings.validator_preview_max_concurrency,
                     ),
                 )
                 connection_path = (
