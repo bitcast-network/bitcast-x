@@ -21,6 +21,14 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _logical_dump(path: Path) -> str:
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return "\n".join(connection.iterdump())
+    finally:
+        connection.close()
+
+
 def test_automatic_updates_require_explicit_opt_in(tmp_path: Path) -> None:
     settings = Settings(state_dir=tmp_path / "state")
     assert not auto_update.auto_update_enabled(settings)
@@ -74,12 +82,14 @@ def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) 
         connection.execute("PRAGMA user_version = 4")
     finally:
         connection.close()
-    original = _digest(validator_path)
+    original = _logical_dump(validator_path)
 
     with pytest.raises(RuntimeError, match=r"validator\.sqlite3: 4 -> 5"):
         auto_update.verify_automatic_upgrade(state)
 
-    assert _digest(validator_path) == original
+    # Opening a WAL database for online backup may checkpoint it on newer SQLite
+    # releases. Compare logical content instead of the mutable file representation.
+    assert _logical_dump(validator_path) == original
     connection = sqlite3.connect(validator_path)
     try:
         columns = {

@@ -1,19 +1,24 @@
 """Adapt frozen v3 campaign outcomes onto the existing brief-tweets wire contract."""
 
+import hashlib
+import json
 import logging
 import time
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import AttributionReason, AttributionResult
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
 from bitcast_x.rewards import RewardDecision, TweetReward
+from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
 
 LOGGER = logging.getLogger(__name__)
+
+_PREVIEW_PUBLICATION_RETRY = timedelta(minutes=1)
 
 
 class ShadowResultPublisher:
@@ -25,8 +30,10 @@ class ShadowResultPublisher:
         publisher: DataPublisher,
         *,
         endpoint: str,
+        preview_store: PreviewStore | None = None,
     ) -> None:
         self.store = store
+        self._preview_store = preview_store or PreviewStore(store.path.parent / "preview-cache")
         self._publisher = publisher
         self._endpoint = endpoint
 
@@ -48,19 +55,54 @@ class ShadowResultPublisher:
         ]
         if not publishable_attributions:
             return False
+        now = datetime.now(UTC)
         payload = create_brief_tweets_payload(
             campaign,
             [],
             {(item.attribution.campaign_id, item.attribution.tweet_id): item for item in scored},
             hotkey_to_uid,
             attributions=publishable_attributions,
+            timestamp=now,
         )
-        return await self._publisher.publish(
+        semantic_payload = dict(payload)
+        semantic_payload.pop("timestamp", None)
+        payload_hash = hashlib.sha256(
+            json.dumps(semantic_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        existing = self._preview_store.preview_publication(campaign.access.campaign_id)
+        if existing is not None and existing.payload_hash == payload_hash:
+            if existing.succeeded:
+                return False
+            if now - existing.attempted_at < _PREVIEW_PUBLICATION_RETRY:
+                return False
+            payload = existing.payload
+            run_id = existing.run_id
+        else:
+            run_id = (
+                f"v3-preview:{feed.snapshot_id}:{campaign.access.campaign_id}:{payload_hash[:16]}"
+            )
+        success = await self._publisher.publish(
             endpoint=self._endpoint,
             payload_type=BRIEF_TWEETS_PAYLOAD_TYPE,
-            run_id=f"v3-preview:{feed.snapshot_id}:{campaign.access.campaign_id}:{block}",
+            run_id=run_id,
             payload=payload,
         )
+        self._preview_store.record_preview_publication(
+            campaign.access.campaign_id,
+            payload_hash=payload_hash,
+            run_id=run_id,
+            payload=payload,
+            attempted_at=now,
+            succeeded=success,
+        )
+        LOGGER.info(
+            "event=campaign_preview_publication campaign=%s block=%s success=%s rows=%s",
+            campaign.access.campaign_id,
+            block,
+            str(success).lower(),
+            len(publishable_attributions),
+        )
+        return success
 
     async def publish(
         self,

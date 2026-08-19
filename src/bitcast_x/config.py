@@ -65,6 +65,7 @@ class Settings(BaseSettings):
     pending_max_bytes: int = Field(default=50_000_000, ge=1)
     validator_poll_seconds: float = Field(default=12.0, gt=0)
     validator_max_concurrency: int = Field(default=16, ge=1, le=256)
+    validator_preview_max_concurrency: int = Field(default=2, ge=1, le=16)
     desearch_api_key: str | None = Field(default=None, repr=False)
     llm_provider: Literal["chutes", "openrouter"] = "chutes"
     chutes_api_key: str | None = Field(default=None, repr=False)
