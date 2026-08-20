@@ -198,6 +198,63 @@ def test_engagements_are_cumulative_and_survive_provider_failure(tmp_path: Path)
     store.close()
 
 
+def test_merge_records_exact_quote_relationship_as_engagement(tmp_path: Path) -> None:
+    Cache(tmp_path).close()
+    store = LegacyTweetStore(tmp_path)
+    store.merge(
+        (
+            Tweet(
+                tweet_id="2",
+                author_x_id="100",
+                created_at=NOW,
+                text="quote #legacy",
+                author="Quoter",
+                quoted_tweet_id="1",
+            ),
+        )
+    )
+
+    evidence = store.cached_engagements("1")
+    with Cache(tmp_path) as cache:
+        persisted = cache.get("engagements:1")
+
+    assert evidence == EngagementFetch(
+        engagements={"quoter": "quote"},
+        provider_available=True,
+    )
+    assert persisted["quoters"]["quoter"]["quote_tweet_id"] == "2"
+    store.close()
+
+
+def test_recovers_historical_quote_tweets_idempotently(tmp_path: Path) -> None:
+    with Cache(tmp_path) as cache:
+        cache.set(
+            "tweet:2",
+            {
+                "tweet_id": "2",
+                "author": "Quoter",
+                "quoted_tweet_id": "1",
+                "first_seen": "historical",
+            },
+        )
+        cache.set(
+            "tweet:3",
+            {
+                "tweet_id": "3",
+                "author": "SomeoneElse",
+                "quoted_tweet_id": "99",
+            },
+        )
+
+    store = LegacyTweetStore(tmp_path)
+
+    assert store.recover_observed_quote_engagements() == 2
+    assert store.recover_observed_quote_engagements() == 0
+    assert store.cached_engagements("1").engagements == {"quoter": "quote"}
+    assert store.cached_engagements("99").engagements == {"someoneelse": "quote"}
+    store.close()
+
+
 @pytest.mark.parametrize(
     ("tweet_age", "fetch_age", "expected"),
     (

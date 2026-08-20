@@ -93,6 +93,46 @@ class Provider:
         return EngagementFetch(engagements={}, provider_available=True)
 
 
+class QuoteSearchProvider:
+    """Return a quote through campaign search while engagement search misses it."""
+
+    @staticmethod
+    def original() -> Tweet:
+        return Tweet(
+            tweet_id="123",
+            author_x_id="1",
+            created_at=datetime(2026, 8, 2, tzinfo=UTC),
+            text="#legacy",
+            author="alice",
+        )
+
+    async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch:
+        assert query == "#legacy since:2026-08-01 until:2026-08-08"
+        assert count == 100
+        return TweetSearchFetch(
+            provider_available=True,
+            tweets=(
+                self.original(),
+                Tweet(
+                    tweet_id="456",
+                    author_x_id="2",
+                    created_at=datetime(2026, 8, 3, tzinfo=UTC),
+                    text="quote #legacy",
+                    author="bob",
+                    quoted_tweet_id="123",
+                ),
+            ),
+        )
+
+    async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
+        assert tweet_id == "123"
+        return TweetFetch(tweet=self.original(), provider_available=True)
+
+    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+        assert tweet_id == "123"
+        return EngagementFetch(engagements={}, provider_available=True)
+
+
 class UnavailableProvider:
     async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch:
         assert query == "#legacy since:2026-08-01 until:2026-08-08"
@@ -152,6 +192,48 @@ async def test_connected_eligible_tweet_is_attributed_locally(tmp_path: Path) ->
     assert attribution.miner_hotkey == HOTKEY  # type: ignore[attr-defined]
     assert scorer.tweet_evidence["123"].author == "alice"
     assert scorer.feed.campaigns[0].access.mining_protocol is MiningProtocol.LEGACY_CONNECTION
+
+
+async def test_observed_quote_scores_when_provider_engagement_search_misses_it(
+    tmp_path: Path,
+) -> None:
+    snapshot = _feed()
+    snapshot = snapshot.model_copy(
+        update={
+            "ecosystem_maps": (
+                snapshot.ecosystem_maps[0].model_copy(
+                    update={
+                        "accounts": (
+                            SocialAccount(x_id="1", username="alice", influence=2),
+                            SocialAccount(x_id="2", username="bob", influence=3),
+                        ),
+                    }
+                ),
+            )
+        }
+    )
+    store_path = tmp_path / "tweets"
+    Cache(store_path).close()
+    provider = QuoteSearchProvider()
+    tweet_store = LegacyTweetStore(store_path)
+    scorer = AttributionScorer(
+        provider,  # type: ignore[arg-type]
+        engagement_merger=tweet_store.merge_engagements,
+    )
+    engine = LegacyAttributionEngine(
+        _connections(tmp_path / "c.db"),
+        provider,  # type: ignore[arg-type]
+        scorer,
+        tweet_store,
+    )
+
+    result = await engine.score_feed(snapshot, block=1, hotkey_to_uid={HOTKEY: 7})
+
+    assert len(result) == 1
+    assert result[0].tweet.tweet_id == "123"
+    assert result[0].score == 13
+    assert result[0].details[0].username == "bob"
+    assert result[0].details[0].engagement_type == "quote"
 
 
 def test_legacy_attribution_keeps_creator_eligible_after_rank_drop() -> None:

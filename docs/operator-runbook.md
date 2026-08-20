@@ -45,6 +45,14 @@ Campaign routing is persisted in `validator.sqlite3`; changing an existing campa
 campaigns, v3 produces its normal vector. Remove the isolated legacy engine and imported state only
 after legacy emissions and referral liabilities have independently been confirmed as drained.
 
+Campaign search and fast-track intake also recover quote engagements from the quote post's exact
+`quoted_tweet_id` evidence. This supplements Desearch's bounded quote search, which can return an
+empty successful response for a real quote. Existing quote posts in the cumulative store are
+reindexed idempotently on the next legacy scoring cycle. When a reported quote was never observed
+by campaign search, fast-track the **quote post ID** after deploying the fix; the next intake and
+scoring cycles will attach it to the original post. This does not make an otherwise ineligible
+quote author eligible for campaign-post rewards—it only restores their engagement contribution.
+
 A canonical legacy reward snapshot is the terminal scoring boundary for that campaign. Later cycles
 replay its fixed tweet rewards and may publish them, but do not rediscover tweets, refresh engagement,
 or invoke the LLM for that campaign. Legacy campaigns without a snapshot continue cumulative

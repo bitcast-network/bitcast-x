@@ -55,7 +55,7 @@ class LegacyTweetStore:
             self._cache = None
 
     def merge(self, tweets: tuple[Tweet, ...]) -> None:
-        """Permanently merge fresh tweets, preserving maximum observed metrics."""
+        """Permanently merge tweets and any exact quote evidence they carry."""
 
         cache = self._open()
         now = datetime.now(UTC).isoformat()
@@ -66,18 +66,53 @@ class LegacyTweetStore:
             payload["created_at"] = tweet.created_at.strftime("%a %b %d %H:%M:%S %z %Y")
             if not isinstance(existing, dict):
                 cache.set(key, {**payload, "first_seen": now, "last_updated": now})
+            else:
+                for metric in _METRICS:
+                    existing[metric] = max(
+                        self._integer(existing.get(metric)),
+                        self._integer(payload.get(metric)),
+                    )
+                # Old stores do not contain immutable author IDs. Preserve every
+                # frozen field, while filling fields that v3 newly knows.
+                for field, value in payload.items():
+                    existing.setdefault(field, value)
+                existing["last_updated"] = now
+                cache.set(key, existing)
+            self._merge_observed_quote(
+                cache,
+                quoted_tweet_id=tweet.quoted_tweet_id,
+                quote_tweet_id=tweet.tweet_id,
+                author=tweet.author,
+                first_seen=now,
+            )
+
+    def recover_observed_quote_engagements(self) -> int:
+        """Backfill exact quote relationships already present in the cumulative store.
+
+        Desearch can return a successful empty result for its ``quoted_tweet_id``
+        search operator. Campaign search and fast-track intake still persist the
+        quote post itself, including its immutable target ID. Recovering from that
+        local evidence makes an upgrade self-healing without trusting aggregate
+        quote counts or broad search matches.
+        """
+
+        cache = self._open()
+        now = datetime.now(UTC).isoformat()
+        recovered = 0
+        for key in cache.iterkeys():
+            if not str(key).startswith("tweet:"):
                 continue
-            for metric in _METRICS:
-                existing[metric] = max(
-                    self._integer(existing.get(metric)),
-                    self._integer(payload.get(metric)),
-                )
-            # Old stores do not contain immutable author IDs. Preserve every
-            # frozen field, while filling fields that v3 newly knows.
-            for field, value in payload.items():
-                existing.setdefault(field, value)
-            existing["last_updated"] = now
-            cache.set(key, existing)
+            record = cache.get(key)
+            if not isinstance(record, dict):
+                continue
+            recovered += self._merge_observed_quote(
+                cache,
+                quoted_tweet_id=record.get("quoted_tweet_id"),
+                quote_tweet_id=record.get("tweet_id"),
+                author=record.get("author"),
+                first_seen=record.get("first_seen") or now,
+            )
+        return recovered
 
     def campaign_tweets(
         self,
@@ -225,6 +260,42 @@ class LegacyTweetStore:
                 disk_pickle_protocol=4,
             )
         return self._cache
+
+    @staticmethod
+    def _merge_observed_quote(
+        cache: Cache,
+        *,
+        quoted_tweet_id: Any,
+        quote_tweet_id: Any,
+        author: Any,
+        first_seen: Any,
+    ) -> int:
+        target_id = str(quoted_tweet_id or "")
+        evidence_id = str(quote_tweet_id or "")
+        username = str(author or "").casefold()
+        if not target_id.isdigit() or not evidence_id.isdigit() or not username:
+            return 0
+
+        key = f"engagements:{target_id}"
+        record = cache.get(key)
+        if not isinstance(record, dict):
+            record = {"tweet_id": target_id, "retweeters": {}, "quoters": {}}
+        retweeters = record.get("retweeters", {})
+        quoters = record.get("quoters", {})
+        if not isinstance(retweeters, dict) or not isinstance(quoters, dict):
+            return 0
+        if any(str(existing).casefold() == username for existing in quoters):
+            return 0
+
+        quoters[username] = {
+            "quote_tweet_id": evidence_id,
+            "first_seen": str(first_seen),
+        }
+        record["retweeters"] = retweeters
+        record["quoters"] = quoters
+        record["last_updated"] = datetime.now(UTC).isoformat()
+        cache.set(key, record)
+        return 1
 
     @staticmethod
     def _integer(value: Any) -> int:

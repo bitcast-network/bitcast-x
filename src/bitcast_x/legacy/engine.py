@@ -77,6 +77,12 @@ class LegacyAttributionEngine:
     ) -> list[ScoredAttribution]:
         """Return independently scored legacy attributions for the complete feed."""
 
+        recovered_quotes = self._tweets.recover_observed_quote_engagements()
+        if recovered_quotes:
+            LOGGER.info(
+                "recovered quote engagements from cumulative tweet evidence count=%s",
+                recovered_quotes,
+            )
         uid_to_hotkey = {uid: hotkey for hotkey, uid in hotkey_to_uid.items()}
         account_to_uid = self._connections.resolve_uids(hotkey_to_uid, nocode_uid=self._nocode_uid)
         attributions: list[AttributionResult] = []
