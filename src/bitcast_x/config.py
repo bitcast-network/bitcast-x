@@ -4,7 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL
@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     miner_api_commit_timeout_seconds: float = Field(default=90.0, gt=0, le=300)
     miner_results_api_url: str = "https://bitcast-api.bitcast.network"
     miner_results_poll_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
+    miner_enabled_ecosystem_ids: tuple[str, ...] = ()
     legacy_connections_path: Path | None = None
     legacy_snapshots_path: Path | None = None
     legacy_tweet_store_path: Path | None = None
@@ -101,6 +102,15 @@ class Settings(BaseSettings):
     auto_update_startup_grace_seconds: float = Field(default=30.0, ge=5.0)
     auto_update_shutdown_timeout_seconds: float = Field(default=3600.0, ge=30.0)
     auto_update_dir: Path = Path.home() / ".cache" / "bitcast-x" / "updates"
+
+    @field_validator("miner_enabled_ecosystem_ids")
+    @classmethod
+    def unique_ecosystems(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Keep operator filtering deterministic and reject ambiguous blanks."""
+
+        if any(not ecosystem_id.strip() for ecosystem_id in value):
+            raise ValueError("enabled ecosystem ids must not be blank")
+        return tuple(dict.fromkeys(ecosystem_id.strip() for ecosystem_id in value))
 
     @property
     def llm_api_key(self) -> str | None:

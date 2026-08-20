@@ -2,25 +2,24 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
+from typing import Any
 
 from fastapi.testclient import TestClient
 
 from bitcast_x.campaigns import CampaignRecord
 from bitcast_x.miner import BatchPolicy, FinalizedCommitment, MinerEngine, MinerSdk, MinerStore
 from bitcast_x.miner.api import create_control_app
-from bitcast_x.miner.control import SUBMISSION_ENRICHMENT_CONCURRENCY, MinerControlService
+from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
 from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
 from bitcast_x.transport import BatchPageRequest, create_miner_app
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
-INTERNAL_TOKEN = "test-internal-token-that-is-at-least-32-chars"  # noqa: S105
+INTERNAL_TOKEN = "a" * 64
+AUTH_HEADERS = {"Authorization": f"Bearer {INTERNAL_TOKEN}"}
 
 
 class Submitter:
-    """Finalizing in-memory chain adapter for HTTP tests."""
-
     async def capacity(self, _envelope: CommitmentEnvelope) -> CapacityBudget:
         return CapacityBudget(remaining_space=100, next_call_charge=100)
 
@@ -35,55 +34,106 @@ class Submitter:
 
 
 class SlowSubmitter(Submitter):
-    """Chain adapter that exceeds the control API timeout."""
-
     async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment:
         await asyncio.sleep(1)
         return await super().submit(envelope)
 
 
 class Feed:
-    """Minimal campaign source for control API tests."""
-
     async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]:
-        return (
-            CampaignRecord.model_validate(
-                {
-                    "access": {
-                        "campaign_id": "campaign",
-                        "mechanism_id": 1,
-                        "mining_protocol": "preclaim_v2",
-                        "scoring_close_block": 100,
-                    },
-                    "display": "Campaign",
-                    "brief": "Write an original post.",
-                    "pools": ["tao", "hyperliquid"],
-                    "opens_at": "2026-08-01T00:00:00Z",
-                    "closes_at": "2026-08-10T00:00:00Z",
-                    "reward_pool_usd": "1000",
-                }
-            ),
-        )
+        return ()
 
     async def close(self) -> None:
         return None
 
 
-def client(
+class Results:
+    """Central miner API double with one open preclaim campaign."""
+
+    campaign_record = {
+        "campaign_id": "campaign",
+        "campaign_snapshot_id": "sha256-snapshot",
+        "ecosystem_ids": ["tao", "hyperliquid"],
+        "status": "open",
+        "protocol": {"version": 2, "submission_mode": "preclaim"},
+        "access": {"mode": "open", "exclusive_miner_hotkey": None},
+        "capabilities": {
+            "can_check_eligibility": True,
+            "can_claim": True,
+            "can_submit": True,
+            "can_view_results": True,
+            "requires_claim": True,
+            "is_exclusive_to_this_miner": False,
+        },
+    }
+
+    async def ecosystems(self) -> list[dict[str, Any]]:
+        return [
+            {"ecosystem_id": "tao", "name": "TAO", "status": "active"},
+            {"ecosystem_id": "hyperliquid", "name": "Hyperliquid", "status": "active"},
+        ]
+
+    async def campaigns(self, ecosystem_ids: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        if ecosystem_ids and not set(ecosystem_ids).intersection(
+            self.campaign_record["ecosystem_ids"]
+        ):
+            return []
+        return [self.campaign_record]
+
+    async def campaign(self, campaign_id: str) -> dict[str, Any]:
+        if campaign_id != "campaign":
+            raise FakeNotFoundError
+        return self.campaign_record
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        return {
+            "campaign_id": campaign_id,
+            "creator_x_id": creator_x_id,
+            "eligible": True,
+            "claim_eligible": True,
+            "eligible_if_published_now": True,
+        }
+
+    async def campaign_tweets(
+        self, campaign_id: str, ecosystem_ids: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        return {"campaign_id": campaign_id, "tweets": [], "ecosystems": ecosystem_ids}
+
+    async def submission(self, submission_id: str) -> dict[str, Any]:
+        return {"submission_id": submission_id, "status": "verification_pending"}
+
+    async def submissions(self, **_filters: object) -> list[dict[str, Any]]:
+        return []
+
+
+class FakeNotFoundResponse:
+    status_code = 404
+
+
+class FakeNotFoundError(Exception):
+    response = FakeNotFoundResponse()
+
+
+def build_client(
     tmp_path: Path,
     *,
     submitter: Submitter | None = None,
     timeout: float = 5,
+    enabled_ecosystems: tuple[str, ...] = ("tao", "hyperliquid"),
 ) -> TestClient:
-    """Create an app using real durable miner state and a fake chain."""
-
     engine = MinerEngine(
         miner_hotkey=MINER,
         store=MinerStore(tmp_path / "miner.sqlite3"),
         submitter=submitter or Submitter(),
         policy=BatchPolicy(max_age_seconds=5),
     )
-    service = MinerControlService(MinerSdk(engine), Feed(), timeout)  # type: ignore[arg-type]
+    service = MinerControlService(
+        MinerSdk(engine),
+        Feed(),
+        timeout,
+        results_client=Results(),  # type: ignore[arg-type]
+        enabled_ecosystem_ids=enabled_ecosystems,
+    )
     protocol = create_miner_app(
         miner_hotkey=MINER,
         provider=engine.batch_page,
@@ -91,7 +141,7 @@ def client(
     )
     return TestClient(
         create_control_app(lambda: service, protocol, INTERNAL_TOKEN),
-        headers={"Authorization": f"Bearer {INTERNAL_TOKEN}"},
+        headers=AUTH_HEADERS,
     )
 
 
@@ -99,68 +149,127 @@ async def _authorized() -> bool:
     return True
 
 
-def test_control_api_requires_internal_bearer_token(tmp_path: Path) -> None:
-    web = client(tmp_path)
+def _claim(web: TestClient, *, key: str = "claim-key-0001") -> dict[str, Any]:
+    response = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": key},
+        json={
+            "campaign_id": "campaign",
+            "creator_x_id": "123",
+            "draft": "Exact draft",
+            "external_id": "creator-claim-1",
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_application_api_requires_internal_bearer_token(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
     del web.headers["Authorization"]
 
-    response = web.get("/api/campaigns")
+    response = web.get("/api/v1/campaigns")
 
     assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_authentication"
     assert response.headers["www-authenticate"] == "Bearer"
-
-
-def test_validator_health_does_not_use_internal_bearer_token(tmp_path: Path) -> None:
-    web = client(tmp_path)
-    del web.headers["Authorization"]
-
     assert web.get("/health").status_code == 200
 
 
-def test_campaign_listing_uses_public_metadata_source(tmp_path: Path) -> None:
-    response = client(tmp_path).get("/api/campaigns")
+def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> None:
+    web = build_client(tmp_path, enabled_ecosystems=("tao",))
 
-    assert response.status_code == 200
-    assert response.json()[0]["access"]["campaign_id"] == "campaign"
-    assert response.json()[0]["pools"] == ["tao", "hyperliquid"]
+    campaigns = web.get("/api/v1/campaigns").json()["items"]
+    ecosystems = web.get("/api/v1/ecosystems").json()["items"]
+
+    assert campaigns[0]["campaign_id"] == "campaign"
+    assert [item["ecosystem_id"] for item in ecosystems] == ["tao"]
+    rejected = web.get("/api/v1/campaigns?ecosystem_id=hyperliquid")
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"
 
 
-def test_claim_is_finalized_and_submission_is_acknowledged_durably(tmp_path: Path) -> None:
-    web = client(tmp_path)
-    claim = web.post(
-        "/api/claims",
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
-    )
-    assert claim.status_code == 200
-    assert claim.json()["status"] == "safe_to_post"
+def test_claim_and_submission_are_durable_and_recoverable(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+    claim = _claim(web)
+
+    assert claim["usability"]["safe_to_post"] is True
+    assert claim["commitment"]["block"] == 100
+    assert web.get(f"/api/v1/claims/{claim['claim_id']}").json() == claim
 
     submission = web.post(
-        "/api/submissions",
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": claim.json()["claim_id"],
-        },
-    )
-    assert submission.status_code == 200
-    assert submission.json()["status"] == "tweet_received"
-    pending = web.get("/api/submissions")
-    assert pending.status_code == 200
-    assert pending.json()[0]["submission_id"] == submission.json()["submission_id"]
-
-
-def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) -> None:
-    database = tmp_path / "miner.sqlite3"
-    web = client(tmp_path)
-    claim = web.post(
-        "/api/claims",
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
-    ).json()
-    submission = web.post(
-        "/api/submissions",
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
         json={
             "campaign_id": "campaign",
             "tweet_id": "999",
             "claim_id": claim["claim_id"],
+            "creator_x_id": "123",
+            "external_id": "creator-submission-1",
+        },
+    )
+
+    assert submission.status_code == 200
+    assert submission.json()["status"] == "tweet_received"
+    assert web.get("/api/v1/claims").json()["items"][0]["claim_id"] == claim["claim_id"]
+    assert web.get("/api/v1/submissions").json()["items"][0]["tweet_id"] == "999"
+
+
+def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+    first = _claim(web)
+    second = _claim(web)
+
+    assert second["claim_id"] == first["claim_id"]
+    conflict = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-key-0001"},
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Changed"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
+
+
+def test_submission_requires_matching_safe_claim_and_creator(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+    claim = _claim(web)
+
+    response = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={
+            "campaign_id": "campaign",
+            "tweet_id": "999",
+            "claim_id": claim["claim_id"],
+            "creator_x_id": "456",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "creator" in response.json()["error"]["message"]
+
+
+def test_claim_timeout_returns_durable_pending_resource(tmp_path: Path) -> None:
+    web = build_client(tmp_path, submitter=SlowSubmitter(), timeout=0.05)
+    claim = _claim(web)
+
+    assert claim["commitment"]["status"] == "queued"
+    assert claim["usability"]["status"] == "pending"
+    assert claim["usability"]["safe_to_post"] is False
+
+
+def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) -> None:
+    database = tmp_path / "miner.sqlite3"
+    web = build_client(tmp_path)
+    claim = _claim(web)
+    submission = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={
+            "campaign_id": "campaign",
+            "tweet_id": "999",
+            "claim_id": claim["claim_id"],
+            "creator_x_id": "123",
         },
     ).json()
 
@@ -178,128 +287,7 @@ def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) ->
     assert page.next_sequence == 2
     assert page.batches[0].batch["events"][0]["claim_id"] == claim["claim_id"]
     assert page.batches[1].batch["events"][0]["submission_id"] == submission["submission_id"]
-
-
-def test_repeated_submission_returns_same_durable_id(tmp_path: Path) -> None:
-    web = client(tmp_path)
-    payload = {"campaign_id": "campaign", "tweet_id": "999", "claim_id": None}
-
-    first = web.post("/api/submissions", json=payload)
-    second = web.post("/api/submissions", json=payload)
-
-    assert first.status_code == 200
-    assert second.status_code == 200
-    assert second.json() == first.json()
-    assert len(web.get("/api/submissions").json()) == 1
-
-
-async def test_submission_list_retains_local_rows_when_result_lookup_fails(
-    tmp_path: Path,
-) -> None:
-    engine = MinerEngine(
-        miner_hotkey=MINER,
-        store=MinerStore(tmp_path / "miner.sqlite3"),
-        submitter=Submitter(),
-        policy=BatchPolicy(max_age_seconds=5),
-    )
-    sdk = MinerSdk(engine)
-    submission_id = sdk.submit_tweet(
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-    )
-    results_client = AsyncMock()
-    results_client.submission.side_effect = RuntimeError("central result unavailable")
-    service = MinerControlService(
-        sdk,
-        Feed(),  # type: ignore[arg-type]
-        5,
-        results_client=results_client,
-    )
-
-    submissions = await service.submissions()
-
-    assert submissions == [
-        {
-            "submission_id": submission_id,
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": None,
-            "status": "tweet_received",
-            "created_ns": submissions[0]["created_ns"],
-        }
-    ]
-
-
-async def test_submission_results_are_enriched_with_bounded_concurrency(tmp_path: Path) -> None:
-    engine = MinerEngine(
-        miner_hotkey=MINER,
-        store=MinerStore(tmp_path / "miner.sqlite3"),
-        submitter=Submitter(),
-        policy=BatchPolicy(max_age_seconds=5),
-    )
-    sdk = MinerSdk(engine)
-    created_submission_ids = [
-        sdk.submit_tweet(campaign_id="campaign", tweet_id=str(1_000 + index), claim_id=None)
-        for index in range(SUBMISSION_ENRICHMENT_CONCURRENCY + 4)
-    ]
-    durable_submission_ids = [str(submission["submission_id"]) for submission in sdk.submissions()]
-
-    active = 0
-    peak_active = 0
-
-    async def result(submission_id: str) -> dict[str, object]:
-        nonlocal active, peak_active
-        active += 1
-        peak_active = max(peak_active, active)
-        await asyncio.sleep(0.01)
-        active -= 1
-        return {"submission_id": submission_id, "status": "attributed"}
-
-    results_client = AsyncMock()
-    results_client.submission.side_effect = result
-    service = MinerControlService(
-        sdk,
-        Feed(),  # type: ignore[arg-type]
-        5,
-        results_client=results_client,
-    )
-
-    submissions = await service.submissions()
-
-    assert set(durable_submission_ids) == set(created_submission_ids)
-    assert [submission["submission_id"] for submission in submissions] == durable_submission_ids
-    assert all(submission["status"] == "attributed" for submission in submissions)
-    assert peak_active == SUBMISSION_ENRICHMENT_CONCURRENCY
-    assert results_client.submission.await_count == len(created_submission_ids)
-
-
-def test_claim_timeout_returns_durable_waiting_status(tmp_path: Path) -> None:
-    web = client(tmp_path, submitter=SlowSubmitter(), timeout=0.05)
-    response = web.post(
-        "/api/claims",
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "waiting_for_commitment"
-
-
-def test_submission_rejects_campaign_mismatch(tmp_path: Path) -> None:
-    web = client(tmp_path)
-    claim = web.post(
-        "/api/claims",
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
-    ).json()
-
-    response = web.post(
-        "/api/submissions",
-        json={
-            "campaign_id": "other-campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-        },
-    )
-
-    assert response.status_code == 400
-    assert "does not match claim campaign" in response.json()["detail"]
+    consumed = restarted.store.receipt(claim["claim_id"])
+    assert consumed is not None
+    assert consumed["status"] == "consumed"
+    assert consumed["consumed_by_submission_id"] == submission["submission_id"]

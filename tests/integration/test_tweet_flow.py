@@ -41,7 +41,7 @@ from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 CAMPAIGN_ID = "fixture-campaign"
 CREATOR_X_ID = "456"
 TWEET_ID = "999"
-INTERNAL_TOKEN = "test-internal-token-that-is-at-least-32-chars"  # noqa: S105
+INTERNAL_TOKEN = "a" * 64
 DRAFT = (
     "I spent a week testing the wallet. Fast confirmations help, but the recovery flow "
     "is what won me over. #Launch"
@@ -146,6 +146,47 @@ class CampaignSource:
 
     async def close(self) -> None:
         return None
+
+
+class CentralResults:
+    """Central miner API double backed by the same immutable fixture campaign."""
+
+    def __init__(self, campaign: CampaignRecord) -> None:
+        self.campaign_source = campaign
+
+    def _campaign(self) -> dict[str, object]:
+        exclusive = self.campaign_source.access.exclusive_miner_hotkey is not None
+        return {
+            "campaign_id": self.campaign_source.access.campaign_id,
+            "campaign_snapshot_id": "sha256-fixture-snapshot",
+            "ecosystem_ids": list(self.campaign_source.pools),
+            "status": "open",
+            "capabilities": {
+                "can_claim": not exclusive,
+                "can_submit": True,
+                "requires_claim": not exclusive,
+            },
+        }
+
+    async def campaign(self, _campaign_id: str) -> dict[str, object]:
+        return self._campaign()
+
+    async def campaigns(self, _ecosystems=()) -> list[dict[str, object]]:
+        return [self._campaign()]
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, object]:
+        return {
+            "campaign_id": campaign_id,
+            "creator_x_id": creator_x_id,
+            "eligible": True,
+            "claim_eligible": True,
+        }
+
+    async def submission(self, submission_id: str) -> dict[str, object]:
+        return {"submission_id": submission_id, "status": "verification_pending"}
+
+    async def submissions(self, **_filters) -> list[dict[str, object]]:
+        return []
 
 
 class CapturingPublisher:
@@ -259,6 +300,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         MinerSdk(engine),
         CampaignSource(campaign),  # type: ignore[arg-type]
         commit_timeout_seconds=5,
+        results_client=CentralResults(campaign),  # type: ignore[arg-type]
     )
 
     async def authorize_validator(hotkey: str) -> bool:
@@ -279,7 +321,8 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         claim_id = None
         if not exclusive:
             claim_response = await control_client.post(
-                "/api/claims",
+                "/api/v1/claims",
+                headers={"Idempotency-Key": "fixture-claim-0001"},
                 json={
                     "campaign_id": CAMPAIGN_ID,
                     "creator_x_id": CREATOR_X_ID,
@@ -288,15 +331,17 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
             )
             assert claim_response.status_code == 200
             claim = claim_response.json()
-            assert claim["status"] == "safe_to_post"
+            assert claim["usability"]["safe_to_post"] is True
             claim_id = claim["claim_id"]
 
         submission_response = await control_client.post(
-            "/api/submissions",
+            "/api/v1/submissions",
+            headers={"Idempotency-Key": "fixture-submission-0001"},
             json={
                 "campaign_id": CAMPAIGN_ID,
                 "tweet_id": TWEET_ID,
                 "claim_id": claim_id,
+                "creator_x_id": CREATOR_X_ID,
             },
         )
         assert submission_response.status_code == 200
@@ -305,7 +350,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
 
         await engine.commit_ready(force=True)
         status_response = await control_client.get(
-            f"/api/submissions/{submission['submission_id']}"
+            f"/api/v1/submissions/{submission['submission_id']}"
         )
         assert status_response.json()["status"] == "verification_pending"
 

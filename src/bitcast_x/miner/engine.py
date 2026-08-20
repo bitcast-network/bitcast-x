@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from bitcast_x.errors import ChainOperationError, ProtocolError
-from bitcast_x.miner.store import EventStatus, MinerStore
+from bitcast_x.miner.store import EventStatus, MinerStore, OperationMetadata
 from bitcast_x.protocol import (
     ClaimEvent,
     CommitmentEnvelope,
@@ -95,12 +95,19 @@ class MinerEngine:
         self.policy = policy or BatchPolicy()
         self._commit_lock = asyncio.Lock()
 
-    def enqueue(self, event: ProtocolEvent, *, reveal: DraftReveal | None = None) -> None:
+    def enqueue(
+        self,
+        event: ProtocolEvent,
+        *,
+        reveal: DraftReveal | None = None,
+        metadata: OperationMetadata | None = None,
+    ) -> str:
         """Durably queue a protocol event."""
 
-        self.store.enqueue(
+        return self.store.enqueue(
             event,
             reveal=reveal,
+            metadata=metadata,
             max_pending_events=self.policy.max_pending_events,
             max_pending_bytes=self.policy.max_pending_bytes,
         )
@@ -205,7 +212,14 @@ class MinerSdk:
         self.engine = engine
         self._qualification_provider = qualification_provider
 
-    def create_claim(self, *, campaign_id: str, creator_x_id: str, draft: str) -> str:
+    def create_claim(
+        self,
+        *,
+        campaign_id: str,
+        creator_x_id: str,
+        draft: str,
+        metadata: OperationMetadata | None = None,
+    ) -> str:
         """Queue a private draft claim and return its random claim id."""
 
         claim_id = secrets.token_hex(16)
@@ -221,8 +235,7 @@ class MinerSdk:
             created_at=datetime.now(UTC),
             draft_commitment=reveal.commitment(),
         )
-        self.engine.enqueue(claim, reveal=reveal)
-        return claim_id
+        return self.engine.enqueue(claim, reveal=reveal, metadata=metadata)
 
     def claim_status(self, claim_id: str) -> EventStatus | None:
         """Return the current creator-facing claim status."""
@@ -235,6 +248,7 @@ class MinerSdk:
         campaign_id: str,
         tweet_id: str,
         claim_id: str | None,
+        metadata: OperationMetadata | None = None,
     ) -> str:
         """Queue a completed tweet mapping and return its submission id."""
 
@@ -259,8 +273,7 @@ class MinerSdk:
             claim_id=claim_id,
             miner_hotkey=self.engine.miner_hotkey,
         )
-        self.engine.enqueue(submission)
-        return submission_id
+        return self.engine.enqueue(submission, metadata=metadata)
 
     def submission_status(self, submission_id: str) -> EventStatus | None:
         """Return the current platform-facing submission status."""

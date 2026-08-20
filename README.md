@@ -142,10 +142,11 @@ versions with `bitcast-x state-info`. Compare independent validators using the d
 from `bitcast-x shadow-report`.
 
 Platforms can run the same miner as an authenticated, single-writer service with
-`bitcast-x run-miner-api`. It exposes generic `/api/campaigns`, `/api/qualification`,
-`/api/claims`, and `/api/submissions` control routes alongside the signed validator batch protocol
-on the same port.
-Configure a 32-character-or-longer
+`bitcast-x run-miner-api`. Its versioned `/api/v1` surface covers qualification, enabled
+ecosystems, protocol-v2 campaigns, creator eligibility, idempotent claims, submissions, campaign
+results, and total USD reward recommendations. OpenAPI is available at `/api/v1/docs`; the signed
+validator batch protocol remains on the same port.
+Configure a 64-character-or-longer
 `BITCAST_X_MINER_API_TOKEN`; control routes require it as a bearer token, while validator routes
 continue to use Bittensor hotkey authentication. The command contains no platform branding,
 user/session logic, payment policy, or deployment-provider assumptions.
