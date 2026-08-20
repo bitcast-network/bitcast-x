@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from bitcast_x.campaigns import CampaignRecord
 from bitcast_x.miner import BatchPolicy, FinalizedCommitment, MinerEngine, MinerSdk, MinerStore
 from bitcast_x.miner.api import create_control_app
-from bitcast_x.miner.control import MinerControlService
+from bitcast_x.miner.control import SUBMISSION_ENRICHMENT_CONCURRENCY, MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
 from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
 from bitcast_x.transport import BatchPageRequest, create_miner_app
@@ -229,6 +229,49 @@ async def test_submission_list_retains_local_rows_when_result_lookup_fails(
             "created_ns": submissions[0]["created_ns"],
         }
     ]
+
+
+async def test_submission_results_are_enriched_with_bounded_concurrency(tmp_path: Path) -> None:
+    engine = MinerEngine(
+        miner_hotkey=MINER,
+        store=MinerStore(tmp_path / "miner.sqlite3"),
+        submitter=Submitter(),
+        policy=BatchPolicy(max_age_seconds=5),
+    )
+    sdk = MinerSdk(engine)
+    created_submission_ids = [
+        sdk.submit_tweet(campaign_id="campaign", tweet_id=str(1_000 + index), claim_id=None)
+        for index in range(SUBMISSION_ENRICHMENT_CONCURRENCY + 4)
+    ]
+    durable_submission_ids = [str(submission["submission_id"]) for submission in sdk.submissions()]
+
+    active = 0
+    peak_active = 0
+
+    async def result(submission_id: str) -> dict[str, object]:
+        nonlocal active, peak_active
+        active += 1
+        peak_active = max(peak_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {"submission_id": submission_id, "status": "attributed"}
+
+    results_client = AsyncMock()
+    results_client.submission.side_effect = result
+    service = MinerControlService(
+        sdk,
+        Feed(),  # type: ignore[arg-type]
+        5,
+        results_client=results_client,
+    )
+
+    submissions = await service.submissions()
+
+    assert set(durable_submission_ids) == set(created_submission_ids)
+    assert [submission["submission_id"] for submission in submissions] == durable_submission_ids
+    assert all(submission["status"] == "attributed" for submission in submissions)
+    assert peak_active == SUBMISSION_ENRICHMENT_CONCURRENCY
+    assert results_client.submission.await_count == len(created_submission_ids)
 
 
 def test_claim_timeout_returns_durable_waiting_status(tmp_path: Path) -> None:
