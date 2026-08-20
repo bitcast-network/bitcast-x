@@ -5,6 +5,7 @@ from hmac import compare_digest
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -104,6 +105,10 @@ def create_control_app(
             code = "idempotency_conflict"
         elif "miner is not qualified" in message:
             code = "miner_not_qualified"
+        elif "campaign is not available" in message:
+            code = "campaign_not_found"
+        elif "claim_id does not belong" in message:
+            code = "claim_not_found"
         elif "not eligible" in message:
             code = "creator_not_eligible"
         elif "not safe" in message:
@@ -117,7 +122,36 @@ def create_control_app(
             status_code = 409
         elif code == "miner_not_qualified":
             status_code = 403
+        elif code in {"campaign_not_found", "claim_not_found"}:
+            status_code = 404
         return JSONResponse(status_code=status_code, content=_error(code, message))
+
+    @app.exception_handler(HTTPException)
+    async def http_error(_request: Request, error: HTTPException) -> JSONResponse:
+        message = str(error.detail)
+        code = "invalid_request"
+        if error.status_code == 404:
+            if "campaign" in message:
+                code = "campaign_not_found"
+            elif "claim" in message:
+                code = "claim_not_found"
+            elif "submission" in message:
+                code = "submission_not_found"
+        return JSONResponse(
+            status_code=error.status_code,
+            content=_error(code, message),
+            headers=error.headers,
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(
+        _request: Request,
+        _error_detail: RequestValidationError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content=_error("invalid_request", "Request validation failed."),
+        )
 
     @app.get("/api/v1/qualification")
     async def qualification(current: Service) -> dict[str, object]:

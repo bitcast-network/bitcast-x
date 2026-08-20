@@ -120,6 +120,27 @@ class Results:
         return []
 
 
+class DirectResults(Results):
+    """Central double for an exclusive protocol-v2 direct campaign."""
+
+    campaign_record = {
+        **Results.campaign_record,
+        "protocol": {"version": 2, "submission_mode": "direct"},
+        "access": {"mode": "exclusive", "exclusive_miner_hotkey": MINER},
+        "capabilities": {
+            **Results.campaign_record["capabilities"],
+            "can_claim": False,
+            "requires_claim": False,
+            "is_exclusive_to_this_miner": True,
+        },
+    }
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        result = await super().eligibility(campaign_id, creator_x_id)
+        result["claim_eligible"] = False
+        return result
+
+
 class FakeNotFoundResponse:
     status_code = 404
 
@@ -272,8 +293,76 @@ def test_claim_and_submission_are_durable_and_recoverable(tmp_path: Path) -> Non
 
     assert submission.status_code == 200
     assert submission.json()["status"] == "tweet_received"
+    assert submission.json()["claim_commitment"]["status"] == "finalized"
+    assert submission.json()["submission_commitment"]["status"] == "queued"
+    assert (
+        submission.json()["claim_commitment"]["batch_hash"]
+        != submission.json()["submission_commitment"]["batch_hash"]
+    )
     assert web.get("/api/v1/claims").json()["items"][0]["claim_id"] == claim["claim_id"]
     assert web.get("/api/v1/submissions").json()["items"][0]["tweet_id"] == "999"
+
+
+def test_preclaim_submission_remains_pinned_to_claim_snapshot(tmp_path: Path) -> None:
+    results = Results()
+    web = build_client(tmp_path, results_client=results)
+    claim = _claim(web)
+    results.campaign_record = {
+        **results.campaign_record,
+        "campaign_snapshot_id": "sha256-new-snapshot",
+    }
+
+    submission = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={
+            "campaign_id": "campaign",
+            "tweet_id": "999",
+            "claim_id": claim["claim_id"],
+            "creator_x_id": "123",
+        },
+    )
+
+    assert submission.status_code == 200
+    assert submission.json()["campaign_snapshot_id"] == "sha256-snapshot"
+
+
+def test_direct_submission_enforces_creator_eligibility(tmp_path: Path) -> None:
+    class IneligibleDirectResults(DirectResults):
+        async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+            result = await super().eligibility(campaign_id, creator_x_id)
+            result.update(
+                eligible=False,
+                eligible_if_published_now=False,
+                eligible_ecosystems=[],
+                badges=[],
+                reason="creator_not_eligible",
+            )
+            return result
+
+    rejected_path = tmp_path / "rejected"
+    rejected_path.mkdir()
+    rejected = build_client(rejected_path, results_client=IneligibleDirectResults())
+    response = rejected.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "creator_not_eligible"
+
+    accepted_path = tmp_path / "accepted"
+    accepted_path.mkdir()
+    accepted = build_client(accepted_path, results_client=DirectResults())
+    response = accepted.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["claim_id"] is None
 
 
 def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path) -> None:
@@ -308,6 +397,34 @@ def test_submission_requires_matching_safe_claim_and_creator(tmp_path: Path) -> 
 
     assert response.status_code == 400
     assert "creator" in response.json()["error"]["message"]
+
+
+def test_not_found_and_validation_errors_use_stable_envelope(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+
+    campaign = web.get("/api/v1/campaigns/missing")
+    claim = web.get("/api/v1/claims/does-not-exist")
+    submission = web.get("/api/v1/submissions/does-not-exist")
+    validation = web.post(
+        "/api/v1/claims",
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "private"},
+    )
+
+    assert campaign.status_code == 404
+    assert campaign.json()["error"]["code"] == "campaign_not_found"
+    assert claim.status_code == 404
+    assert claim.json()["error"]["code"] == "claim_not_found"
+    assert submission.status_code == 404
+    assert submission.json()["error"]["code"] == "submission_not_found"
+    assert validation.status_code == 422
+    assert validation.json() == {
+        "error": {
+            "code": "invalid_request",
+            "message": "Request validation failed.",
+            "retryable": False,
+        }
+    }
+    assert "private" not in validation.text
 
 
 def test_claim_timeout_returns_durable_pending_resource(tmp_path: Path) -> None:

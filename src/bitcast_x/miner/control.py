@@ -179,7 +179,9 @@ class MinerControlService:
 
         await self._require_qualified()
         campaign = await self.campaign(campaign_id)
-        if campaign is None or not campaign.get("capabilities", {}).get("can_claim", False):
+        if campaign is None:
+            raise ProtocolError("campaign is not available to this miner")
+        if not campaign.get("capabilities", {}).get("can_claim", False):
             raise ProtocolError("campaign does not accept claims")
         eligibility = await self.eligibility(campaign_id, creator_x_id)
         if not eligibility.get("claim_eligible", False):
@@ -225,13 +227,17 @@ class MinerControlService:
 
         await self._require_qualified()
         campaign = await self.campaign(campaign_id)
-        if campaign is None or not campaign.get("capabilities", {}).get("can_submit", False):
+        if campaign is None:
+            raise ProtocolError("campaign is not available to this miner")
+        if not campaign.get("capabilities", {}).get("can_submit", False):
             raise ProtocolError("campaign does not accept submissions")
         requires_claim = bool(campaign.get("capabilities", {}).get("requires_claim", True))
         if requires_claim and claim_id is None:
             raise ProtocolError("campaign requires a safe pre-publication claim")
         if not requires_claim and claim_id is not None:
             raise ProtocolError("direct campaign submissions must not include a claim")
+        operation_snapshot_id = str(campaign["campaign_snapshot_id"])
+        operation_ecosystem_ids = tuple(campaign.get("ecosystem_ids", []))
         if claim_id is not None:
             claim = self.claim_status(claim_id)
             if claim is None:
@@ -242,6 +248,12 @@ class MinerControlService:
                 raise ProtocolError("claim creator does not match submission creator")
             if not claim.get("usability", {}).get("safe_to_post", False):
                 raise ProtocolError("claim is not safe to post")
+            operation_snapshot_id = str(claim["campaign_snapshot_id"])
+            operation_ecosystem_ids = tuple(claim.get("ecosystem_ids", []))
+        else:
+            eligibility = await self.eligibility(campaign_id, creator_x_id)
+            if not eligibility.get("eligible_if_published_now", False):
+                raise ProtocolError("creator is not eligible to submit to this campaign")
 
         metadata = OperationMetadata(
             idempotency_key=idempotency_key,
@@ -254,8 +266,8 @@ class MinerControlService:
                     "external_id": external_id,
                 }
             ),
-            campaign_snapshot_id=str(campaign["campaign_snapshot_id"]),
-            ecosystem_ids=tuple(campaign.get("ecosystem_ids", [])),
+            campaign_snapshot_id=operation_snapshot_id,
+            ecosystem_ids=operation_ecosystem_ids,
             creator_x_id=creator_x_id,
             external_id=external_id,
         )
@@ -321,8 +333,13 @@ class MinerControlService:
         )
         return [self._claim_resource(receipt) for receipt in receipts]
 
-    @staticmethod
-    def _submission_resource(receipt: dict[str, object]) -> dict[str, Any]:
+    def _submission_resource(self, receipt: dict[str, object]) -> dict[str, Any]:
+        claim_commitment = None
+        claim_id = receipt["claim_id"]
+        if claim_id is not None:
+            claim = self.sdk.engine.store.receipt(str(claim_id))
+            if claim is not None and claim["kind"] == "claim":
+                claim_commitment = claim["commitment"]
         return {
             "submission_id": receipt["submission_id"],
             "external_id": receipt["external_id"],
@@ -330,9 +347,10 @@ class MinerControlService:
             "campaign_snapshot_id": receipt["campaign_snapshot_id"],
             "ecosystem_ids": receipt["ecosystem_ids"],
             "tweet_id": receipt["tweet_id"],
-            "claim_id": receipt["claim_id"],
+            "claim_id": claim_id,
             "creator": {"submitted_x_id": receipt["creator_x_id"]},
             "status": receipt["status"],
+            "claim_commitment": claim_commitment,
             "submission_commitment": receipt["commitment"],
             "created_at": _timestamp(int(str(receipt["created_ns"]))),
             "updated_at": _timestamp(int(str(receipt["updated_ns"]))),

@@ -180,6 +180,7 @@ class CentralResults:
             "creator_x_id": creator_x_id,
             "eligible": True,
             "claim_eligible": True,
+            "eligible_if_published_now": True,
         }
 
     async def submission(self, submission_id: str) -> dict[str, object]:
