@@ -92,6 +92,20 @@ class Results:
             "eligible": True,
             "claim_eligible": True,
             "eligible_if_published_now": True,
+            "eligible_ecosystems": [
+                {"ecosystem_id": "tao", "eligible": True, "rank": 7, "cutoff": 100},
+                {
+                    "ecosystem_id": "hyperliquid",
+                    "eligible": True,
+                    "rank": 11,
+                    "cutoff": 100,
+                },
+            ],
+            "badges": [
+                {"ecosystem_id": "tao", "label": "TAO"},
+                {"ecosystem_id": "hyperliquid", "label": "Hyperliquid"},
+            ],
+            "reason": "eligible",
         }
 
     async def campaign_tweets(
@@ -121,6 +135,7 @@ def build_client(
     timeout: float = 5,
     enabled_ecosystems: tuple[str, ...] = ("tao", "hyperliquid"),
     qualified: bool = True,
+    results_client: Results | None = None,
 ) -> TestClient:
     engine = MinerEngine(
         miner_hotkey=MINER,
@@ -139,7 +154,7 @@ def build_client(
         MinerSdk(engine, qualification_provider=qualification),
         Feed(),
         timeout,
-        results_client=Results(),  # type: ignore[arg-type]
+        results_client=results_client or Results(),  # type: ignore[arg-type]
         enabled_ecosystem_ids=enabled_ecosystems,
     )
     protocol = create_miner_app(
@@ -196,6 +211,43 @@ def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> N
     rejected = web.get("/api/v1/campaigns?ecosystem_id=hyperliquid")
     assert rejected.status_code == 400
     assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"
+
+
+def test_eligibility_cannot_expand_beyond_enabled_ecosystems(tmp_path: Path) -> None:
+    class HyperliquidOnlyEligibility(Results):
+        async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+            result = await super().eligibility(campaign_id, creator_x_id)
+            result["eligible_ecosystems"][0]["eligible"] = False
+            result["badges"] = [
+                {"ecosystem_id": "hyperliquid", "label": "Hyperliquid"},
+            ]
+            return result
+
+    web = build_client(
+        tmp_path,
+        enabled_ecosystems=("tao",),
+        results_client=HyperliquidOnlyEligibility(),
+    )
+
+    eligibility = web.get("/api/v1/campaigns/campaign/eligibility/123")
+
+    assert eligibility.status_code == 200
+    assert eligibility.json()["eligible"] is False
+    assert eligibility.json()["claim_eligible"] is False
+    assert eligibility.json()["eligible_if_published_now"] is False
+    assert eligibility.json()["eligible_ecosystems"] == [
+        {"ecosystem_id": "tao", "eligible": False, "rank": 7, "cutoff": 100}
+    ]
+    assert eligibility.json()["badges"] == []
+    assert eligibility.json()["reason"] == "creator_not_eligible"
+
+    claim = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-key-0001"},
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
+    )
+    assert claim.status_code == 400
+    assert claim.json()["error"]["code"] == "creator_not_eligible"
 
 
 def test_claim_and_submission_are_durable_and_recoverable(tmp_path: Path) -> None:

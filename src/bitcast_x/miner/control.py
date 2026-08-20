@@ -127,7 +127,30 @@ class MinerControlService:
             raise ProtocolError("campaign is not available to this miner")
         if self.results_client is None:
             raise ProtocolError("central eligibility service is unavailable")
-        return await self.results_client.eligibility(campaign_id, creator_x_id)
+        result = dict(await self.results_client.eligibility(campaign_id, creator_x_id))
+        enabled = set(self.enabled_ecosystem_ids)
+        if not enabled:
+            return result
+
+        evidence = [
+            item
+            for item in result.get("eligible_ecosystems", [])
+            if item.get("ecosystem_id") in enabled
+        ]
+        badges = [item for item in result.get("badges", []) if item.get("ecosystem_id") in enabled]
+        eligible_in_enabled_ecosystem = any(item.get("eligible", False) for item in evidence)
+        result["eligible_ecosystems"] = evidence
+        result["badges"] = badges
+        result["eligible"] = bool(result.get("eligible")) and eligible_in_enabled_ecosystem
+        result["claim_eligible"] = (
+            bool(result.get("claim_eligible")) and eligible_in_enabled_ecosystem
+        )
+        result["eligible_if_published_now"] = (
+            bool(result.get("eligible_if_published_now")) and eligible_in_enabled_ecosystem
+        )
+        if not eligible_in_enabled_ecosystem and result.get("reason") == "eligible":
+            result["reason"] = "creator_not_eligible"
+        return result
 
     async def campaign_tweets(
         self,
