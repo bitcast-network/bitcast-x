@@ -99,6 +99,8 @@ def create_control_app(
         code = "invalid_request"
         if "idempotency key" in message:
             code = "idempotency_conflict"
+        elif "miner is not qualified" in message:
+            code = "miner_not_qualified"
         elif "not eligible" in message:
             code = "creator_not_eligible"
         elif "not safe" in message:
@@ -107,10 +109,12 @@ def create_control_app(
             code = "ecosystem_not_enabled"
         elif "capacity" in message:
             code = "queue_capacity_exhausted"
-        return JSONResponse(
-            status_code=409 if code == "idempotency_conflict" else 400,
-            content=_error(code, message),
-        )
+        status_code = 400
+        if code == "idempotency_conflict":
+            status_code = 409
+        elif code == "miner_not_qualified":
+            status_code = 403
+        return JSONResponse(status_code=status_code, content=_error(code, message))
 
     @app.get("/api/v1/qualification")
     async def qualification(current: Service) -> dict[str, object]:

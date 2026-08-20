@@ -45,6 +45,14 @@ class MinerControlService:
     results_client: MinerResultsClient | None = None
     enabled_ecosystem_ids: tuple[str, ...] = ()
 
+    async def _require_qualified(self) -> None:
+        """Fail before accepting creator operations an unqualified miner cannot earn from."""
+
+        status = await self.sdk.qualification_status()
+        if not status.get("eligible", False):
+            reason = status.get("reason", "unknown")
+            raise ProtocolError(f"miner is not qualified: {reason}")
+
     def _ecosystems(self, requested: tuple[str, ...] = ()) -> tuple[str, ...]:
         configured = set(self.enabled_ecosystem_ids)
         if requested and configured and not set(requested).issubset(configured):
@@ -146,6 +154,7 @@ class MinerControlService:
     ) -> dict[str, Any]:
         """Validate, persist, and commit a pre-publication claim."""
 
+        await self._require_qualified()
         campaign = await self.campaign(campaign_id)
         if campaign is None or not campaign.get("capabilities", {}).get("can_claim", False):
             raise ProtocolError("campaign does not accept claims")
@@ -191,6 +200,7 @@ class MinerControlService:
     ) -> dict[str, Any]:
         """Validate and durably accept a published tweet mapping."""
 
+        await self._require_qualified()
         campaign = await self.campaign(campaign_id)
         if campaign is None or not campaign.get("capabilities", {}).get("can_submit", False):
             raise ProtocolError("campaign does not accept submissions")

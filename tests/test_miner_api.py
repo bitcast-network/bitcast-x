@@ -120,6 +120,7 @@ def build_client(
     submitter: Submitter | None = None,
     timeout: float = 5,
     enabled_ecosystems: tuple[str, ...] = ("tao", "hyperliquid"),
+    qualified: bool = True,
 ) -> TestClient:
     engine = MinerEngine(
         miner_hotkey=MINER,
@@ -127,8 +128,15 @@ def build_client(
         submitter=submitter or Submitter(),
         policy=BatchPolicy(max_age_seconds=5),
     )
+
+    async def qualification() -> dict[str, object]:
+        return {
+            "eligible": qualified,
+            "reason": "eligible" if qualified else "conviction_below_minimum",
+        }
+
     service = MinerControlService(
-        MinerSdk(engine),
+        MinerSdk(engine, qualification_provider=qualification),
         Feed(),
         timeout,
         results_client=Results(),  # type: ignore[arg-type]
@@ -256,6 +264,20 @@ def test_claim_timeout_returns_durable_pending_resource(tmp_path: Path) -> None:
     assert claim["commitment"]["status"] == "queued"
     assert claim["usability"]["status"] == "pending"
     assert claim["usability"]["safe_to_post"] is False
+
+
+def test_unqualified_miner_cannot_create_operations(tmp_path: Path) -> None:
+    web = build_client(tmp_path, qualified=False)
+
+    response = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-key-0001"},
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "miner_not_qualified"
+    assert web.get("/api/v1/claims").json()["items"] == []
 
 
 def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) -> None:

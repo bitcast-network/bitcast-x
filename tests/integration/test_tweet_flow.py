@@ -296,8 +296,12 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         submitter=chain,
         policy=BatchPolicy(max_age_seconds=5),
     )
+
+    async def qualification() -> dict[str, object]:
+        return {"eligible": True, "reason": "eligible"}
+
     service = MinerControlService(
-        MinerSdk(engine),
+        MinerSdk(engine, qualification_provider=qualification),
         CampaignSource(campaign),  # type: ignore[arg-type]
         commit_timeout_seconds=5,
         results_client=CentralResults(campaign),  # type: ignore[arg-type]
