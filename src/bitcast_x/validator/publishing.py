@@ -13,6 +13,7 @@ from bitcast_x.protocol import AttributionReason, AttributionResult
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
 from bitcast_x.rewards import RewardDecision, TweetReward
 from bitcast_x.validator.preview import PreviewStore
+from bitcast_x.validator.rewards import preview_performance_rewards
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
 
@@ -56,9 +57,10 @@ class ShadowResultPublisher:
         if not publishable_attributions:
             return False
         now = datetime.now(UTC)
+        preview_rewards = preview_performance_rewards(campaign, scored)
         payload = create_brief_tweets_payload(
             campaign,
-            [],
+            preview_rewards,
             {(item.attribution.campaign_id, item.attribution.tweet_id): item for item in scored},
             hotkey_to_uid,
             attributions=publishable_attributions,
@@ -234,7 +236,7 @@ def create_brief_tweets_payload(
             raise ProtocolError(
                 f"rewarded tweet {tweet.tweet_id} has no unambiguous registered miner"
             )
-        if reward is not None and uid is not None:
+        if reward is not None and reward.daily_usd_floor > 0 and uid is not None:
             uid_targets[uid] += reward.daily_usd_floor
         daily_floor = reward.daily_usd_floor if reward is not None else 0.0
         tweets.append(

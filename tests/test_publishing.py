@@ -100,10 +100,12 @@ def scored() -> ScoredAttribution:
             author="alice",
             favorite_count=4,
             retweet_count=2,
+            views_count=100,
         ),
         score=23.05,
         author_influence=10.0,
         baseline_score=20.0,
+        author_followers_count=10,
         details=(
             EngagementContribution(
                 username="bob",
@@ -324,6 +326,49 @@ async def test_preview_omits_accepted_tweet_when_its_scoring_evidence_is_unavail
     decisions = payload["attribution_decisions"]
     assert isinstance(decisions, list)
     assert [item["tweet_id"] for item in decisions] == ["123", "125"]
+
+
+@pytest.mark.asyncio
+async def test_preview_publishes_performance_breakdown_without_payment_targets(
+    tmp_path: Path,
+) -> None:
+    snapshot = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign(),),
+        ecosystem_maps=(),
+    )
+    data_publisher = CapturingDataPublisher()
+    publisher = ShadowResultPublisher(
+        ValidatorStore(tmp_path / "validator.sqlite3"),
+        data_publisher,  # type: ignore[arg-type]
+        endpoint="https://ingestion.example/api/v1/brief-tweets",
+    )
+
+    published = await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=50,
+        hotkey_to_uid={MINER: 7},
+    )
+
+    assert published is True
+    payload = data_publisher.payloads[0]
+    tweet = payload["tweets"][0]  # type: ignore[index]
+    assert tweet["performance_bonus_pct"] == 20.0
+    assert tweet["performance_bonus_breakdown"] == {
+        "views": 5.0,
+        "views_per_follower": 5.0,
+        "total_engagements": 5.0,
+        "engagement_per_view": 5.0,
+    }
+    assert tweet["score"] == pytest.approx(27.66)
+    assert tweet["usd_target"] == 0.0
+    assert tweet["total_usd_target"] == 0.0
+    assert payload["summary"]["total_usd_target"] == 0.0  # type: ignore[index]
+    assert payload["summary"]["uid_usd_targets"] == {}  # type: ignore[index]
 
 
 @pytest.mark.asyncio

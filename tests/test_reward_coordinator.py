@@ -5,7 +5,7 @@ from pathlib import Path
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap
 from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
-from bitcast_x.validator.rewards import RewardCoordinator
+from bitcast_x.validator.rewards import RewardCoordinator, preview_performance_rewards
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet
@@ -140,6 +140,66 @@ def test_outside_emission_window_burns_without_provisional_payment(tmp_path: Pat
 
     assert weights == {0: 1.0, 1: 0.0}
     assert floors == []
+
+
+def test_preview_performance_rewards_are_zero_dollar_and_respect_current_cap() -> None:
+    campaign = record("campaign").model_copy(update={"max_tweets_per_creator": 1})
+    lower = scored("campaign", "1", MINER_A).model_copy(
+        update={
+            "tweet": scored("campaign", "1", MINER_A).tweet.model_copy(
+                update={
+                    "author_x_id": "creator",
+                    "author": "alice",
+                    "views_count": 100,
+                    "favorite_count": 5,
+                }
+            ),
+            "author_followers_count": 100,
+        }
+    )
+    higher = scored("campaign", "2", MINER_A).model_copy(
+        update={
+            "tweet": scored("campaign", "2", MINER_A).tweet.model_copy(
+                update={
+                    "author_x_id": "creator",
+                    "author": "alice",
+                    "views_count": 1_000,
+                    "favorite_count": 100,
+                }
+            ),
+            "score": 20.0,
+            "author_followers_count": 100,
+        }
+    )
+
+    rewards = preview_performance_rewards(campaign, [lower, higher])
+
+    assert [item.tweet_id for item in rewards] == ["2"]
+    assert rewards[0].daily_usd_floor == 0.0
+    assert rewards[0].performance_bonus_pct == 20.0
+    assert rewards[0].performance_bonus_breakdown == {
+        "views": 5.0,
+        "views_per_follower": 5.0,
+        "total_engagements": 5.0,
+        "engagement_per_view": 5.0,
+    }
+
+
+def test_preview_performance_rewards_distinguish_zero_metrics_from_no_reward() -> None:
+    campaign = record("campaign")
+    passing = scored("campaign", "1", MINER_A)
+    failed = scored("campaign", "2", MINER_A).model_copy(update={"meets_brief": False})
+
+    rewards = preview_performance_rewards(campaign, [passing, failed])
+
+    assert [item.tweet_id for item in rewards] == ["1"]
+    assert rewards[0].performance_bonus_pct == 0.0
+    assert rewards[0].performance_bonus_breakdown == {
+        "views": 0.0,
+        "views_per_follower": 0.0,
+        "total_engagements": 0.0,
+        "engagement_per_view": 0.0,
+    }
 
 
 def test_same_tweet_is_globally_assigned_once_with_duplicate_reason(tmp_path: Path) -> None:
