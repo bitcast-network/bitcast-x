@@ -192,6 +192,7 @@ def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> N
 
     assert campaigns[0]["campaign_id"] == "campaign"
     assert [item["ecosystem_id"] for item in ecosystems] == ["tao"]
+    assert web.get("/api/v1/campaigns").headers["cache-control"] == "no-store"
     rejected = web.get("/api/v1/campaigns?ecosystem_id=hyperliquid")
     assert rejected.status_code == 400
     assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"

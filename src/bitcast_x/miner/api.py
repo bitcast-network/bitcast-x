@@ -89,9 +89,12 @@ def create_control_app(
                 return JSONResponse(
                     status_code=401,
                     content=_error("invalid_authentication", "Invalid or missing credentials."),
-                    headers={"WWW-Authenticate": "Bearer"},
+                    headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"},
                 )
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/api/v1/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(BitcastXError)
     async def protocol_error(_request: Request, error: BitcastXError) -> JSONResponse:
