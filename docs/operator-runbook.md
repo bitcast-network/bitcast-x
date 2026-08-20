@@ -56,9 +56,11 @@ New preclaim submissions receive a replaceable pre-close verification preview. P
 engagement evidence is stored separately from consensus state and uses the v2 refresh schedule:
 hourly for tweets under one hour old, every four hours until 24 hours old, and daily thereafter.
 Unavailable evidence is retried no more than once per minute, and unchanged preview payloads are
-not republished. Preview caching never feeds final economics: the first post-close scoring pass
-always fetches fresh evidence before freezing rewards. Frozen legacy campaigns contribute no
-further search or scoring calls.
+not republished. Preview rows include mutable performance-bonus percentages and breakdowns for the
+currently selected campaign tweets, but their USD targets remain zero and featured bonuses are not
+selected. Preview caching and bonuses never feed final economics: the first post-close scoring pass
+always fetches fresh evidence before assigning tweets and freezing rewards. Frozen legacy campaigns
+contribute no further search or scoring calls.
 
 ## Runtime contract
 

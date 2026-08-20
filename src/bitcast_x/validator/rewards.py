@@ -11,6 +11,7 @@ from bitcast_x.rewards import (
     TweetReward,
     aggregate_productive_weights,
     apply_v2_bonuses,
+    apply_v2_performance_bonus,
     assign_tweets_with_reasons,
     calculate_tweet_floors,
     reward_decisions,
@@ -19,6 +20,47 @@ from bitcast_x.validator.scoring import AttributionScorer, ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
 
 LOGGER = logging.getLogger(__name__)
+
+
+def preview_performance_rewards(
+    campaign: CampaignRecord,
+    scored: list[ScoredAttribution],
+) -> list[TweetReward]:
+    """Build mutable zero-dollar bonus metadata for a pre-close preview.
+
+    Preview assignment is intentionally scoped to the current campaign. It
+    applies the campaign's per-creator cap and performance formula without
+    freezing global assignment, featured selection, or payout economics.
+    """
+
+    candidate = RewardCampaign(
+        campaign_id=campaign.access.campaign_id,
+        reward_pool_usd=float(campaign.reward_pool_usd),
+        max_tweets_per_creator=campaign.max_tweets_per_creator,
+        tweets=tuple(
+            _reward_tweet(campaign, item)
+            for item in scored
+            if item.attribution.campaign_id == campaign.access.campaign_id
+            and item.attribution.miner_hotkey is not None
+            and item.meets_brief
+        ),
+    )
+    assigned = assign_tweets_with_reasons([candidate]).assigned[candidate.campaign_id]
+    adjusted = apply_v2_performance_bonus(candidate, assigned)
+    return [
+        TweetReward(
+            campaign_id=item.campaign_id,
+            tweet_id=item.tweet_id,
+            creator_x_id=item.creator_x_id,
+            miner_hotkey=item.miner_hotkey,
+            score=item.score,
+            daily_usd_floor=0.0,
+            performance_bonus_pct=item.performance_bonus_pct,
+            performance_bonus_breakdown=item.performance_bonus_breakdown,
+        )
+        for item in adjusted.tweets
+        if item.tweet_id in assigned
+    ]
 
 
 class RewardCoordinator:
