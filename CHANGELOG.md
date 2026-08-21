@@ -8,8 +8,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Changed
 
-- Prompt version 1 now performs generic brief-instruction compliance, while retired prompt
-  versions 3 and 4 are no longer accepted; versions 2 and 5 remain byte-stable.
+- The generic brief-instruction compliance prompt is available as version 6. Version 1 retains its
+  original byte-stable sponsor evaluation, and retired prompt versions 3 and 4 remain unavailable.
 
 ### Fixed
 

@@ -80,9 +80,10 @@ def completion(verdict: str, summary: str) -> dict[str, Any]:
 
 def test_prompt_versions_have_frozen_hashes() -> None:
     expected = {
-        1: "a0f1bd9de1e43a9bb1a2cfc91b9e78cc82304298b87bb9d4f80c53892e526e57",
+        1: "193ca82cc622774a2cb142bb724378b33fbdbf8ec113cc16778a1153297849a0",
         2: "f2d2d4c2cf16821be3decbf5ae2478ec5ff821abfb7cc289b96e106066efbcaf",
         5: "4a079a65ae1e2fdd5bddf3f42d334813d05056d749c3ae04178ecd414f4c5394",
+        6: "a0f1bd9de1e43a9bb1a2cfc91b9e78cc82304298b87bb9d4f80c53892e526e57",
     }
     brief = {"brief": "Talk about Bitcast and tag @bitcast_network"}
 
@@ -104,7 +105,7 @@ def test_generic_prompt_only_checks_instructions_in_the_brief() -> None:
     prompt = generate_brief_evaluation_prompt(
         {"brief": "Explain the launch date and include #Example."},
         "Example launches Friday. #Example",
-        1,
+        6,
     )
 
     assert "follows all instructions in the brief" in prompt
@@ -116,7 +117,7 @@ def test_generic_prompt_only_checks_instructions_in_the_brief() -> None:
 
 @pytest.mark.parametrize("version", [3, 4])
 def test_retired_prompt_versions_are_unavailable(version: int) -> None:
-    with pytest.raises(ValueError, match=r"Available versions: \[1, 2, 5\]"):
+    with pytest.raises(ValueError, match=r"Available versions: \[1, 2, 5, 6\]"):
         generate_brief_evaluation_prompt(
             {"brief": "Talk about Bitcast"},
             "A thoughtful Bitcast post",
@@ -295,5 +296,20 @@ def test_response_parser_preserves_v5_objective_requirements() -> None:
         meets_brief=True,
         reasoning="A specific mixed review.",
         detailed_breakdown='- Req 1: Met — "quick to deploy"',
+        checks_used=1,
+    )
+
+
+def test_response_parser_preserves_v6_instruction_breakdown() -> None:
+    result = parse_brief_evaluation(
+        '## Instruction-by-Instruction\n- Instruction 1: Met — "launches Friday"\n'
+        "## Verdict\nYES\n## Summary\nEvery stated instruction was met.",
+        checks_used=1,
+    )
+
+    assert result == BriefEvaluation(
+        meets_brief=True,
+        reasoning="Every stated instruction was met.",
+        detailed_breakdown='- Instruction 1: Met — "launches Friday"',
         checks_used=1,
     )

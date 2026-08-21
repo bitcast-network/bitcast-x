@@ -105,14 +105,14 @@ def test_campaign_contract_accepts_legacy_null_language_as_noop() -> None:
 
 def test_campaign_contract_only_accepts_supported_prompt_versions() -> None:
     payload = deepcopy(FEED)
-    for supported in (1, 2, 5):
+    for supported in (1, 2, 5, 6):
         payload["campaigns"][0]["prompt_version"] = supported  # type: ignore[index]
         parsed = CampaignFeed.model_validate(payload)
         assert parsed.campaigns[0].prompt_version == supported
 
-    for retired_or_unknown in (3, 4, 6):
+    for retired_or_unknown in (3, 4, 7):
         payload["campaigns"][0]["prompt_version"] = retired_or_unknown  # type: ignore[index]
-        with pytest.raises(ValidationError, match="Input should be 1, 2 or 5"):
+        with pytest.raises(ValidationError, match="Input should be 1, 2, 5 or 6"):
             CampaignFeed.model_validate(payload)
 
 
