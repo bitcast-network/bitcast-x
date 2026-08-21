@@ -80,6 +80,26 @@ class Results:
             return []
         return [self.campaign_record]
 
+    async def leaderboard(
+        self,
+        ecosystem_ids: tuple[str, ...] = (),
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        del limit
+        return {
+            "ecosystem_ids": list(ecosystem_ids),
+            "accounts": [
+                {
+                    "rank": 1,
+                    "username": "creator",
+                    "score": 0.9,
+                    "scores": {"tao": 0.9, "hyperliquid": 0.8},
+                }
+            ],
+            "total_count": 1,
+        }
+
     async def campaign(self, campaign_id: str) -> dict[str, Any]:
         if campaign_id != "campaign":
             raise FakeNotFoundError
@@ -230,6 +250,26 @@ def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> N
     assert [item["ecosystem_id"] for item in ecosystems] == ["tao"]
     assert web.get("/api/v1/campaigns").headers["cache-control"] == "no-store"
     rejected = web.get("/api/v1/campaigns?ecosystem_id=hyperliquid")
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"
+
+
+def test_leaderboard_is_limited_to_enabled_ecosystems(tmp_path: Path) -> None:
+    web = build_client(tmp_path, enabled_ecosystems=("tao",))
+
+    response = web.get("/api/v1/leaderboard?ecosystem_id=tao&limit=25")
+    rejected = web.get("/api/v1/leaderboard?ecosystem_id=hyperliquid")
+
+    assert response.status_code == 200
+    assert response.json()["ecosystem_ids"] == ["tao"]
+    assert response.json()["accounts"] == [
+        {
+            "rank": 1,
+            "username": "creator",
+            "score": 0.9,
+            "scores": {"tao": 0.9},
+        }
+    ]
     assert rejected.status_code == 400
     assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"
 

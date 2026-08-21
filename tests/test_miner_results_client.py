@@ -51,6 +51,34 @@ async def test_repeated_ecosystem_filters_are_canonical_and_signed() -> None:
     ]
 
 
+async def test_leaderboard_signs_ecosystem_filters_and_limit() -> None:
+    signer = Signer()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v2/miners/x/leaderboard"
+        assert request.url.params.multi_items() == [
+            ("ecosystem_id", "tao"),
+            ("limit", "25"),
+        ]
+        return httpx.Response(200, json={"ecosystem_ids": ["tao"], "accounts": []})
+
+    client = MinerResultsClient("https://example.test", signer)
+    await client._client.aclose()  # noqa: SLF001
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url="https://example.test",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        leaderboard = await client.leaderboard(("tao",), limit=25)
+    finally:
+        await client.close()
+
+    assert leaderboard["ecosystem_ids"] == ["tao"]
+    assert signer.messages[0].decode().splitlines()[2] == (
+        "/api/v2/miners/x/leaderboard?ecosystem_id=tao&limit=25"
+    )
+
+
 async def test_submission_collection_uses_owner_endpoint() -> None:
     signer = Signer()
 

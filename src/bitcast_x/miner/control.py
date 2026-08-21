@@ -97,6 +97,41 @@ class MinerControlService:
             )
         ]
 
+    async def leaderboard(
+        self,
+        ecosystem_ids: tuple[str, ...] = (),
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        if self.results_client is None:
+            raise ProtocolError("central leaderboard service is unavailable")
+        selected = self._ecosystems(ecosystem_ids)
+        result = dict(await self.results_client.leaderboard(selected, limit=limit))
+        allowed = set(selected)
+        if not allowed:
+            return result
+
+        accounts: list[dict[str, Any]] = []
+        for account in result.get("accounts", []):
+            scores = {
+                ecosystem_id: score
+                for ecosystem_id, score in account.get("scores", {}).items()
+                if ecosystem_id in allowed
+            }
+            if not scores:
+                continue
+            accounts.append(
+                {
+                    **account,
+                    "rank": len(accounts) + 1,
+                    "score": max(scores.values()),
+                    "scores": scores,
+                }
+            )
+        result["ecosystem_ids"] = list(selected)
+        result["accounts"] = accounts
+        return result
+
     async def campaign(self, campaign_id: str) -> dict[str, Any] | None:
         if self.results_client is not None:
             try:

@@ -82,6 +82,17 @@ class MinerResultsClient:
         )
         return list(body.get("items", []))
 
+    async def leaderboard(
+        self,
+        ecosystem_ids: tuple[str, ...] = (),
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        return await self._get(
+            "/api/v2/miners/x/leaderboard",
+            params=[*self._filters(ecosystem_ids), ("limit", str(limit))],
+        )
+
     async def campaign(self, campaign_id: str) -> dict[str, Any]:
         return await self._get(f"/api/v2/miners/x/campaigns/{campaign_id}")
 

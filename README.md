@@ -143,8 +143,9 @@ from `bitcast-x shadow-report`.
 
 Platforms can run the same miner as an authenticated, single-writer service with
 `bitcast-x run-miner-api`. Its versioned `/api/v1` surface covers qualification, enabled
-ecosystems, protocol-v2 campaigns, creator eligibility, idempotent claims, submissions, campaign
-results, and total USD reward recommendations. OpenAPI is available at `/api/v1/docs`; the signed
+ecosystems, their combined account leaderboard, protocol-v2 campaigns, creator eligibility,
+idempotent claims, submissions, campaign results, and total USD reward recommendations. OpenAPI is
+available at `/api/v1/docs`; the signed
 validator batch protocol remains on the same port.
 Configure a 64-character-or-longer
 `BITCAST_X_MINER_API_TOKEN`; control routes require it as a bearer token, while validator routes
