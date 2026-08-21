@@ -59,6 +59,7 @@ async def test_leaderboard_signs_ecosystem_filters_and_limit() -> None:
         assert request.url.params.multi_items() == [
             ("ecosystem_id", "tao"),
             ("limit", "25"),
+            ("offset", "50"),
         ]
         return httpx.Response(200, json={"ecosystem_ids": ["tao"], "accounts": []})
 
@@ -69,13 +70,13 @@ async def test_leaderboard_signs_ecosystem_filters_and_limit() -> None:
         transport=httpx.MockTransport(handler),
     )
     try:
-        leaderboard = await client.leaderboard(("tao",), limit=25)
+        leaderboard = await client.leaderboard(("tao",), limit=25, offset=50)
     finally:
         await client.close()
 
     assert leaderboard["ecosystem_ids"] == ["tao"]
     assert signer.messages[0].decode().splitlines()[2] == (
-        "/api/v2/miners/x/leaderboard?ecosystem_id=tao&limit=25"
+        "/api/v2/miners/x/leaderboard?ecosystem_id=tao&limit=25&offset=50"
     )
 
 

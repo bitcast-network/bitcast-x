@@ -85,8 +85,9 @@ class Results:
         ecosystem_ids: tuple[str, ...] = (),
         *,
         limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
-        del limit
+        del limit, offset
         return {
             "ecosystem_ids": list(ecosystem_ids),
             "accounts": [
@@ -257,7 +258,7 @@ def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> N
 def test_leaderboard_is_limited_to_enabled_ecosystems(tmp_path: Path) -> None:
     web = build_client(tmp_path, enabled_ecosystems=("tao",))
 
-    response = web.get("/api/v1/leaderboard?ecosystem_id=tao&limit=25")
+    response = web.get("/api/v1/leaderboard?ecosystem_id=tao&limit=25&offset=50")
     rejected = web.get("/api/v1/leaderboard?ecosystem_id=hyperliquid")
 
     assert response.status_code == 200

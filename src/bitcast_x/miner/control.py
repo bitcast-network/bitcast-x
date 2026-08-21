@@ -102,11 +102,18 @@ class MinerControlService:
         ecosystem_ids: tuple[str, ...] = (),
         *,
         limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         if self.results_client is None:
             raise ProtocolError("central leaderboard service is unavailable")
         selected = self._ecosystems(ecosystem_ids)
-        result = dict(await self.results_client.leaderboard(selected, limit=limit))
+        result = dict(
+            await self.results_client.leaderboard(
+                selected,
+                limit=limit,
+                offset=offset,
+            )
+        )
         allowed = set(selected)
         if not allowed:
             return result
@@ -123,7 +130,6 @@ class MinerControlService:
             accounts.append(
                 {
                     **account,
-                    "rank": len(accounts) + 1,
                     "score": max(scores.values()),
                     "scores": scores,
                 }

@@ -173,8 +173,13 @@ def create_control_app(
         current: Service,
         ecosystem_id: EcosystemFilter = None,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
+        offset: Annotated[int, Query(ge=0)] = 0,
     ) -> dict[str, Any]:
-        return await current.leaderboard(tuple(ecosystem_id or ()), limit=limit)
+        return await current.leaderboard(
+            tuple(ecosystem_id or ()),
+            limit=limit,
+            offset=offset,
+        )
 
     @app.get("/api/v1/campaigns/{campaign_id}")
     async def campaign(campaign_id: str, current: Service) -> dict[str, Any]:

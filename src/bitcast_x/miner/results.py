@@ -87,10 +87,15 @@ class MinerResultsClient:
         ecosystem_ids: tuple[str, ...] = (),
         *,
         limit: int = 100,
+        offset: int = 0,
     ) -> dict[str, Any]:
         return await self._get(
             "/api/v2/miners/x/leaderboard",
-            params=[*self._filters(ecosystem_ids), ("limit", str(limit))],
+            params=[
+                *self._filters(ecosystem_ids),
+                ("limit", str(limit)),
+                ("offset", str(offset)),
+            ],
         )
 
     async def campaign(self, campaign_id: str) -> dict[str, Any]:
