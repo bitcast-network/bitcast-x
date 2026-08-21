@@ -103,17 +103,17 @@ def test_campaign_contract_accepts_legacy_null_language_as_noop() -> None:
     assert "language" not in parsed.campaigns[0].model_dump()
 
 
-def test_campaign_contract_accepts_prompt_v5_and_rejects_unknown_versions() -> None:
+def test_campaign_contract_only_accepts_supported_prompt_versions() -> None:
     payload = deepcopy(FEED)
-    payload["campaigns"][0]["prompt_version"] = 5  # type: ignore[index]
+    for supported in (1, 2, 5):
+        payload["campaigns"][0]["prompt_version"] = supported  # type: ignore[index]
+        parsed = CampaignFeed.model_validate(payload)
+        assert parsed.campaigns[0].prompt_version == supported
 
-    parsed = CampaignFeed.model_validate(payload)
-
-    assert parsed.campaigns[0].prompt_version == 5
-
-    payload["campaigns"][0]["prompt_version"] = 6  # type: ignore[index]
-    with pytest.raises(ValidationError, match="less than or equal to 5"):
-        CampaignFeed.model_validate(payload)
+    for retired_or_unknown in (3, 4, 6):
+        payload["campaigns"][0]["prompt_version"] = retired_or_unknown  # type: ignore[index]
+        with pytest.raises(ValidationError, match="Input should be 1, 2 or 5"):
+            CampaignFeed.model_validate(payload)
 
 
 def test_manifest_v4_requires_rank_cutoff_on_every_campaign() -> None:

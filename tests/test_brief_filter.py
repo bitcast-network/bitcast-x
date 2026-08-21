@@ -80,10 +80,8 @@ def completion(verdict: str, summary: str) -> dict[str, Any]:
 
 def test_prompt_versions_have_frozen_hashes() -> None:
     expected = {
-        1: "193ca82cc622774a2cb142bb724378b33fbdbf8ec113cc16778a1153297849a0",
+        1: "a0f1bd9de1e43a9bb1a2cfc91b9e78cc82304298b87bb9d4f80c53892e526e57",
         2: "f2d2d4c2cf16821be3decbf5ae2478ec5ff821abfb7cc289b96e106066efbcaf",
-        3: "2cd4cd1a4009c26a7c89900dfaaddee845c56206b6880bbd71fe5ae727c10f5a",
-        4: "78e7381236ca3c3e815105a721360f1cb76d9275518b33e53cd54b7d9ae8343b",
         5: "4a079a65ae1e2fdd5bddf3f42d334813d05056d749c3ae04178ecd414f4c5394",
     }
     brief = {"brief": "Talk about Bitcast and tag @bitcast_network"}
@@ -100,6 +98,30 @@ def test_prompt_versions_have_frozen_hashes() -> None:
     }
 
     assert actual == expected
+
+
+def test_generic_prompt_only_checks_instructions_in_the_brief() -> None:
+    prompt = generate_brief_evaluation_prompt(
+        {"brief": "Explain the launch date and include #Example."},
+        "Example launches Friday. #Example",
+        1,
+    )
+
+    assert "follows all instructions in the brief" in prompt
+    assert "Treat the brief as the complete source of requirements" in prompt
+    assert "Do not add requirements that are not stated in the brief" in prompt
+    assert "product or service" not in prompt
+    assert "sponsor" not in prompt.lower()
+
+
+@pytest.mark.parametrize("version", [3, 4])
+def test_retired_prompt_versions_are_unavailable(version: int) -> None:
+    with pytest.raises(ValueError, match=r"Available versions: \[1, 2, 5\]"):
+        generate_brief_evaluation_prompt(
+            {"brief": "Talk about Bitcast"},
+            "A thoughtful Bitcast post",
+            version,
+        )
 
 
 def test_honest_review_prompt_is_sentiment_neutral_and_requires_substance() -> None:

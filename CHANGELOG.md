@@ -6,6 +6,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [Unreleased]
 
+### Changed
+
+- Prompt version 1 now performs generic brief-instruction compliance, while retired prompt
+  versions 3 and 4 are no longer accepted; versions 2 and 5 remain byte-stable.
+
 ### Fixed
 
 - Finney miners and validators now use the qualification schedule bundled with the reviewed
