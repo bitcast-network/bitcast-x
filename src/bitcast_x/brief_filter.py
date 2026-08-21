@@ -186,7 +186,8 @@ def parse_brief_evaluation(text: str, *, checks_used: int) -> BriefEvaluation:
 
     verdict = re.search(r"## Verdict\s*\n\s*(YES|NO)", text, re.IGNORECASE)
     breakdown = re.search(
-        r"## (?:Requirement-by-Requirement|Objective Requirements)[ \t]*\n"
+        r"## (?:Requirement-by-Requirement|Objective Requirements|"
+        r"Instruction-by-Instruction)[ \t]*\n"
         r"(.*?)(?:\n## Verdict|\n## |$)",
         text,
         re.DOTALL | re.IGNORECASE,
