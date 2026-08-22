@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
       - name: Build container
         env:
-          IMAGE_VERSION: "2.0.0"
+          IMAGE_VERSION: "2.1.0"
           SOURCE_REVISION: ${{ github.sha }}
         run: >-
           docker build
@@ -38,10 +38,10 @@ jobs:
           --build-arg REVISION="${SOURCE_REVISION}"
           -t bitcast-x:test .
       - run: docker run --rm bitcast-x:test --help
-      - run: test "$(docker run --rm bitcast-x:test --version)" = "bitcast-x 2.0.0"
+      - run: test "$(docker run --rm bitcast-x:test --version)" = "bitcast-x 2.1.0"
       - run: test "$(docker run --rm --entrypoint id bitcast-x:test -u)" = "10001"
       - run: docker run --rm --entrypoint python bitcast-x:test -c 'import bitcast_x; print(bitcast_x.__version__)'
-      - run: test "$(docker inspect bitcast-x:test --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "2.0.0"
+      - run: test "$(docker inspect bitcast-x:test --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "2.1.0"
       - name: Verify revision label
         env:
           SOURCE_REVISION: ${{ github.sha }}

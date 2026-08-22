@@ -6,6 +6,19 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-08-22
+
+### Added
+
+- The authenticated miner application API now exposes the complete versioned `/api/v1` contract
+  for third-party products, including enabled ecosystems, leaderboard reads, idempotent creator
+  claims and submissions, and stable upstream error envelopes.
+
+### Compatibility
+
+- `/api/v1` is a public integration contract. Existing fields and semantics remain supported for
+  the lifetime of v1; incompatible changes require a new path version and an overlap window.
+
 ### Changed
 
 - Prompt version 1 now performs generic brief-instruction compliance, while retired prompt

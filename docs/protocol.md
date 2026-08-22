@@ -108,7 +108,8 @@ is accepted only from the campaign's fixed exclusive miner hotkey after the norm
 qualification, and timing checks.
 
 The reference platform API exposes these operations behind bearer authentication at
-`/api/claims`, `/api/submissions`, `/api/campaigns`, and `/api/qualification`. The API is an
+`/api/v1/claims`, `/api/v1/submissions`, `/api/v1/campaigns`, and
+`/api/v1/qualification`. The API is an
 operator convenience; the committed events and batches are the protocol record.
 
 ## Batches, chain anchors, and validator transport

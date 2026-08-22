@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
@@ -31,10 +32,23 @@ class EventStatus(StrEnum):
     WAITING_FOR_COMMITMENT = "waiting_for_commitment"
     SAFE_TO_POST = "safe_to_post"
     EVICTED = "evicted"
+    CONSUMED = "consumed"
     TWEET_RECEIVED = "tweet_received"
     VERIFICATION_PENDING = "verification_pending"
     ATTRIBUTED = "attributed"
     REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class OperationMetadata:
+    """Application correlation fields stored without protocol-private material."""
+
+    idempotency_key: str
+    request_fingerprint: str
+    campaign_snapshot_id: str
+    ecosystem_ids: tuple[str, ...]
+    creator_x_id: str
+    external_id: str | None = None
 
 
 class MinerStore:
@@ -116,6 +130,31 @@ class MinerStore:
                         commitment_block, extrinsic_index, event_index
                     );
                     """,
+                    """
+                CREATE TABLE IF NOT EXISTS operation_metadata (
+                    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
+                    kind TEXT NOT NULL CHECK (kind IN ('claim', 'submission')),
+                    idempotency_key TEXT NOT NULL,
+                    request_fingerprint TEXT NOT NULL,
+                    external_id TEXT,
+                    campaign_snapshot_id TEXT NOT NULL,
+                    ecosystem_ids_json TEXT NOT NULL,
+                    creator_x_id TEXT NOT NULL,
+                    consumed_by_submission_id TEXT,
+                    evicted_by_claim_id TEXT,
+                    updated_ns INTEGER NOT NULL,
+                    UNIQUE(kind, idempotency_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_operation_metadata_filters
+                    ON operation_metadata(kind, creator_x_id, external_id);
+                CREATE TABLE IF NOT EXISTS operation_ecosystem (
+                    event_id TEXT NOT NULL REFERENCES operation_metadata(event_id),
+                    ecosystem_id TEXT NOT NULL,
+                    PRIMARY KEY(event_id, ecosystem_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_operation_ecosystem_lookup
+                    ON operation_ecosystem(ecosystem_id, event_id);
+                    """,
                 ),
             )
 
@@ -124,10 +163,11 @@ class MinerStore:
         event: ProtocolEvent,
         *,
         reveal: DraftReveal | None = None,
+        metadata: OperationMetadata | None = None,
         max_pending_events: int = 10_000,
         max_pending_bytes: int = 50_000_000,
-    ) -> None:
-        """Persist a unique event before returning control to the platform."""
+    ) -> str:
+        """Persist an event and application idempotency record atomically."""
 
         if max_pending_events <= 0 or max_pending_bytes <= 0:
             raise ValueError("pending queue limits must be positive")
@@ -141,6 +181,18 @@ class MinerStore:
         payload = event.model_dump_json()
         reveal_json = reveal.model_dump_json() if reveal is not None else None
         with self._transaction() as connection:
+            if metadata is not None:
+                idempotent = connection.execute(
+                    """
+                    SELECT event_id, request_fingerprint FROM operation_metadata
+                    WHERE kind = ? AND idempotency_key = ?
+                    """,
+                    (event.kind, metadata.idempotency_key),
+                ).fetchone()
+                if idempotent is not None:
+                    if idempotent["request_fingerprint"] != metadata.request_fingerprint:
+                        raise ProtocolError("idempotency key was reused with different input")
+                    return str(idempotent["event_id"])
             existing = connection.execute(
                 "SELECT payload_json, private_reveal_json FROM events WHERE event_id = ?",
                 (event_id,),
@@ -150,7 +202,7 @@ class MinerStore:
                     existing["payload_json"] == payload
                     and existing["private_reveal_json"] == reveal_json
                 ):
-                    return
+                    return event_id
                 raise ProtocolError("event id was reused with different content")
             pending = connection.execute(
                 """
@@ -183,6 +235,35 @@ class MinerStore:
                 """,
                 (event_id, event.kind, payload, reveal_json, status.value, time.time_ns()),
             )
+            if metadata is not None:
+                connection.execute(
+                    """
+                    INSERT INTO operation_metadata(
+                        event_id, kind, idempotency_key, request_fingerprint,
+                        external_id, campaign_snapshot_id, ecosystem_ids_json,
+                        creator_x_id, updated_ns
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event.kind,
+                        metadata.idempotency_key,
+                        metadata.request_fingerprint,
+                        metadata.external_id,
+                        metadata.campaign_snapshot_id,
+                        json.dumps(metadata.ecosystem_ids, separators=(",", ":")),
+                        metadata.creator_x_id,
+                        time.time_ns(),
+                    ),
+                )
+                connection.executemany(
+                    """
+                    INSERT INTO operation_ecosystem(event_id, ecosystem_id)
+                    VALUES (?, ?)
+                    """,
+                    [(event_id, ecosystem_id) for ecosystem_id in metadata.ecosystem_ids],
+                )
+        return event_id
 
     def status(self, event_id: str) -> EventStatus | None:
         """Return the persisted platform status for a claim or submission."""
@@ -192,6 +273,109 @@ class MinerStore:
                 "SELECT status FROM events WHERE event_id = ?", (event_id,)
             ).fetchone()
         return EventStatus(row["status"]) if row is not None else None
+
+    def receipt(self, event_id: str) -> dict[str, object] | None:
+        """Return one application-safe local receipt with its chain position."""
+
+        receipts = self.receipts(event_id=event_id)
+        return receipts[0] if receipts else None
+
+    def receipts(
+        self,
+        *,
+        kind: str | None = None,
+        event_id: str | None = None,
+        campaign_id: str | None = None,
+        creator_x_id: str | None = None,
+        external_id: str | None = None,
+        ecosystem_ids: tuple[str, ...] = (),
+    ) -> list[dict[str, object]]:
+        """List durable receipts using indexed application correlation filters."""
+
+        ecosystem_json = json.dumps(ecosystem_ids, separators=(",", ":"))
+        query = """
+            SELECT e.event_id, e.kind, e.payload_json, e.status, e.created_ns,
+                   e.batch_sequence, e.rejection_reason,
+                   b.batch_json, b.batch_hash, b.state AS batch_state, b.finalized_block,
+                   b.extrinsic_index, m.external_id, m.campaign_snapshot_id,
+                   m.ecosystem_ids_json, m.creator_x_id,
+                   m.consumed_by_submission_id, m.evicted_by_claim_id,
+                   COALESCE(m.updated_ns, e.created_ns) AS updated_ns
+            FROM events e
+            LEFT JOIN batches b ON b.sequence = e.batch_sequence
+            LEFT JOIN operation_metadata m ON m.event_id = e.event_id
+            WHERE (? IS NULL OR e.kind = ?)
+              AND (? IS NULL OR e.event_id = ?)
+              AND (? IS NULL OR m.creator_x_id = ?)
+              AND (? IS NULL OR m.external_id = ?)
+              AND (
+                ? = '[]' OR EXISTS (
+                    SELECT 1 FROM operation_ecosystem oe
+                    WHERE oe.event_id = e.event_id
+                      AND oe.ecosystem_id IN (SELECT value FROM json_each(?))
+                )
+              )
+            ORDER BY e.created_ns DESC, e.event_id
+        """
+        parameters = (
+            kind,
+            kind,
+            event_id,
+            event_id,
+            creator_x_id,
+            creator_x_id,
+            external_id,
+            external_id,
+            ecosystem_json,
+            ecosystem_json,
+        )
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        receipts: list[dict[str, object]] = []
+        for row in rows:
+            event = _EVENT_ADAPTER.validate_json(row["payload_json"])
+            if campaign_id is not None and event.campaign_id != campaign_id:
+                continue
+            event_index = None
+            if row["batch_json"] is not None:
+                batch = CommittedBatch.model_validate_json(row["batch_json"])
+                ids = [
+                    item.claim_id if isinstance(item, ClaimEvent) else item.submission_id
+                    for item in batch.events
+                ]
+                event_index = ids.index(str(row["event_id"]))
+            payload = event.model_dump(mode="json")
+            receipts.append(
+                {
+                    **payload,
+                    "event_id": str(row["event_id"]),
+                    "kind": str(row["kind"]),
+                    "status": str(row["status"]),
+                    "created_ns": int(row["created_ns"]),
+                    "updated_ns": int(row["updated_ns"]),
+                    "external_id": row["external_id"],
+                    "campaign_snapshot_id": row["campaign_snapshot_id"],
+                    "ecosystem_ids": (
+                        json.loads(row["ecosystem_ids_json"]) if row["ecosystem_ids_json"] else []
+                    ),
+                    "creator_x_id": row["creator_x_id"]
+                    or (event.creator_x_id if isinstance(event, ClaimEvent) else None),
+                    "commitment": {
+                        "status": ("finalized" if row["batch_state"] == "finalized" else "queued"),
+                        "batch_sequence": row["batch_sequence"],
+                        "batch_hash": (
+                            f"sha256-{row['batch_hash']}" if row["batch_hash"] else None
+                        ),
+                        "block": row["finalized_block"],
+                        "extrinsic_index": row["extrinsic_index"],
+                        "event_index": event_index,
+                        "failure_reason": row["rejection_reason"],
+                    },
+                    "consumed_by_submission_id": row["consumed_by_submission_id"],
+                    "evicted_by_claim_id": row["evicted_by_claim_id"],
+                }
+            )
+        return receipts
 
     def submissions(self) -> list[dict[str, object]]:
         """Return durable local submissions for platform status displays."""
@@ -451,9 +635,35 @@ class MinerStore:
                     sequence,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE operation_metadata SET updated_ns = ?
+                WHERE event_id IN (
+                    SELECT event_id FROM events WHERE batch_sequence = ?
+                )
+                """,
+                (time.time_ns(), sequence),
+            )
             committed_batch = CommittedBatch.model_validate_json(batch_row["batch_json"])
             for event_index, event in enumerate(committed_batch.events):
-                if not isinstance(event, ClaimEvent):
+                if isinstance(event, SubmissionEvent):
+                    if event.claim_id is not None:
+                        connection.execute(
+                            "DELETE FROM active_claims WHERE claim_id = ?",
+                            (event.claim_id,),
+                        )
+                        connection.execute(
+                            "UPDATE events SET status = ? WHERE event_id = ?",
+                            (EventStatus.CONSUMED.value, event.claim_id),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE operation_metadata
+                            SET consumed_by_submission_id = ?, updated_ns = ?
+                            WHERE event_id = ?
+                            """,
+                            (event.submission_id, time.time_ns(), event.claim_id),
+                        )
                     continue
                 connection.execute(
                     """
@@ -488,6 +698,14 @@ class MinerStore:
                     connection.execute(
                         "UPDATE events SET status = ? WHERE event_id = ?",
                         (EventStatus.EVICTED.value, claim_id),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE operation_metadata
+                        SET evicted_by_claim_id = ?, updated_ns = ?
+                        WHERE event_id = ?
+                        """,
+                        (event.claim_id, time.time_ns(), claim_id),
                     )
 
     def active_claim_ids(self, campaign_id: str, creator_x_id: str) -> list[str]:

@@ -142,10 +142,13 @@ versions with `bitcast-x state-info`. Compare independent validators using the d
 from `bitcast-x shadow-report`.
 
 Platforms can run the same miner as an authenticated, single-writer service with
-`bitcast-x run-miner-api`. It exposes generic `/api/campaigns`, `/api/qualification`,
-`/api/claims`, and `/api/submissions` control routes alongside the signed validator batch protocol
-on the same port.
-Configure a 32-character-or-longer
+`bitcast-x run-miner-api`. Its versioned `/api/v1` surface covers qualification, enabled
+ecosystems, their paginated combined account leaderboard, protocol-v2 campaigns, creator eligibility,
+idempotent claims, submissions, campaign results, and total USD reward recommendations. OpenAPI is
+available at `/api/v1/docs`; the public compatibility rules are documented in the
+[application API policy](docs/application-api.md). The signed
+validator batch protocol remains on the same port.
+Configure a 64-character-or-longer
 `BITCAST_X_MINER_API_TOKEN`; control routes require it as a bearer token, while validator routes
 continue to use Bittensor hotkey authentication. The command contains no platform branding,
 user/session logic, payment policy, or deployment-provider assumptions.
@@ -166,7 +169,7 @@ Bitcast X is open-source software under the [MIT License](LICENSE). Contribution
 under the same license; see [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and licensing
 expectations.
 
-The current software release is `2.0.0`. Software release numbers are separate from the protocol
+The current software release is `2.1.0`. Software release numbers are separate from the protocol
 versions described in the protocol documentation. See the
 [changelog](CHANGELOG.md), [release policy](docs/release-policy.md),
 [security policy](SECURITY.md), and [support guide](SUPPORT.md).

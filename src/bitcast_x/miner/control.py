@@ -1,159 +1,474 @@
-"""Generic platform-control service layered over the reusable miner SDK."""
+"""Generic application-control service layered over the reusable miner SDK."""
 
 import asyncio
+import hashlib
 import json
-import logging
-import sqlite3
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import UTC, datetime
+from typing import Any, Protocol
 
 from bitcast_x.campaigns import CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.miner.engine import MinerSdk
 from bitcast_x.miner.results import MinerResultsClient
-from bitcast_x.miner.store import EventStatus
-
-LOGGER = logging.getLogger(__name__)
-
-# Enriching the submission list requires one central result lookup per row.
-# Bound the fan-out so status views do not serialize hundreds of HTTP round
-# trips, while still protecting the central API from an unbounded burst.
-SUBMISSION_ENRICHMENT_CONCURRENCY = 8
+from bitcast_x.miner.store import EventStatus, OperationMetadata
 
 
 class CampaignSource(Protocol):
-    """Campaign operations required by a platform-facing miner."""
+    """Fallback campaign operation required by offline development miners."""
 
     async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]: ...
 
     async def close(self) -> None: ...
 
 
+def _fingerprint(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _timestamp(nanoseconds: int) -> str:
+    return (
+        datetime.fromtimestamp(nanoseconds / 1_000_000_000, tz=UTC)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 @dataclass(slots=True)
 class MinerControlService:
-    """Use-case layer with explicit, durable commitment completion semantics."""
+    """Join local durable operations with authorized central read data."""
 
     sdk: MinerSdk
     campaign_source: CampaignSource
     commit_timeout_seconds: float
     results_client: MinerResultsClient | None = None
+    enabled_ecosystem_ids: tuple[str, ...] = ()
 
-    async def campaigns(self) -> list[dict[str, object]]:
-        """Return open campaigns through the configured public metadata source."""
+    async def _require_qualified(self) -> None:
+        """Fail before accepting creator operations an unqualified miner cannot earn from."""
 
+        status = await self.sdk.qualification_status()
+        if not status.get("eligible", False):
+            reason = status.get("reason", "unknown")
+            raise ProtocolError(f"miner is not qualified: {reason}")
+
+    def _ecosystems(self, requested: tuple[str, ...] = ()) -> tuple[str, ...]:
+        configured = set(self.enabled_ecosystem_ids)
+        if requested and configured and not set(requested).issubset(configured):
+            raise ProtocolError("requested ecosystem is not enabled by this miner")
+        return requested or self.enabled_ecosystem_ids
+
+    async def ecosystems(self) -> list[dict[str, Any]]:
+        if self.results_client is None:
+            return [
+                {
+                    "ecosystem_id": ecosystem_id,
+                    "name": ecosystem_id.replace("_", " ").title(),
+                    "status": "active",
+                    "enabled": True,
+                }
+                for ecosystem_id in self.enabled_ecosystem_ids
+            ]
+        items = await self.results_client.ecosystems()
+        enabled = set(self.enabled_ecosystem_ids)
+        return [
+            {**item, "enabled": True}
+            for item in items
+            if not enabled or item.get("ecosystem_id") in enabled
+        ]
+
+    async def campaigns(
+        self,
+        ecosystem_ids: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        selected = self._ecosystems(ecosystem_ids)
         if self.results_client is not None:
-            return list(await self.results_client.campaigns())
+            return list(await self.results_client.campaigns(selected))
         campaigns = await self.campaign_source.fetch_campaigns()
-        return [campaign.model_dump(mode="json") for campaign in campaigns]
+        return [
+            campaign.model_dump(mode="json")
+            for campaign in campaigns
+            if campaign.access.mining_protocol.value == "preclaim_v2"
+            and (not selected or bool(set(campaign.pools).intersection(selected)))
+            and (
+                campaign.access.exclusive_miner_hotkey is None
+                or campaign.access.exclusive_miner_hotkey == self.sdk.engine.miner_hotkey
+            )
+        ]
+
+    async def leaderboard(
+        self,
+        ecosystem_ids: tuple[str, ...] = (),
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if self.results_client is None:
+            raise ProtocolError("central leaderboard service is unavailable")
+        selected = self._ecosystems(ecosystem_ids)
+        result = dict(
+            await self.results_client.leaderboard(
+                selected,
+                limit=limit,
+                offset=offset,
+            )
+        )
+        allowed = set(selected)
+        if not allowed:
+            return result
+
+        accounts: list[dict[str, Any]] = []
+        for account in result.get("accounts", []):
+            scores = {
+                ecosystem_id: score
+                for ecosystem_id, score in account.get("scores", {}).items()
+                if ecosystem_id in allowed
+            }
+            if not scores:
+                continue
+            accounts.append(
+                {
+                    **account,
+                    "score": max(scores.values()),
+                    "scores": scores,
+                }
+            )
+        result["ecosystem_ids"] = list(selected)
+        result["accounts"] = accounts
+        return result
+
+    async def campaign(self, campaign_id: str) -> dict[str, Any] | None:
+        if self.results_client is not None:
+            try:
+                campaign = await self.results_client.campaign(campaign_id)
+            except Exception as error:
+                if getattr(getattr(error, "response", None), "status_code", None) == 404:
+                    return None
+                raise
+            pools = set(campaign.get("ecosystem_ids", []))
+            if self.enabled_ecosystem_ids and not pools.intersection(self.enabled_ecosystem_ids):
+                return None
+            return campaign
+        return next(
+            (
+                campaign
+                for campaign in await self.campaigns()
+                if (
+                    campaign.get("campaign_id") == campaign_id
+                    or campaign.get("access", {}).get("campaign_id") == campaign_id
+                )
+            ),
+            None,
+        )
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        campaign = await self.campaign(campaign_id)
+        if campaign is None:
+            raise ProtocolError("campaign is not available to this miner")
+        if self.results_client is None:
+            raise ProtocolError("central eligibility service is unavailable")
+        result = dict(await self.results_client.eligibility(campaign_id, creator_x_id))
+        enabled = set(self.enabled_ecosystem_ids)
+        if not enabled:
+            return result
+
+        evidence = [
+            item
+            for item in result.get("eligible_ecosystems", [])
+            if item.get("ecosystem_id") in enabled
+        ]
+        badges = [item for item in result.get("badges", []) if item.get("ecosystem_id") in enabled]
+        eligible_in_enabled_ecosystem = any(item.get("eligible", False) for item in evidence)
+        result["eligible_ecosystems"] = evidence
+        result["badges"] = badges
+        result["eligible"] = bool(result.get("eligible")) and eligible_in_enabled_ecosystem
+        result["claim_eligible"] = (
+            bool(result.get("claim_eligible")) and eligible_in_enabled_ecosystem
+        )
+        result["eligible_if_published_now"] = (
+            bool(result.get("eligible_if_published_now")) and eligible_in_enabled_ecosystem
+        )
+        if not eligible_in_enabled_ecosystem and result.get("reason") == "eligible":
+            result["reason"] = "creator_not_eligible"
+        return result
+
+    async def campaign_tweets(
+        self,
+        campaign_id: str,
+        ecosystem_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        if await self.campaign(campaign_id) is None:
+            raise ProtocolError("campaign is not available to this miner")
+        if self.results_client is None:
+            raise ProtocolError("central campaign results service is unavailable")
+        return await self.results_client.campaign_tweets(
+            campaign_id,
+            self._ecosystems(ecosystem_ids),
+        )
 
     async def create_claim(
         self,
         campaign_id: str,
         creator_x_id: str,
         draft: str,
-    ) -> dict[str, str]:
-        """Create a claim and wait briefly for finalized commitment."""
+        *,
+        idempotency_key: str,
+        external_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate, persist, and commit a pre-publication claim."""
 
+        await self._require_qualified()
+        campaign = await self.campaign(campaign_id)
+        if campaign is None:
+            raise ProtocolError("campaign is not available to this miner")
+        if not campaign.get("capabilities", {}).get("can_claim", False):
+            raise ProtocolError("campaign does not accept claims")
+        eligibility = await self.eligibility(campaign_id, creator_x_id)
+        if not eligibility.get("claim_eligible", False):
+            raise ProtocolError("creator is not eligible to claim this campaign")
+        metadata = OperationMetadata(
+            idempotency_key=idempotency_key,
+            request_fingerprint=_fingerprint(
+                {
+                    "campaign_id": campaign_id,
+                    "creator_x_id": creator_x_id,
+                    "draft": draft,
+                    "external_id": external_id,
+                }
+            ),
+            campaign_snapshot_id=str(campaign["campaign_snapshot_id"]),
+            ecosystem_ids=tuple(campaign.get("ecosystem_ids", [])),
+            creator_x_id=creator_x_id,
+            external_id=external_id,
+        )
         claim_id = self.sdk.create_claim(
             campaign_id=campaign_id,
             creator_x_id=creator_x_id,
             draft=draft,
+            metadata=metadata,
         )
         await self._await_commit()
-        status = self.sdk.claim_status(claim_id)
-        return {"claim_id": claim_id, "status": status.value if status else "unknown"}
+        claim = self.claim_status(claim_id)
+        if claim is None:
+            raise ProtocolError("durable claim disappeared")
+        return claim
 
     async def submit_tweet(
         self,
         campaign_id: str,
         tweet_id: str,
         claim_id: str | None,
-    ) -> dict[str, str]:
-        """Durably accept a published tweet mapping for background commitment."""
+        creator_x_id: str,
+        *,
+        idempotency_key: str,
+        external_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Validate and durably accept a published tweet mapping."""
 
+        await self._require_qualified()
+        campaign = await self.campaign(campaign_id)
+        if campaign is None:
+            raise ProtocolError("campaign is not available to this miner")
+        if not campaign.get("capabilities", {}).get("can_submit", False):
+            raise ProtocolError("campaign does not accept submissions")
+        requires_claim = bool(campaign.get("capabilities", {}).get("requires_claim", True))
+        if requires_claim and claim_id is None:
+            raise ProtocolError("campaign requires a safe pre-publication claim")
+        if not requires_claim and claim_id is not None:
+            raise ProtocolError("direct campaign submissions must not include a claim")
+        operation_snapshot_id = str(campaign["campaign_snapshot_id"])
+        operation_ecosystem_ids = tuple(campaign.get("ecosystem_ids", []))
         if claim_id is not None:
-            expected = self._claim_campaign_id(claim_id)
-            if expected is None:
+            claim = self.claim_status(claim_id)
+            if claim is None:
                 raise ProtocolError("submission claim_id does not belong to this miner")
-            if expected != campaign_id:
-                raise ProtocolError(
-                    f"campaign_id {campaign_id!r} does not match claim campaign {expected!r}"
-                )
+            if claim.get("campaign_id") != campaign_id:
+                raise ProtocolError("claim campaign does not match submission campaign")
+            if claim.get("creator_x_id") != creator_x_id:
+                raise ProtocolError("claim creator does not match submission creator")
+            if not claim.get("usability", {}).get("safe_to_post", False):
+                raise ProtocolError("claim is not safe to post")
+            operation_snapshot_id = str(claim["campaign_snapshot_id"])
+            operation_ecosystem_ids = tuple(claim.get("ecosystem_ids", []))
+        else:
+            eligibility = await self.eligibility(campaign_id, creator_x_id)
+            if not eligibility.get("eligible_if_published_now", False):
+                raise ProtocolError("creator is not eligible to submit to this campaign")
 
+        metadata = OperationMetadata(
+            idempotency_key=idempotency_key,
+            request_fingerprint=_fingerprint(
+                {
+                    "campaign_id": campaign_id,
+                    "tweet_id": tweet_id,
+                    "claim_id": claim_id,
+                    "creator_x_id": creator_x_id,
+                    "external_id": external_id,
+                }
+            ),
+            campaign_snapshot_id=operation_snapshot_id,
+            ecosystem_ids=operation_ecosystem_ids,
+            creator_x_id=creator_x_id,
+            external_id=external_id,
+        )
         submission_id = self.sdk.submit_tweet(
             campaign_id=campaign_id,
             tweet_id=tweet_id,
             claim_id=claim_id,
+            metadata=metadata,
         )
-        status = self.sdk.submission_status(submission_id)
+        submission = await self.submission_status(submission_id)
+        if submission is None:
+            raise ProtocolError("durable submission disappeared")
+        return submission
+
+    @staticmethod
+    def _claim_resource(receipt: dict[str, object]) -> dict[str, Any]:
+        status = str(receipt["status"])
+        usability = {
+            EventStatus.WAITING_FOR_COMMITMENT.value: "pending",
+            EventStatus.SAFE_TO_POST.value: "active",
+            EventStatus.EVICTED.value: "evicted",
+            EventStatus.CONSUMED.value: "consumed",
+        }.get(status, "expired")
         return {
-            "submission_id": submission_id,
-            "status": status.value if status else "unknown",
+            "claim_id": receipt["claim_id"],
+            "external_id": receipt["external_id"],
+            "campaign_id": receipt["campaign_id"],
+            "campaign_snapshot_id": receipt["campaign_snapshot_id"],
+            "ecosystem_ids": receipt["ecosystem_ids"],
+            "creator_x_id": receipt["creator_x_id"],
+            "commitment": receipt["commitment"],
+            "usability": {
+                "status": usability,
+                "safe_to_post": status == EventStatus.SAFE_TO_POST.value,
+                "maximum_active_claims": 5,
+                "evicted_by_claim_id": receipt["evicted_by_claim_id"],
+                "consumed_by_submission_id": receipt["consumed_by_submission_id"],
+            },
+            "created_at": _timestamp(int(str(receipt["created_ns"]))),
+            "updated_at": _timestamp(int(str(receipt["updated_ns"]))),
         }
 
-    def claim_status(self, claim_id: str) -> dict[str, str]:
-        """Read one durable claim status."""
+    def claim_status(self, claim_id: str) -> dict[str, Any] | None:
+        receipt = self.sdk.engine.store.receipt(claim_id)
+        if receipt is None or receipt["kind"] != "claim":
+            return None
+        return self._claim_resource(receipt)
 
-        status = self.sdk.claim_status(claim_id)
-        if status is None:
-            return {"claim_id": claim_id, "status": "not_found"}
-        result = {"claim_id": claim_id, "status": status.value}
-        campaign_id = self._claim_campaign_id(claim_id)
-        if campaign_id is not None:
-            result["campaign_id"] = campaign_id
-        return result
+    def claims(
+        self,
+        *,
+        campaign_id: str | None = None,
+        creator_x_id: str | None = None,
+        external_id: str | None = None,
+        ecosystem_ids: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        receipts = self.sdk.engine.store.receipts(
+            kind="claim",
+            campaign_id=campaign_id,
+            creator_x_id=creator_x_id,
+            external_id=external_id,
+            ecosystem_ids=self._ecosystems(ecosystem_ids),
+        )
+        return [self._claim_resource(receipt) for receipt in receipts]
 
-    def submission_status(self, submission_id: str) -> dict[str, str]:
-        """Read one durable submission status."""
-
-        status = self.sdk.submission_status(submission_id)
+    def _submission_resource(self, receipt: dict[str, object]) -> dict[str, Any]:
+        claim_commitment = None
+        claim_id = receipt["claim_id"]
+        if claim_id is not None:
+            claim = self.sdk.engine.store.receipt(str(claim_id))
+            if claim is not None and claim["kind"] == "claim":
+                claim_commitment = claim["commitment"]
         return {
-            "submission_id": submission_id,
-            "status": status.value if status else "not_found",
+            "submission_id": receipt["submission_id"],
+            "external_id": receipt["external_id"],
+            "campaign_id": receipt["campaign_id"],
+            "campaign_snapshot_id": receipt["campaign_snapshot_id"],
+            "ecosystem_ids": receipt["ecosystem_ids"],
+            "tweet_id": receipt["tweet_id"],
+            "claim_id": claim_id,
+            "creator": {"submitted_x_id": receipt["creator_x_id"]},
+            "status": receipt["status"],
+            "claim_commitment": claim_commitment,
+            "submission_commitment": receipt["commitment"],
+            "created_at": _timestamp(int(str(receipt["created_ns"]))),
+            "updated_at": _timestamp(int(str(receipt["updated_ns"]))),
         }
 
-    async def submissions(self) -> list[dict[str, object]]:
-        """Return durable submissions enriched with latest validator results."""
+    async def submission_status(self, submission_id: str) -> dict[str, Any] | None:
+        receipt = self.sdk.engine.store.receipt(submission_id)
+        if receipt is None or receipt["kind"] != "submission":
+            return None
+        local = self._submission_resource(receipt)
+        if self.results_client is None:
+            return local
+        result = await self.results_client.submission(submission_id)
+        return self._merge_submission(local, result)
 
-        submissions = self.sdk.submissions()
-        results_client = self.results_client
-        if results_client is None:
-            return submissions
+    @staticmethod
+    def _merge_submission(local: dict[str, Any], central: dict[str, Any]) -> dict[str, Any]:
+        central_values = {key: value for key, value in central.items() if value is not None}
+        merged = {**local, **central_values}
+        if (
+            local.get("status") == EventStatus.TWEET_RECEIVED.value
+            and central.get("status") == EventStatus.VERIFICATION_PENDING.value
+        ):
+            merged["status"] = local["status"]
+        local_creator = local.get("creator") or {}
+        central_creator = central.get("creator") or {}
+        merged["creator"] = {**local_creator, **central_creator}
+        merged["submission_commitment"] = local["submission_commitment"]
+        merged["created_at"] = local["created_at"]
+        return merged
 
-        semaphore = asyncio.Semaphore(SUBMISSION_ENRICHMENT_CONCURRENCY)
-
-        async def enrich(submission: dict[str, object]) -> dict[str, object]:
-            try:
-                async with semaphore:
-                    result = await results_client.submission(str(submission["submission_id"]))
-            except Exception:
-                LOGGER.exception(
-                    "submission result lookup failed; returning durable local state",
-                    extra={"submission_id": submission["submission_id"]},
-                )
-                return submission
-            return {**submission, **result}
-
-        # asyncio.gather preserves input order, so the API contract remains
-        # deterministic even though the independent lookups run concurrently.
-        return list(await asyncio.gather(*(enrich(submission) for submission in submissions)))
+    async def submissions(
+        self,
+        *,
+        campaign_id: str | None = None,
+        creator_x_id: str | None = None,
+        tweet_id: str | None = None,
+        external_id: str | None = None,
+        ecosystem_ids: tuple[str, ...] = (),
+    ) -> list[dict[str, Any]]:
+        receipts = self.sdk.engine.store.receipts(
+            kind="submission",
+            campaign_id=campaign_id,
+            creator_x_id=creator_x_id,
+            external_id=external_id,
+            ecosystem_ids=self._ecosystems(ecosystem_ids),
+        )
+        local = [self._submission_resource(receipt) for receipt in receipts]
+        if tweet_id is not None:
+            local = [item for item in local if item["tweet_id"] == tweet_id]
+        if self.results_client is None:
+            return local
+        central = await self.results_client.submissions(
+            campaign_id=campaign_id,
+            tweet_id=tweet_id,
+        )
+        by_id = {str(item["submission_id"]): item for item in central}
+        return [
+            self._merge_submission(item, by_id[str(item["submission_id"])])
+            if str(item["submission_id"]) in by_id
+            else item
+            for item in local
+        ]
 
     async def sync_submission_results(self) -> None:
         """Persist final central results for locally pending submissions."""
 
         if self.results_client is None:
             return
+        central = await self.results_client.submissions()
+        by_id = {str(item["submission_id"]): item for item in central}
         for submission in self.sdk.submissions():
             if submission["status"] != EventStatus.VERIFICATION_PENDING.value:
                 continue
             submission_id = str(submission["submission_id"])
-            try:
-                result = await self.results_client.submission(submission_id)
-            except Exception:
-                LOGGER.exception(
-                    "submission result sync failed; local state retained",
-                    extra={"submission_id": submission_id},
-                )
+            result = by_id.get(submission_id)
+            if result is None:
                 continue
             status = result.get("status")
             if status == EventStatus.ATTRIBUTED.value:
@@ -176,17 +491,3 @@ class MinerControlService:
             )
         except TimeoutError:
             return
-
-    def _claim_campaign_id(self, claim_id: str) -> str | None:
-        """Read the campaign bound to a durable claim event."""
-
-        with sqlite3.connect(self.sdk.engine.store.path) as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM events WHERE event_id = ? AND kind = 'claim'",
-                (claim_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        payload = json.loads(row[0])
-        campaign_id = payload.get("campaign_id")
-        return campaign_id if isinstance(campaign_id, str) else None
