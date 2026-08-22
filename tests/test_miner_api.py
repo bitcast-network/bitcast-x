@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi.testclient import TestClient
 
 from bitcast_x.campaigns import CampaignRecord
@@ -239,6 +240,67 @@ def test_application_api_requires_internal_bearer_token(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "invalid_authentication"
     assert response.headers["www-authenticate"] == "Bearer"
     assert web.get("/health").status_code == 200
+
+
+def test_openapi_pins_the_public_v1_route_and_auth_contract(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+
+    schema = web.get("/api/v1/openapi.json").json()
+    methods = {
+        (method.upper(), path)
+        for path, operations in schema["paths"].items()
+        for method in operations
+    }
+
+    assert methods == {
+        ("GET", "/api/v1/qualification"),
+        ("GET", "/api/v1/ecosystems"),
+        ("GET", "/api/v1/leaderboard"),
+        ("GET", "/api/v1/campaigns"),
+        ("GET", "/api/v1/campaigns/{campaign_id}"),
+        ("GET", "/api/v1/campaigns/{campaign_id}/eligibility/{creator_x_id}"),
+        ("GET", "/api/v1/campaigns/{campaign_id}/tweets"),
+        ("GET", "/api/v1/claims"),
+        ("POST", "/api/v1/claims"),
+        ("GET", "/api/v1/claims/{claim_id}"),
+        ("GET", "/api/v1/submissions"),
+        ("POST", "/api/v1/submissions"),
+        ("GET", "/api/v1/submissions/{submission_id}"),
+    }
+    assert schema["security"] == [{"BearerAuth": []}]
+    assert schema["components"]["securitySchemes"]["BearerAuth"]["scheme"] == "bearer"
+    for path in ("/api/v1/claims", "/api/v1/submissions"):
+        parameters = schema["paths"][path]["post"]["parameters"]
+        idempotency = next(item for item in parameters if item["name"] == "Idempotency-Key")
+        assert idempotency["in"] == "header"
+        assert idempotency["required"] is True
+
+
+def test_central_registration_errors_keep_a_stable_application_envelope(
+    tmp_path: Path,
+) -> None:
+    class RegistrationDeniedResults(Results):
+        async def campaigns(
+            self,
+            ecosystem_ids: tuple[str, ...] = (),
+        ) -> list[dict[str, Any]]:
+            del ecosystem_ids
+            request = httpx.Request("GET", "https://central.test/api/v2/miners/x/campaigns")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError("forbidden", request=request, response=response)
+
+    response = build_client(tmp_path, results_client=RegistrationDeniedResults()).get(
+        "/api/v1/campaigns"
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": {
+            "code": "miner_not_registered",
+            "message": "The miner hotkey is not currently registered on subnet 93.",
+            "retryable": False,
+        }
+    }
 
 
 def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> None:

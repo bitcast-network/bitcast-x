@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from hmac import compare_digest
 from typing import Annotated, Any
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
@@ -153,6 +154,69 @@ def create_control_app(
             content=_error("invalid_request", "Request validation failed."),
         )
 
+    @app.exception_handler(httpx.HTTPStatusError)
+    async def central_api_error(
+        _request: Request,
+        error: httpx.HTTPStatusError,
+    ) -> JSONResponse:
+        """Translate the signed central API boundary into stable app errors."""
+
+        upstream_status = error.response.status_code
+        headers: dict[str, str] = {}
+        retry_after = error.response.headers.get("retry-after")
+        if retry_after is not None:
+            headers["Retry-After"] = retry_after
+        if upstream_status == 403:
+            return JSONResponse(
+                status_code=403,
+                content=_error(
+                    "miner_not_registered",
+                    "The miner hotkey is not currently registered on subnet 93.",
+                ),
+            )
+        if upstream_status == 429:
+            return JSONResponse(
+                status_code=429,
+                content=_error(
+                    "central_api_rate_limited",
+                    "The central miner API rate limit was reached.",
+                    retryable=True,
+                ),
+                headers=headers,
+            )
+        if upstream_status == 503:
+            return JSONResponse(
+                status_code=503,
+                content=_error(
+                    "central_api_unavailable",
+                    "The central miner API cannot currently verify this request.",
+                    retryable=True,
+                ),
+                headers=headers,
+            )
+        return JSONResponse(
+            status_code=502,
+            content=_error(
+                "central_api_error",
+                "The central miner API returned an unexpected response.",
+                retryable=upstream_status >= 500,
+            ),
+        )
+
+    @app.exception_handler(httpx.RequestError)
+    async def central_api_unreachable(
+        _request: Request,
+        _error_detail: httpx.RequestError,
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content=_error(
+                "central_api_unavailable",
+                "The central miner API is temporarily unreachable.",
+                retryable=True,
+            ),
+        )
+
     @app.get("/api/v1/qualification")
     async def qualification(current: Service) -> dict[str, object]:
         return await current.qualification()
@@ -288,6 +352,26 @@ def create_control_app(
         if result is None:
             raise HTTPException(status_code=404, detail="submission not found")
         return result
+
+    original_openapi = app.openapi
+
+    def application_openapi() -> dict[str, Any]:
+        """Publish the bearer-token boundary in the generated contract."""
+
+        schema = original_openapi()
+        security_schemes = schema.setdefault("components", {}).setdefault(
+            "securitySchemes",
+            {},
+        )
+        security_schemes["BearerAuth"] = {
+            "type": "http",
+            "scheme": "bearer",
+            "description": "BITCAST_X_MINER_API_TOKEN",
+        }
+        schema["security"] = [{"BearerAuth": []}]
+        return schema
+
+    app.openapi = application_openapi  # type: ignore[method-assign]
 
     app.mount("/", protocol_app)
     return app
