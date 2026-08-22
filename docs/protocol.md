@@ -69,15 +69,15 @@ windows, and incomplete emission bounds. The `campaign_id` is the stable identit
 results exist, validators adopt the latest complete record published for that ID, including routing
 and content-rule corrections. The contract stored with final reconciliation is immutable.
 
-`prompt_version` explicitly selects one of five frozen semantic-evaluation templates. Versions 1
-and 2 evaluate conventional sponsored coverage, version 3 evaluates unsponsored conversational
-topics, and version 4 permits critical sponsored coverage. Version 5 evaluates honest product or
-service reviews: positive, neutral, mixed, critical, and negative conclusions are equally valid;
-the post must instead make the product or service its primary subject, contain a specific
-assessment with supporting substance, and meet the brief's objective coverage requirements.
-Sentiment, ratings, and conclusions prescribed by a version-5 brief are not eligibility
-requirements. Existing prompt text remains byte-stable and each template is pinned by a golden
-SHA-256 test.
+`prompt_version` explicitly selects one of three semantic-evaluation templates. Version 1 is a
+generic compliance prompt that checks only whether the post follows every instruction in the
+brief, without adding product-, brand-, review-, or sentiment-specific rules. Version 2 evaluates
+conventional sponsored coverage. Version 5 evaluates honest product or service reviews: positive,
+neutral, mixed, critical, and negative conclusions are equally valid; the post must instead make
+the product or service its primary subject, contain a specific assessment with supporting
+substance, and meet the brief's objective coverage requirements. Sentiment, ratings, and
+conclusions prescribed by a version-5 brief are not eligibility requirements. Versions 2 and 5
+remain byte-stable, and every available template is pinned by a golden SHA-256 test.
 
 The schema and digest checks are implemented in
 [`src/bitcast_x/campaigns.py`](../src/bitcast_x/campaigns.py).
