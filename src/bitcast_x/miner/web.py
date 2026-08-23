@@ -86,6 +86,7 @@ def build_miner_api(settings: Settings) -> FastAPI:
             campaign_source=campaign_source,
             commit_timeout_seconds=settings.miner_api_commit_timeout_seconds,
             results_client=results_client,
+            enabled_ecosystem_ids=settings.miner_enabled_ecosystem_ids,
         )
 
         async def commit_loop() -> None:

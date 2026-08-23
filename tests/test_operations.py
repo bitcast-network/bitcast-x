@@ -52,7 +52,7 @@ def test_sqlite_stores_migrate_and_online_backup_is_consistent(tmp_path: Path) -
     manifest = backup_state(state_dir, destination)
     backup_info = inspect_state(destination)
 
-    assert {item["schema_version"] for item in info["databases"]} == {1, 5}
+    assert {item["schema_version"] for item in info["databases"]} == {2, 5}
     assert {item["integrity"] for item in backup_info["databases"]} == {"ok"}
     assert manifest["files"] == ["miner.sqlite3", "validator.sqlite3"]
     assert json.loads((destination / "manifest.json").read_text())["files"] == manifest["files"]
