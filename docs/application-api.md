@@ -68,3 +68,17 @@ This separation avoids implementation drift without duplicating scoring: the
 node reuses its protocol engine and central result client, while the application
 projection owns authentication, stable naming, collection envelopes,
 idempotency, and errors.
+
+## Known consumers
+
+This contract is shared infrastructure, not a private route set for one UI. Its
+known consumers include Stitch3, Test Drive, and the `x-miner-template`
+reference product. Changes must preserve those consumers even when they live in
+separate repositories and deploy on different schedules.
+
+A producer-only test suite is therefore insufficient for an application API
+change. Before merge, verify the OpenAPI contract here and the affected
+cross-repository consumer suites. Keep the old and new behavior available for
+the documented overlap window when consumers cannot upgrade atomically; never
+repurpose an existing v1 field, status, error, authentication rule, or mutation
+identity while a supported consumer may still depend on it.
