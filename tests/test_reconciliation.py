@@ -10,6 +10,7 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap, Soci
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError, ReconciliationUnavailableError
 from bitcast_x.protocol import (
+    CREATOR_BINDING_ACTIVATION_BLOCK,
     AttributionReason,
     CampaignAccess,
     ClaimEvent,
@@ -115,13 +116,17 @@ class MultiCampaignPublisher:
         return True
 
 
-def campaign(*, exclusive: str | None = None) -> CampaignRecord:
+def campaign(
+    *,
+    exclusive: str | None = None,
+    scoring_close_block: int = 20,
+) -> CampaignRecord:
     return CampaignRecord(
         access=CampaignAccess(
             campaign_id="campaign",
             mechanism_id=1,
             mining_protocol=MiningProtocol.PRECLAIM_V2,
-            scoring_close_block=20,
+            scoring_close_block=scoring_close_block,
             exclusive_miner_hotkey=exclusive,
         ),
         title="Campaign",
@@ -238,6 +243,7 @@ def open_history(
         tweet_id="999",
         claim_id=claim.claim_id,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     second = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -285,6 +291,7 @@ def miner_claim_history(
             tweet_id=tweet_id,
             claim_id=claim_id,
             miner_hotkey=hotkey,
+            creator_x_id="456",
         )
         next_batch = CommittedBatch.create(
             miner_hotkey=hotkey,
@@ -484,6 +491,7 @@ async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: P
         tweet_id="999",
         claim_id="04" * 16,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -558,6 +566,7 @@ async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path
         tweet_id="999",
         claim_id=None,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -591,6 +600,7 @@ async def test_late_submission_is_audited_without_fetching_x(tmp_path: Path) -> 
         tweet_id="999",
         claim_id=None,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -637,6 +647,7 @@ async def test_exclusive_campaign_skips_claim_and_matcher(tmp_path: Path) -> Non
         tweet_id="999",
         claim_id=None,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -662,6 +673,107 @@ async def test_exclusive_campaign_skips_claim_and_matcher(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("submitted_creator_x_id", [None, "789"])
+async def test_exclusive_campaign_rejects_missing_or_wrong_submitter_identity_at_activation(
+    tmp_path: Path,
+    submitted_creator_x_id: str | None,
+) -> None:
+    store = ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        start_block=CREATOR_BINDING_ACTIVATION_BLOCK,
+    )
+    submission = SubmissionEvent(
+        version=2 if submitted_creator_x_id is None else 3,
+        submission_id="03" * 16,
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=None,
+        miner_hotkey=MINER,
+        creator_x_id=submitted_creator_x_id,
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(submission,),
+    )
+    persist_batch(
+        store,
+        batch,
+        block=CREATOR_BINDING_ACTIVATION_BLOCK,
+        timestamp=NOW + timedelta(minutes=20),
+    )
+    record = campaign(
+        exclusive=MINER,
+        scoring_close_block=CREATOR_BINDING_ACTIVATION_BLOCK + 1,
+    )
+    qualification = FakeQualification()
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        qualification,
+    )
+
+    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
+
+    assert result.accepted is False
+    assert result.reason is AttributionReason.AUTHOR_MISMATCH
+    assert result.miner_hotkey == MINER
+    assert result.submission_id == submission.submission_id
+    assert qualification.calls == []
+
+
+@pytest.mark.asyncio
+async def test_exclusive_campaign_accepts_legacy_submission_before_activation(
+    tmp_path: Path,
+) -> None:
+    store = ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        start_block=CREATOR_BINDING_ACTIVATION_BLOCK - 1,
+    )
+    submission = SubmissionEvent(
+        version=2,
+        submission_id="03" * 16,
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=None,
+        miner_hotkey=MINER,
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(submission,),
+    )
+    persist_batch(
+        store,
+        batch,
+        block=CREATOR_BINDING_ACTIVATION_BLOCK - 1,
+        timestamp=NOW + timedelta(minutes=20),
+    )
+    record = campaign(
+        exclusive=MINER,
+        scoring_close_block=CREATOR_BINDING_ACTIVATION_BLOCK + 1,
+    )
+    qualification = FakeQualification()
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        qualification,
+    )
+
+    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
+
+    assert result.accepted is True
+    assert result.miner_hotkey == MINER
+    assert result.submission_id == submission.submission_id
+    assert qualification.calls == [
+        CREATOR_BINDING_ACTIVATION_BLOCK - 1,
+        CREATOR_BINDING_ACTIVATION_BLOCK + 1,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_exclusive_campaign_rejects_a_different_miner(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
     submission = SubmissionEvent(
@@ -670,6 +782,7 @@ async def test_exclusive_campaign_rejects_a_different_miner(tmp_path: Path) -> N
         tweet_id="999",
         claim_id=None,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -702,6 +815,7 @@ async def test_exclusive_submission_unqualified_at_commitment_cannot_be_rescued(
         tweet_id="999",
         claim_id=None,
         miner_hotkey=MINER,
+        creator_x_id="456",
     )
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -955,6 +1069,7 @@ def _two_campaign_finalization(
                 tweet_id="998",
                 claim_id=None,
                 miner_hotkey=MINER,
+                creator_x_id="456",
             ),
             SubmissionEvent(
                 submission_id="04" * 16,
@@ -962,6 +1077,7 @@ def _two_campaign_finalization(
                 tweet_id="999",
                 claim_id=None,
                 miner_hotkey=MINER,
+                creator_x_id="456",
             ),
         ),
     )
@@ -998,6 +1114,7 @@ async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: P
                 tweet_id="998",
                 claim_id=None,
                 miner_hotkey=MINER,
+                creator_x_id="456",
             ),
             SubmissionEvent(
                 submission_id="04" * 16,
@@ -1005,6 +1122,7 @@ async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: P
                 tweet_id="999",
                 claim_id=None,
                 miner_hotkey=MINER,
+                creator_x_id="456",
             ),
         ),
     )
@@ -1171,6 +1289,7 @@ async def test_preview_defers_only_the_tweet_with_unavailable_evidence(tmp_path:
                 tweet_id="998",
                 claim_id=None,
                 miner_hotkey=MINER,
+                creator_x_id="456",
             ),
             SubmissionEvent(
                 submission_id="04" * 16,
@@ -1178,6 +1297,7 @@ async def test_preview_defers_only_the_tweet_with_unavailable_evidence(tmp_path:
                 tweet_id="999",
                 claim_id=None,
                 miner_hotkey=MINER,
+                creator_x_id="456",
             ),
         ),
     )

@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--campaign-id", required=True)
     submit.add_argument("--tweet-id", required=True)
     submit.add_argument("--claim-id")
+    submit.add_argument("--creator-x-id", required=True)
 
     submission_status = commands.add_parser(
         "submission-status", help="inspect a local tweet submission"
@@ -138,6 +139,7 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
                 campaign_id=arguments.campaign_id,
                 tweet_id=arguments.tweet_id,
                 claim_id=arguments.claim_id,
+                creator_x_id=arguments.creator_x_id,
             )
             await sdk.engine.commit_ready(force=True)
             status = sdk.submission_status(submission_id)

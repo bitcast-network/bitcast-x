@@ -15,6 +15,7 @@ from bitcast_x.campaigns import (
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.matcher import MatchCandidate, choose_match, normalize_match_text
 from bitcast_x.protocol import (
+    CREATOR_BINDING_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     ClaimEvent,
@@ -359,6 +360,7 @@ class CampaignReconciler:
     ) -> AttributionResult:
         expected = campaign.access.exclusive_miner_hotkey
         candidate_seen = False
+        identity_match_seen = False
         rejected_candidate: SubmissionEvent | None = None
         pending_candidate: SubmissionEvent | None = None
         for located in reversed(submissions):
@@ -368,6 +370,14 @@ class CampaignReconciler:
             candidate_seen = True
             if rejected_candidate is None:
                 rejected_candidate = event
+            if event.creator_x_id is not None and event.creator_x_id != tweet.author_x_id:
+                continue
+            if (
+                event.creator_x_id is None
+                and located.position.block >= CREATOR_BINDING_ACTIVATION_BLOCK
+            ):
+                continue
+            identity_match_seen = True
             if not await self._qualified(event.miner_hotkey, located.position.block):
                 continue
             qualification_block = min(
@@ -405,8 +415,12 @@ class CampaignReconciler:
             campaign,
             (
                 AttributionReason.MINER_NOT_QUALIFIED
-                if candidate_seen
-                else AttributionReason.WRONG_EXCLUSIVE_MINER
+                if identity_match_seen
+                else (
+                    AttributionReason.AUTHOR_MISMATCH
+                    if candidate_seen
+                    else AttributionReason.WRONG_EXCLUSIVE_MINER
+                )
             ),
             submission=rejected_candidate,
         )
@@ -439,6 +453,7 @@ class CampaignReconciler:
                 continue
             if (
                 claim.claim.creator_x_id != tweet.author_x_id
+                or (event.creator_x_id is not None and event.creator_x_id != tweet.author_x_id)
                 or claim.claim.campaign_id != event.campaign_id
             ):
                 failures.append((located.order, AttributionReason.AUTHOR_MISMATCH))

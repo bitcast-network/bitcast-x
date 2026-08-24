@@ -180,6 +180,10 @@ class MinerStore:
         )
         payload = event.model_dump_json()
         reveal_json = reveal.model_dump_json() if reveal is not None else None
+        if metadata is not None:
+            event_creator_x_id = event.creator_x_id
+            if event_creator_x_id is None or event_creator_x_id != metadata.creator_x_id:
+                raise ProtocolError("operation creator_x_id must match the committed event")
         with self._transaction() as connection:
             if metadata is not None:
                 idempotent = connection.execute(
@@ -358,8 +362,7 @@ class MinerStore:
                     "ecosystem_ids": (
                         json.loads(row["ecosystem_ids_json"]) if row["ecosystem_ids_json"] else []
                     ),
-                    "creator_x_id": row["creator_x_id"]
-                    or (event.creator_x_id if isinstance(event, ClaimEvent) else None),
+                    "creator_x_id": row["creator_x_id"] or event.creator_x_id,
                     "commitment": {
                         "status": ("finalized" if row["batch_state"] == "finalized" else "queued"),
                         "batch_sequence": row["batch_sequence"],
@@ -399,6 +402,7 @@ class MinerStore:
                     "campaign_id": event.campaign_id,
                     "tweet_id": event.tweet_id,
                     "claim_id": event.claim_id,
+                    "creator_x_id": event.creator_x_id,
                     "status": str(row["status"]),
                     "created_ns": int(row["created_ns"]),
                 }
@@ -411,6 +415,7 @@ class MinerStore:
         campaign_id: str,
         tweet_id: str,
         claim_id: str | None,
+        creator_x_id: str,
     ) -> str | None:
         """Return the oldest durable submission for an idempotency identity."""
 
@@ -419,6 +424,7 @@ class MinerStore:
                 submission["campaign_id"] == campaign_id
                 and submission["tweet_id"] == tweet_id
                 and submission["claim_id"] == claim_id
+                and submission["creator_x_id"] == creator_x_id
             ):
                 return str(submission["submission_id"])
         return None

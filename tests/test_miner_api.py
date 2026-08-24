@@ -582,6 +582,7 @@ def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) ->
     assert page.next_sequence == 2
     assert page.batches[0].batch["events"][0]["claim_id"] == claim["claim_id"]
     assert page.batches[1].batch["events"][0]["submission_id"] == submission["submission_id"]
+    assert page.batches[1].batch["events"][0]["creator_x_id"] == "123"
     consumed = restarted.store.receipt(claim["claim_id"])
     assert consumed is not None
     assert consumed["status"] == "consumed"

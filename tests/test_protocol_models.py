@@ -82,6 +82,7 @@ def test_batch_rejects_submission_for_other_miner() -> None:
         tweet_id="1234",
         claim_id=CLAIM_ID,
         miner_hotkey="5F" + "x" * 46,
+        creator_x_id="456",
     )
     with pytest.raises(ValidationError, match="must match"):
         BatchContent(
@@ -90,6 +91,55 @@ def test_batch_rejects_submission_for_other_miner() -> None:
             previous_batch_hash=None,
             events=(submission,),
         )
+
+
+def test_submission_creator_binding_is_committed() -> None:
+    submission = SubmissionEvent(
+        submission_id=SUBMISSION_ID,
+        campaign_id="campaign",
+        tweet_id="1234",
+        claim_id=None,
+        miner_hotkey=MINER,
+        creator_x_id="456",
+    )
+
+    assert submission.version == 3
+    assert submission.model_dump()["creator_x_id"] == "456"
+
+
+def test_historical_submission_without_creator_keeps_its_original_hash_shape() -> None:
+    submission = SubmissionEvent(
+        version=2,
+        submission_id=SUBMISSION_ID,
+        campaign_id="campaign",
+        tweet_id="1234",
+        claim_id=None,
+        miner_hotkey=MINER,
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(submission,),
+    )
+
+    assert "creator_x_id" not in submission.model_dump()
+    assert CommittedBatch.model_validate_json(batch.model_dump_json()) == batch
+
+
+def test_submission_versions_enforce_their_creator_binding_shape() -> None:
+    common = {
+        "submission_id": SUBMISSION_ID,
+        "campaign_id": "campaign",
+        "tweet_id": "1234",
+        "claim_id": None,
+        "miner_hotkey": MINER,
+    }
+
+    with pytest.raises(ValidationError, match="version 2 submissions cannot include"):
+        SubmissionEvent(version=2, creator_x_id="456", **common)
+    with pytest.raises(ValidationError, match="version 3 submissions require"):
+        SubmissionEvent(version=3, **common)
 
 
 def test_attribution_acceptance_must_match_reason() -> None:

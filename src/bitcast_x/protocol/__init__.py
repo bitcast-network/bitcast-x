@@ -2,6 +2,7 @@
 
 from bitcast_x.protocol.commitments import CommitmentEnvelope
 from bitcast_x.protocol.models import (
+    CREATOR_BINDING_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     BatchContent,
@@ -17,6 +18,7 @@ from bitcast_x.protocol.models import (
 from bitcast_x.protocol.state import BatchChainVerifier, ClaimLedger, ClaimRecord
 
 __all__ = [
+    "CREATOR_BINDING_ACTIVATION_BLOCK",
     "AttributionReason",
     "AttributionResult",
     "BatchContent",

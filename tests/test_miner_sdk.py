@@ -97,6 +97,7 @@ async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path
         campaign_id="campaign",
         tweet_id="999",
         claim_id=claim_id,
+        creator_x_id="123",
     )
 
     batch = await sdk.engine.commit_ready(force=True)
@@ -120,6 +121,7 @@ async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path
             "campaign_id": "campaign",
             "tweet_id": "999",
             "claim_id": claim_id,
+            "creator_x_id": "123",
             "status": "verification_pending",
             "created_ns": sdk.submissions()[0]["created_ns"],
         }
@@ -272,6 +274,7 @@ def test_submission_rejects_claim_owned_by_another_miner(tmp_path: Path) -> None
             campaign_id="campaign",
             tweet_id="999",
             claim_id="01" * 16,
+            creator_x_id="123",
         )
 
 
@@ -282,6 +285,7 @@ def test_submission_identity_is_idempotent_across_restart(tmp_path: Path) -> Non
         campaign_id="campaign",
         tweet_id="999",
         claim_id=None,
+        creator_x_id="123",
     )
 
     restarted = build_sdk(database, FakeSubmitter())
@@ -289,10 +293,31 @@ def test_submission_identity_is_idempotent_across_restart(tmp_path: Path) -> Non
         campaign_id="campaign",
         tweet_id="999",
         claim_id=None,
+        creator_x_id="123",
     )
 
     assert repeated_id == submission_id
     assert len(restarted.submissions()) == 1
+
+
+def test_submission_identity_includes_the_signed_creator(tmp_path: Path) -> None:
+    sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
+
+    first_id = sdk.submit_tweet(
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=None,
+        creator_x_id="123",
+    )
+    second_id = sdk.submit_tweet(
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=None,
+        creator_x_id="456",
+    )
+
+    assert second_id != first_id
+    assert {item["creator_x_id"] for item in sdk.submissions()} == {"123", "456"}
 
 
 @pytest.mark.asyncio
@@ -312,7 +337,12 @@ async def test_batch_limit_covers_complete_payload_and_private_reveal(tmp_path: 
     )
     await engine.commit_ready(force=True)
     engine.policy = BatchPolicy(max_age_seconds=5, max_events=100, max_batch_bytes=300)
-    sdk.submit_tweet(campaign_id="campaign", tweet_id="999", claim_id=claim_id)
+    sdk.submit_tweet(
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=claim_id,
+        creator_x_id="123",
+    )
 
     with pytest.raises(ProtocolError, match="exceeds the maximum batch byte size"):
         await engine.commit_ready(force=True)

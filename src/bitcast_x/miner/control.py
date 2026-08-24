@@ -316,6 +316,7 @@ class MinerControlService:
             campaign_id=campaign_id,
             tweet_id=tweet_id,
             claim_id=claim_id,
+            creator_x_id=creator_x_id,
             metadata=metadata,
         )
         submission = await self.submission_status(submission_id)
