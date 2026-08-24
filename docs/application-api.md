@@ -33,6 +33,10 @@ reusing a key with a different payload returns `409 idempotency_conflict`.
 `external_id` lets a platform reconcile its own durable record without making
 that identifier protocol-authoritative.
 
+Every submission requires the immutable numeric `creator_x_id` resolved from the authenticated
+platform session. The miner commits it into the protocol event; validators independently compare
+it with the fetched tweet author before a direct/exclusive submission can be attributed.
+
 All `/api/v1` responses carry `Cache-Control: no-store`. Errors use:
 
 ```json

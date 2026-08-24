@@ -66,14 +66,16 @@ The minimal creator journey can be exercised from the same installation:
 uv run bitcast-x campaigns
 uv run bitcast-x claim --campaign-id CAMPAIGN --creator-x-id 123 --draft "Private draft"
 uv run bitcast-x claim-status CLAIM_ID
-uv run bitcast-x submit --campaign-id CAMPAIGN --tweet-id 123456789 --claim-id CLAIM_ID
+uv run bitcast-x submit --campaign-id CAMPAIGN --tweet-id 123456789 --claim-id CLAIM_ID \
+  --creator-x-id 123
 uv run bitcast-x submission-status SUBMISSION_ID
 uv run bitcast-x qualification
 ```
 
 `claim` returns `safe_to_post` only after finalization and exact storage verification. A null claim
-is the exclusive-campaign submission shape; validators independently enforce the campaign feed,
-exclusive hotkey, X authorship, qualification and attribution rules.
+is the exclusive-campaign submission shape; validators independently require its committed creator
+X ID to match the fetched tweet author and enforce the campaign feed, exclusive hotkey,
+qualification and attribution rules.
 
 ## 🛡️ Validator operation
 

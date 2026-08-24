@@ -248,6 +248,7 @@ class MinerSdk:
         campaign_id: str,
         tweet_id: str,
         claim_id: str | None,
+        creator_x_id: str,
         metadata: OperationMetadata | None = None,
     ) -> str:
         """Queue a completed tweet mapping and return its submission id."""
@@ -259,11 +260,18 @@ class MinerSdk:
             campaign_id=campaign_id,
             tweet_id=tweet_id,
             claim_id=claim_id,
+            creator_x_id=creator_x_id,
         )
         if existing is not None:
             return existing
         identity = "\0".join(
-            (self.engine.miner_hotkey, campaign_id, tweet_id, claim_id or "")
+            (
+                self.engine.miner_hotkey,
+                campaign_id,
+                tweet_id,
+                claim_id or "",
+                creator_x_id,
+            )
         ).encode()
         submission_id = hashlib.sha256(identity).hexdigest()[:32]
         submission = SubmissionEvent(
@@ -272,6 +280,7 @@ class MinerSdk:
             tweet_id=tweet_id,
             claim_id=claim_id,
             miner_hotkey=self.engine.miner_hotkey,
+            creator_x_id=creator_x_id,
         )
         return self.engine.enqueue(submission, metadata=metadata)
 

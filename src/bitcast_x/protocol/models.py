@@ -2,20 +2,26 @@
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Final, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     StringConstraints,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 from bitcast_x.protocol.canonical import hash_hex, normalize_text
 
 ProtocolId = Literal[2]
+SubmissionProtocolId = Literal[2, 3]
+# Direct submissions committed before this block use the legacy creator-resolution
+# rule. At and after it, validators require the version-3 creator binding.
+CREATOR_BINDING_ACTIVATION_BLOCK: Final = 8_920_000
 Hex128 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 Hash256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NumericId = Annotated[str, StringConstraints(pattern=r"^[0-9]+$")]
@@ -84,18 +90,43 @@ class ClaimEvent(ProtocolModel):
 class SubmissionEvent(ProtocolModel):
     """A miner's committed mapping from an X tweet to an optional claim."""
 
-    version: ProtocolId = 2
+    version: SubmissionProtocolId = 3
     kind: Literal["submission"] = "submission"
     submission_id: Hex128
     campaign_id: str = Field(min_length=1, max_length=128)
     tweet_id: NumericId
     claim_id: Hex128 | None
     miner_hotkey: Hotkey
+    # Optional only for replaying version-2 submissions committed before creator
+    # binding was introduced. Version-3 submissions always populate this field.
+    creator_x_id: NumericId | None = None
 
     @field_validator("campaign_id")
     @classmethod
     def normalize_campaign_id(cls, value: str) -> str:
         return normalize_text(value)
+
+    @model_validator(mode="after")
+    def require_versioned_creator_binding(self) -> "SubmissionEvent":
+        """Keep the historical and creator-bound event schemas unambiguous."""
+
+        if self.version == 2 and self.creator_x_id is not None:
+            raise ValueError("version 2 submissions cannot include creator_x_id")
+        if self.version == 3 and self.creator_x_id is None:
+            raise ValueError("version 3 submissions require creator_x_id")
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_creator_binding(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Preserve hashes for historical submissions that predate this field."""
+
+        data: dict[str, Any] = handler(self)
+        if self.creator_x_id is None:
+            data.pop("creator_x_id", None)
+        return data
 
 
 ProtocolEvent = Annotated[ClaimEvent | SubmissionEvent, Field(discriminator="kind")]

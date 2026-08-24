@@ -37,7 +37,8 @@ Several version numbers cover different boundaries and must not be conflated:
 | Campaign manifest | `4` | Adds each campaign's required top-`max_members` creator-rank cutoff |
 | Validator-to-miner HTTP | `3` | `/v3/batches` includes each batch's claimed finalized chain position |
 | Temporary HTTP overlap | `2` | `/v2/batches` returns the same complete batches without positions |
-| Claim, submission, and batch content | `2` | Strict event schemas, canonical hashing, and `DX2` on-chain envelopes |
+| Claim and batch content | `2` | Strict schemas, canonical hashing, and `DX2` on-chain envelopes |
+| Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
 | Campaign mining mode | `preclaim_v2` or `legacy_connection` | Selects the new committed-claim path or temporary imported legacy behavior |
 
 The strict wire models are in
@@ -96,8 +97,8 @@ For an open `preclaim_v2` campaign:
    Bittensor's Commitments pallet. The platform reports `safe_to_post` only after finalization and
    an exact read-back of the stored bytes.
 4. After the creator publishes, the platform queues a `SubmissionEvent` containing the campaign,
-   numeric tweet ID, miner hotkey, and `claim_id`. The corresponding draft reveal is served with the
-   completed batch so validators can recompute the earlier commitment.
+   numeric tweet ID, miner hotkey, signed creator X ID, and `claim_id`. The corresponding draft
+   reveal is served with the completed batch so validators can recompute the earlier commitment.
 5. The submission must be committed no later than `scoring_close_block`.
 
 At most five unconsumed claims are active for each `(miner hotkey, campaign, creator X ID)`. Claims
@@ -105,8 +106,12 @@ are ordered by finalized block, extrinsic index, and event index; a sixth claim 
 An accepted claim is consumed and cannot win another tweet.
 
 An exclusive campaign skips claims and lexical matching. Its submission uses a null `claim_id` and
-is accepted only from the campaign's fixed exclusive miner hotkey after the normal tweet,
-qualification, and timing checks.
+is accepted only from the campaign's fixed exclusive miner hotkey when the committed creator X ID
+equals the independently fetched tweet author, after the normal tweet, qualification, and timing
+checks. A version-2 direct submission committed before block `8,920,000` remains governed by the
+legacy rule so already committed campaign work is not retroactively invalidated. At and after that
+activation block, direct submissions must be version 3 and the creator binding must match. A
+creator ID present on any submission must always match the independently fetched author.
 
 The reference platform API exposes these operations behind bearer authentication at
 `/api/v1/claims`, `/api/v1/submissions`, `/api/v1/campaigns`, and

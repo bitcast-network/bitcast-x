@@ -269,6 +269,7 @@ async def test_real_creator_journey_survives_restart_and_reaches_attribution(
             campaign_id=CAMPAIGN_ID,
             tweet_id=TWEET_ID,
             claim_id=claim_id,
+            creator_x_id=CREATOR_X_ID,
         )
         submission_batch = await restarted_engine.commit_ready(force=True)
         assert submission_batch is not None

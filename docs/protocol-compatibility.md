@@ -4,8 +4,8 @@ This policy governs changes to the behavior defined by the local
 [Bitcast X v3 protocol](protocol.md). Both documents are versioned with each release of this
 repository.
 
-Protocol version `2` is the first Bitcast X v3 wire version. Protocol version `3` adds the finalized
-block and extrinsic index beside each otherwise unchanged complete batch. The campaign feed,
+Validator-to-miner transport version `2` is the first Bitcast X v3 wire version. Transport version
+`3` adds the finalized block and extrinsic index beside each otherwise unchanged complete batch. The campaign feed,
 commitment envelope, canonical batch hashes, signed batch request/response and attribution reason
 strings are consensus-visible contracts.
 
@@ -34,6 +34,10 @@ strings are consensus-visible contracts.
   preclaim economics do not share their established meanings.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version, golden vectors and a shadow overlap period.
+- Submission event version 3 adds `creator_x_id`. Validators replay historical version-2 events
+  without changing their canonical hashes. For exclusive campaigns, version-2 direct submissions
+  are accepted only when committed before block `8,920,000`; version-3 creator binding is mandatory
+  at and after that activation block. Miners must emit only version 3 after upgrading.
 - During an overlap, validators may read explicitly supported old and new versions but must produce
   one deterministic decision for each campaign according to the latest published `mining_protocol`
   until that campaign's final result is frozen.
