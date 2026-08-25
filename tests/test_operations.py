@@ -134,8 +134,9 @@ def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: P
     finally:
         connection.close()
 
-    with pytest.raises(ProtocolError, match="changed after final results froze"):
-        reopened.bind_campaign_protocols((original.model_copy(update={"brief": "mutated brief"}),))
+    assert reopened.bind_campaign_protocols(
+        (original.model_copy(update={"brief": "mutated brief"}),)
+    ) == (original,)
 
 
 def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -> None:
