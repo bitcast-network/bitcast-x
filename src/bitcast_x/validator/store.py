@@ -45,7 +45,63 @@ def _same_campaign_contract(first: str, second: str) -> bool:
 
 
 def _campaign_has_frozen_results(connection: sqlite3.Connection, campaign_id: str) -> bool:
-    """Return whether a campaign has crossed into irreversible validator output."""
+    """Return whether a campaign has produced an irreversible reward allocation."""
+
+    reward_row = connection.execute(
+        "SELECT rewards_json FROM campaign_rewards WHERE campaign_id = ?",
+        (campaign_id,),
+    ).fetchone()
+    if reward_row is not None:
+        if _rewards_have_positive_allocation(str(reward_row["rewards_json"])):
+            return True
+
+    publication_row = connection.execute(
+        "SELECT payload_json, succeeded FROM publications WHERE campaign_id = ?",
+        (campaign_id,),
+    ).fetchone()
+    return bool(
+        publication_row is not None
+        and publication_row["succeeded"]
+        and _publication_has_reward_allocation(str(publication_row["payload_json"]))
+    )
+
+
+def _rewards_have_positive_allocation(rewards_json: str) -> bool:
+    """Return whether stored campaign economics contain a positive allocation."""
+
+    try:
+        rewards = json.loads(rewards_json)
+        if not isinstance(rewards, list):
+            return True
+        return any(
+            isinstance(reward, dict) and float(reward.get("daily_usd_floor") or 0.0) > 0
+            for reward in rewards
+        )
+    except (TypeError, ValueError):
+        # Unreadable economic state must fail closed rather than be reopened.
+        return True
+
+
+def _publication_has_reward_allocation(payload_json: str) -> bool:
+    """Return whether one stored publication contains a positive tweet allocation."""
+
+    try:
+        payload = json.loads(payload_json)
+        tweets = payload.get("tweets", []) if isinstance(payload, dict) else []
+        return any(
+            isinstance(tweet, dict) and float(tweet.get("usd_target") or 0.0) > 0
+            for tweet in tweets
+        )
+    except (TypeError, ValueError):
+        # A malformed successful publication is not safe to replace.
+        return True
+
+
+def _campaign_has_provisional_results(
+    connection: sqlite3.Connection,
+    campaign_id: str,
+) -> bool:
+    """Return whether retryable zero-value state already exists for a campaign."""
 
     return bool(
         connection.execute(
@@ -365,6 +421,10 @@ class ValidatorStore:
                     )
                     bound_campaigns.append(frozen_campaign)
                     continue
+                reopening_provisional = _campaign_has_provisional_results(
+                    connection,
+                    campaign_id,
+                )
                 connection.execute(
                     """
                     UPDATE campaign_protocols
@@ -375,10 +435,16 @@ class ValidatorStore:
                     """,
                     (protocol, exclusive_hotkey, campaign_json, campaign_id),
                 )
-                LOGGER.warning(
-                    "adopted canonical campaign update before final reconciliation campaign=%s",
-                    campaign_id,
-                )
+                if reopening_provisional:
+                    LOGGER.warning(
+                        "reopened zero-value campaign with latest contract campaign=%s",
+                        campaign_id,
+                    )
+                else:
+                    LOGGER.warning(
+                        "adopted canonical campaign update before reward settlement campaign=%s",
+                        campaign_id,
+                    )
                 bound_campaigns.append(campaign)
         return tuple(bound_campaigns)
 
@@ -655,7 +721,7 @@ class ValidatorStore:
         campaign_json: str,
         results: list[AttributionResult],
     ) -> None:
-        """Freeze one replay result idempotently; changed output is a consensus failure."""
+        """Store retryable attribution state until a positive reward allocation freezes it."""
 
         results_json = TypeAdapter(list[AttributionResult]).dump_json(results).decode()
         with self._transaction() as connection:
@@ -666,18 +732,41 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and _campaign_has_frozen_results(connection, campaign_id):
                 if (
                     _same_campaign_contract(existing["campaign_json"], campaign_json)
                     and existing["results_json"] == results_json
                 ):
                     return
                 raise ProtocolError("frozen campaign reconciliation changed on replay")
+            if existing is not None:
+                # A fresh retry replaces all downstream zero-value state. Removing
+                # the child score first also permits a new feed snapshot identifier.
+                connection.execute(
+                    "DELETE FROM scored_reconciliations WHERE campaign_id = ?",
+                    (campaign_id,),
+                )
+                connection.execute(
+                    "DELETE FROM rewarded_tweets WHERE campaign_id = ?",
+                    (campaign_id,),
+                )
+                connection.execute(
+                    "DELETE FROM campaign_rewards WHERE campaign_id = ?",
+                    (campaign_id,),
+                )
+                connection.execute(
+                    "DELETE FROM publications WHERE campaign_id = ?",
+                    (campaign_id,),
+                )
             connection.execute(
                 """
                 INSERT INTO reconciliations(
                     snapshot_id, campaign_id, campaign_json, results_json
                 ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(campaign_id) DO UPDATE SET
+                    snapshot_id = excluded.snapshot_id,
+                    campaign_json = excluded.campaign_json,
+                    results_json = excluded.results_json
                 """,
                 (snapshot_id, campaign_id, campaign_json, results_json),
             )
@@ -688,7 +777,7 @@ class ValidatorStore:
         campaign_id: str,
         campaign_json: str,
     ) -> list[AttributionResult] | None:
-        """Return a frozen attribution set without refetching mutable external evidence."""
+        """Return stored attribution state for inspection or final replay."""
 
         with self._connect() as connection:
             row = connection.execute(
@@ -710,7 +799,7 @@ class ValidatorStore:
         )
 
     def campaign_reconciled(self, campaign_id: str) -> bool:
-        """Return whether a campaign has a frozen reconciliation, including an empty one."""
+        """Return whether a campaign has stored reconciliation state for this cycle."""
 
         with self._connect() as connection:
             row = connection.execute(
@@ -719,16 +808,27 @@ class ValidatorStore:
             ).fetchone()
         return row is not None
 
+    def campaign_finalized(self, campaign_id: str) -> bool:
+        """Return whether positive economics make a campaign immutable."""
+
+        with self._connect() as connection:
+            return _campaign_has_frozen_results(connection, campaign_id)
+
     def reconciled_campaigns(self) -> list["CampaignRecord"]:
-        """Return immutable campaign records retained after scoring close."""
+        """Return campaigns retained by a positive, immutable reward allocation."""
 
         from bitcast_x.campaigns import CampaignRecord
 
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT campaign_json FROM reconciliations ORDER BY campaign_id"
+                "SELECT campaign_id, campaign_json FROM reconciliations ORDER BY campaign_id"
             ).fetchall()
-        return [CampaignRecord.model_validate_json(row["campaign_json"]) for row in rows]
+            frozen_rows = [
+                row
+                for row in rows
+                if _campaign_has_frozen_results(connection, str(row["campaign_id"]))
+            ]
+        return [CampaignRecord.model_validate_json(row["campaign_json"]) for row in frozen_rows]
 
     def scored_reconciliation(
         self, snapshot_id: str, campaign_id: str
@@ -755,7 +855,7 @@ class ValidatorStore:
         campaign_id: str,
         scored: list["ScoredAttribution"],
     ) -> None:
-        """Freeze engagement evidence once; changed replay is rejected."""
+        """Store retryable engagement evidence until positive economics freeze it."""
 
         from bitcast_x.validator.scoring import ScoredAttribution
 
@@ -777,10 +877,15 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-            if existing is not None:
+            if existing is not None and _campaign_has_frozen_results(connection, campaign_id):
                 if existing["scored_json"] == payload:
                     return
                 raise ProtocolError("frozen campaign scores changed on replay")
+            if existing is not None:
+                connection.execute(
+                    "DELETE FROM scored_reconciliations WHERE campaign_id = ?",
+                    (campaign_id,),
+                )
             connection.execute(
                 """
                 INSERT INTO scored_reconciliations(snapshot_id, campaign_id, scored_json)
@@ -845,17 +950,21 @@ class ValidatorStore:
         return result
 
     def publication_succeeded(self, snapshot_id: str, campaign_id: str) -> bool:
-        """Return whether ingestion accepted this campaign snapshot already."""
+        """Return whether ingestion accepted a positive final allocation already."""
 
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT succeeded FROM publications
+                SELECT payload_json, succeeded FROM publications
                 WHERE campaign_id = ?
                 """,
                 (campaign_id,),
             ).fetchone()
-        return row is not None and bool(row["succeeded"])
+        return bool(
+            row is not None
+            and row["succeeded"]
+            and _publication_has_reward_allocation(str(row["payload_json"]))
+        )
 
     def record_publication(
         self,
@@ -866,7 +975,7 @@ class ValidatorStore:
         payload: dict[str, object],
         succeeded: bool,
     ) -> None:
-        """Durably record an ingestion attempt, retaining a successful result forever."""
+        """Durably record an attempt, retaining successful positive output forever."""
 
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._transaction() as connection:
@@ -877,7 +986,11 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-            if existing is not None and bool(existing["succeeded"]):
+            if (
+                existing is not None
+                and bool(existing["succeeded"])
+                and _publication_has_reward_allocation(str(existing["payload_json"]))
+            ):
                 if existing["run_id"] != run_id or existing["payload_json"] != payload_json:
                     raise ProtocolError("successful publication changed on replay")
                 return
@@ -921,8 +1034,8 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-        if row is None:
-            return None
+            if row is None or not _campaign_has_frozen_results(connection, campaign_id):
+                return None
         if not _same_campaign_contract(row["campaign_json"], campaign_json):
             raise ProtocolError(f"campaign {campaign_id} changed after reward assignment")
         return (
@@ -939,7 +1052,7 @@ class ValidatorStore:
         rewards: list["TweetReward"],
         decisions: list["RewardDecision"],
     ) -> None:
-        """Atomically freeze assignments and reserve accepted tweet IDs globally."""
+        """Replace zero-value economics until a real allocation freezes assignments."""
 
         from bitcast_x.rewards import RewardDecision, TweetReward
 
@@ -953,7 +1066,8 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-            if existing is not None:
+            frozen = _campaign_has_frozen_results(connection, campaign_id)
+            if existing is not None and frozen:
                 if (
                     _same_campaign_contract(existing["campaign_json"], campaign_json)
                     and existing["rewards_json"] == rewards_json
@@ -961,11 +1075,21 @@ class ValidatorStore:
                 ):
                     return
                 raise ProtocolError(f"campaign {campaign_id} rewards changed on replay")
+            if existing is not None:
+                connection.execute(
+                    "DELETE FROM rewarded_tweets WHERE campaign_id = ?",
+                    (campaign_id,),
+                )
             connection.execute(
                 """
                 INSERT INTO campaign_rewards(
                     campaign_id, snapshot_id, campaign_json, rewards_json, decisions_json
                 ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(campaign_id) DO UPDATE SET
+                    snapshot_id = excluded.snapshot_id,
+                    campaign_json = excluded.campaign_json,
+                    rewards_json = excluded.rewards_json,
+                    decisions_json = excluded.decisions_json
                 """,
                 (campaign_id, snapshot_id, campaign_json, rewards_json, decisions_json),
             )

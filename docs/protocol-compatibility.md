@@ -14,9 +14,9 @@ strings are consensus-visible contracts.
 - Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
   available unchanged during rollout; updated clients prefer v4 and fall back to v3 only when the
   v4 endpoint has not yet been published. A v3 response containing the new field is invalid.
-- Adding the first published cutoff does not rewrite already frozen campaign results. Once a
-  non-null cutoff has been observed, changing it is a campaign-contract mutation and is rejected
-  after final results freeze.
+- Adding the first published cutoff does not rewrite a campaign with a positive reward allocation.
+  Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
+  rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version.
@@ -32,6 +32,11 @@ strings are consensus-visible contracts.
   disposition for an individual tweet whose required evidence was unavailable; independently
   verified tweets still freeze. Legacy `alpha_target` and `weight` fields are null because
   preclaim economics do not share their established meanings.
+- Attribution, score, reward, and successful publication rows with no positive USD allocation are
+  retryable state, not a compatibility boundary. Validators replace that state on each successful
+  cycle, adopt the latest complete record for the same campaign ID, and use payload-addressed
+  preview run IDs for replaceable status updates. The first positive per-tweet daily USD allocation
+  makes the complete campaign result immutable across restarts and feed snapshots.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version, golden vectors and a shadow overlap period.
 - Submission event version 3 adds `creator_x_id`. Validators replay historical version-2 events
@@ -40,7 +45,7 @@ strings are consensus-visible contracts.
   at and after that activation block. Miners must emit only version 3 after upgrading.
 - During an overlap, validators may read explicitly supported old and new versions but must produce
   one deterministic decision for each campaign according to the latest published `mining_protocol`
-  until that campaign's final result is frozen.
+  until that campaign has a positive reward allocation.
 - Miners retain `/v2/batches` as a position-free compatibility endpoint during the v3 overlap. New
   validators use `/v3/batches`; miner-reported positions are untrusted hints and must match the
   exact finalized extrinsic and on-chain envelope before a cursor advances.

@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
@@ -48,7 +49,7 @@ class ShadowResultPublisher:
         block: int,
         hotkey_to_uid: dict[str, int],
     ) -> bool:
-        """Publish a replaceable pre-close result snapshot for miner visibility."""
+        """Publish a replaceable result snapshot for miner visibility."""
 
         scored_tweet_ids = {item.attribution.tweet_id for item in scored}
         publishable_attributions = [
@@ -114,8 +115,9 @@ class ShadowResultPublisher:
         *,
         block: int,
         hotkey_to_uid: dict[str, int],
+        completed_campaign_ids: Collection[str] | None = None,
     ) -> int:
-        """Publish unreported active campaign results and return the success count."""
+        """Publish active final results and replaceable zero-value status updates."""
 
         scored_by_key = {
             (item.attribution.campaign_id, item.attribution.tweet_id): item for item in scored
@@ -140,9 +142,32 @@ class ShadowResultPublisher:
                 campaign.model_dump_json(),
             )
             if frozen_economics is None:
+                completed = (
+                    campaign_id in completed_campaign_ids
+                    if completed_campaign_ids is not None
+                    else self.store.campaign_reconciled(campaign_id)
+                )
+                attributions = (
+                    self.store.reconciliation(
+                        feed.snapshot_id,
+                        campaign_id,
+                        campaign.model_dump_json(),
+                    )
+                    if completed
+                    else None
+                )
+                if attributions is not None:
+                    await self.publish_preview(
+                        feed,
+                        campaign,
+                        [item for item in scored if item.attribution.campaign_id == campaign_id],
+                        attributions,
+                        block=block,
+                        hotkey_to_uid=hotkey_to_uid,
+                    )
                 LOGGER.warning(
                     "final publication deferred campaign=%s block=%s; "
-                    "reward assignment is incomplete",
+                    "positive reward assignment is incomplete",
                     campaign_id,
                     block,
                 )

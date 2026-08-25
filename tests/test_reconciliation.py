@@ -20,6 +20,7 @@ from bitcast_x.protocol import (
     MiningProtocol,
     SubmissionEvent,
 )
+from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
@@ -979,8 +980,9 @@ def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
     )
 
     assert store.reconciliation("snapshot-2", "campaign", current_json) == []
-    assert store.reconciled_campaigns() == [record]
-    assert store.campaign_rewards("campaign", current_json) == ([], [])
+    assert store.reconciled_campaigns() == []
+    assert store.campaign_rewards("campaign", current_json) is None
+    assert store.campaign_finalized("campaign") is False
 
 
 @pytest.mark.asyncio
@@ -1223,10 +1225,12 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
     )
     assert weights == {0: 0.0, 7: 1.0}
     assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
-    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) == ([], [])
+    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
-    assert published == 2
-    assert publisher.run_ids == ["v3:snapshot:campaign-a", "v3:snapshot:campaign-b"]
+    assert published == 1
+    assert len(publisher.run_ids) == 2
+    assert publisher.run_ids[0].startswith("v3-preview:snapshot:campaign-a:")
+    assert publisher.run_ids[1] == "v3:snapshot:campaign-b"
     campaign_a_decision = publisher.payloads[0]["attribution_decisions"][0]  # type: ignore[index]
     assert campaign_a_decision["status"] == "pending"
     assert campaign_a_decision["reason"] == "evidence_unavailable"
@@ -1271,7 +1275,7 @@ async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> No
     assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-a") == []
     assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-b") is not None
     assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
-    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) == ([], [])
+    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
 
 
@@ -1491,6 +1495,22 @@ async def test_campaign_freeze_survives_feed_snapshot_rotation_and_rejects_mutat
     reconciler = CampaignReconciler(store, provider, FakeQualification())
 
     first = await reconciler.reconcile_feed(feed(record), finalized_block=20)
+    store.persist_campaign_rewards(
+        snapshot_id="snapshot",
+        campaign_id=record.access.campaign_id,
+        campaign_json=record.model_dump_json(),
+        rewards=[
+            TweetReward(
+                campaign_id=record.access.campaign_id,
+                tweet_id="999",
+                creator_x_id="456",
+                miner_hotkey=MINER,
+                score=1.0,
+                daily_usd_floor=1.0,
+            )
+        ],
+        decisions=[],
+    )
     rotated = feed(record).model_copy(update={"snapshot_id": "snapshot-2"})
     replay = await reconciler.reconcile_feed(rotated, finalized_block=20)
 
