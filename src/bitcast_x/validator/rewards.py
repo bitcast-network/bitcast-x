@@ -1,6 +1,7 @@
 """Freeze accepted scores and derive shadow emission weights."""
 
 import logging
+from collections.abc import Collection
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ReconciliationUnavailableError
@@ -69,6 +70,13 @@ class RewardCoordinator:
     def __init__(self, store: ValidatorStore, scorer: AttributionScorer) -> None:
         self.store = store
         self._scorer = scorer
+        self._completed_campaign_ids: frozenset[str] | None = None
+
+    @property
+    def completed_campaign_ids(self) -> frozenset[str]:
+        """Return campaigns successfully scored during the latest feed cycle."""
+
+        return self._completed_campaign_ids or frozenset()
 
     async def preview_scores(
         self,
@@ -87,19 +95,33 @@ class RewardCoordinator:
         self,
         feed: CampaignFeed,
         attributions: list[AttributionResult],
+        *,
+        reconciled_campaign_ids: Collection[str] | None = None,
     ) -> list[ScoredAttribution]:
         """Fetch mutable engagement evidence once per campaign snapshot, then reuse it."""
 
         output: list[ScoredAttribution] = []
+        completed_campaign_ids: set[str] = set()
+        self._completed_campaign_ids = frozenset()
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
             if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
                 continue
             campaign_id = campaign.access.campaign_id
-            existing = self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+            existing = (
+                self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                if self.store.campaign_finalized(campaign_id)
+                else None
+            )
             if existing is not None:
                 output.extend(existing)
+                completed_campaign_ids.add(campaign_id)
                 continue
-            if not self.store.campaign_reconciled(campaign_id):
+            reconciled = (
+                campaign_id in reconciled_campaign_ids
+                if reconciled_campaign_ids is not None
+                else self.store.campaign_reconciled(campaign_id)
+            )
+            if not reconciled:
                 continue
             campaign_results = [item for item in attributions if item.campaign_id == campaign_id]
             try:
@@ -117,6 +139,8 @@ class RewardCoordinator:
                 continue
             self.store.persist_scores(feed.snapshot_id, campaign_id, scored)
             output.extend(scored)
+            completed_campaign_ids.add(campaign_id)
+        self._completed_campaign_ids = frozenset(completed_campaign_ids)
         return output
 
     def shadow_weights(
@@ -156,9 +180,20 @@ class RewardCoordinator:
                 frozen_floors.extend(frozen[0])
                 continue
             if campaign_id not in by_campaign:
-                stored_scores = self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                stored_scores = (
+                    self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                    if self.store.campaign_finalized(campaign_id)
+                    else None
+                )
                 if stored_scores is None:
-                    continue
+                    completed = (
+                        campaign_id in self._completed_campaign_ids
+                        if self._completed_campaign_ids is not None
+                        else self.store.campaign_reconciled(campaign_id)
+                    )
+                    if not completed:
+                        continue
+                    stored_scores = []
                 by_campaign[campaign_id] = stored_scores
             tweets = tuple(
                 _reward_tweet(campaign, item)
@@ -221,13 +256,14 @@ class RewardCoordinator:
             end = campaign.emission_end_block
             if start is None or end is None or not start <= block <= end:
                 continue
-            if (
-                self.store.campaign_rewards(
-                    campaign.access.campaign_id,
-                    campaign.model_dump_json(),
-                )
-                is None
-            ):
+            campaign_id = campaign.access.campaign_id
+            frozen = self.store.campaign_rewards(campaign_id, campaign.model_dump_json())
+            completed = (
+                campaign_id in self._completed_campaign_ids
+                if self._completed_campaign_ids is not None
+                else self.store.campaign_reconciled(campaign_id)
+            )
+            if frozen is None and not completed:
                 pending.append(campaign.access.campaign_id)
         return tuple(sorted(pending))
 

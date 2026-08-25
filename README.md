@@ -114,9 +114,11 @@ processing verified histories, becoming ready, or producing the current cycle. W
 is enabled by default and follows the configured on-chain cadence.
 
 Accepted scoring-close evidence, optimistic brief verdicts, engagement scores, participant
-exclusions, and performance/featured bonuses are frozen in the validator database. The complete
-normalized campaign record is bound to its campaign ID before commitments are reconciled or scored;
-any change to its public, access, timing, scoring, or economic terms requires a new campaign ID.
+exclusions, and performance/featured bonuses become immutable when they produce a positive reward
+allocation. Until then, the validator durably records but retries zero-value results and adopts the
+latest complete campaign record for the same campaign ID. This lets operators correct public,
+access, timing, scoring, or economic fields without abandoning an empty campaign. A campaign with
+an existing positive allocation requires a new campaign ID for such changes.
 Semantic evaluation requires the selected Chutes or OpenRouter key; provider availability never
 becomes a content rejection. During the configured seven-day emission block window, the validator
 calculates the complete proposed vector and stores it durably for inspection and reproducibility,
@@ -125,9 +127,10 @@ also carry the proven tag, quote-ID, inclusion-keyword and prompt-version filter
 remains observed evidence but does not affect eligibility.
 Open-campaign attribution excludes all public campaign text, required tags, inclusion keywords and
 the canonical quoted-post identity from its private token-overlap component.
-By default, the validator publishes each frozen campaign once through the hotkey-signed
-`/api/v1/brief-tweets` DEEBLY ingestion contract and submits the same durable vector to mechanism 1
-at the configured cadence. Operators can disable either output independently for diagnostics. The
+By default, the validator publishes positive campaign results once and zero-value campaign status
+through replaceable updates on the hotkey-signed `/api/v1/brief-tweets` DEEBLY ingestion contract.
+It submits the same durable vector to mechanism 1 at the configured cadence. Operators can disable
+either output independently for diagnostics. The
 public network qualification schedule ships with each reviewed release so miners and validators
 cannot retain different rules through stale environment files. It requires either 15,000 alpha
 conviction toward the qualification owner hotkey or, from version 2 at block 8,874,000, 15,000

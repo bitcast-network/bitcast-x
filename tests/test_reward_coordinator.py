@@ -224,10 +224,8 @@ def test_same_tweet_is_globally_assigned_once_with_duplicate_reason(tmp_path: Pa
 
     assert weights == {0: 0.0, 1: 1.0, 2: 0.0}
     assert [(item.campaign_id, item.tweet_id) for item in floors] == [("a", "1")]
-    frozen_b = store.campaign_rewards("b", campaign_b.model_dump_json())
-    assert frozen_b is not None
-    assert frozen_b[1][0].reason is AttributionReason.DUPLICATE_TWEET
-    assert frozen_b[1][0].accepted is False
+    assert store.campaign_rewards("b", campaign_b.model_dump_json()) is None
+    assert store.campaign_finalized("b") is False
 
 
 def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: Path) -> None:
@@ -263,9 +261,8 @@ def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: 
     assert first_weights == {0: 0.0, 1: 1.0, 2: 0.0}
     assert later_weights == {0: 1.0, 1: 0.0, 2: 0.0}
     assert later_floors == []
-    frozen_b = store.campaign_rewards("b", campaign_b.model_dump_json())
-    assert frozen_b is not None
-    assert frozen_b[1][0].reason is AttributionReason.DUPLICATE_TWEET
+    assert store.campaign_rewards("b", campaign_b.model_dump_json()) is None
+    assert store.campaign_finalized("b") is False
 
 
 async def test_freeze_scores_skips_campaigns_before_scoring_close(tmp_path: Path) -> None:
@@ -299,6 +296,61 @@ async def test_freeze_scores_skips_campaigns_before_scoring_close(tmp_path: Path
     assert result == []
     assert scorer.campaign_ids == ["closed"]
     assert store.scored_reconciliation(feed.snapshot_id, "future") is None
+
+
+async def test_only_current_cycle_completion_releases_zero_value_campaign(
+    tmp_path: Path,
+) -> None:
+    campaign = record("campaign")
+    feed = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign,),
+        ecosystem_maps=(),
+    )
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    store.persist_reconciliation(
+        snapshot_id="stale-snapshot",
+        campaign_id="campaign",
+        campaign_json=campaign.model_dump_json(),
+        results=[],
+    )
+    coordinator = RewardCoordinator(store, CountingScorer())  # type: ignore[arg-type]
+
+    incomplete_scores = await coordinator.freeze_scores(
+        feed,
+        [],
+        reconciled_campaign_ids=(),
+    )
+    coordinator.shadow_weights(
+        feed,
+        incomplete_scores,
+        block=35,
+        hotkey_to_uid={},
+        uids=[0],
+        persist=False,
+    )
+
+    assert coordinator.pending_reward_campaign_ids(feed, block=35) == ("campaign",)
+
+    completed_scores = await coordinator.freeze_scores(
+        feed,
+        [],
+        reconciled_campaign_ids=("campaign",),
+    )
+    weights, rewards = coordinator.shadow_weights(
+        feed,
+        completed_scores,
+        block=35,
+        hotkey_to_uid={},
+        uids=[0],
+        persist=False,
+    )
+
+    assert weights == {0: 1.0}
+    assert rewards == []
+    assert coordinator.pending_reward_campaign_ids(feed, block=35) == ()
+    assert store.campaign_rewards("campaign", campaign.model_dump_json()) is None
 
 
 def test_frozen_campaign_keeps_emitting_if_later_feed_omits_it(tmp_path: Path) -> None:

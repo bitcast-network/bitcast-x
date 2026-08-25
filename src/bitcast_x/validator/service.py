@@ -373,7 +373,11 @@ class ValidatorService:
                             finalized_block=finalized_block,
                         )
                         if reward_coordinator is not None:
-                            scored = await reward_coordinator.freeze_scores(feed, attributions)
+                            scored = await reward_coordinator.freeze_scores(
+                                feed,
+                                attributions,
+                                reconciled_campaign_ids=reconciler.completed_campaign_ids,
+                            )
                             graph = await chain.metagraph(block=finalized_block)
                             if graph is None:
                                 raise ChainOperationError("finalized metagraph is unavailable")
@@ -548,6 +552,9 @@ class ValidatorService:
                                     floors,
                                     block=finalized_block,
                                     hotkey_to_uid=hotkey_to_uid,
+                                    completed_campaign_ids=(
+                                        reward_coordinator.completed_campaign_ids
+                                    ),
                                 )
                             if (
                                 self.settings.enable_weight_submission

@@ -16,6 +16,7 @@ from bitcast_x.miner.store import MinerStore
 from bitcast_x.ops import RuntimeHealth, create_ops_app
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.release import source_revision
+from bitcast_x.rewards import TweetReward
 from bitcast_x.sqlite import apply_migrations
 from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.store import ValidatorStore
@@ -115,6 +116,22 @@ def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: P
         campaign_id="frozen",
         campaign_json=original.model_dump_json(),
         results=[],
+    )
+    store.persist_campaign_rewards(
+        snapshot_id="snapshot",
+        campaign_id="frozen",
+        campaign_json=original.model_dump_json(),
+        rewards=[
+            TweetReward(
+                campaign_id="frozen",
+                tweet_id="1",
+                creator_x_id="creator",
+                miner_hotkey="miner",
+                score=1.0,
+                daily_usd_floor=1.0,
+            )
+        ],
+        decisions=[],
     )
     connection = sqlite3.connect(path)
     try:

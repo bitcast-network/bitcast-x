@@ -8,6 +8,7 @@ import pytest
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
+from bitcast_x.rewards import TweetReward
 from bitcast_x.validator.legacy import (
     LEGACY_TREASURY_UID,
     combine_weights,
@@ -109,6 +110,35 @@ def feed(*campaigns: CampaignRecord) -> CampaignFeed:
         published_at=NOW,
         campaigns=campaigns,
         ecosystem_maps=(),
+    )
+
+
+def freeze_positive_campaign(store: ValidatorStore, record: CampaignRecord) -> None:
+    """Persist the smallest positive economic outcome that makes a contract final."""
+
+    campaign_id = record.access.campaign_id
+    campaign_json = record.model_dump_json()
+    store.persist_reconciliation(
+        snapshot_id="frozen",
+        campaign_id=campaign_id,
+        campaign_json=campaign_json,
+        results=[],
+    )
+    store.persist_campaign_rewards(
+        snapshot_id="frozen",
+        campaign_id=campaign_id,
+        campaign_json=campaign_json,
+        rewards=[
+            TweetReward(
+                campaign_id=campaign_id,
+                tweet_id="1",
+                creator_x_id="creator",
+                miner_hotkey=HOTKEY,
+                score=1.0,
+                daily_usd_floor=1.0,
+            )
+        ],
+        decisions=[],
     )
 
 
@@ -218,6 +248,58 @@ def test_campaign_exclusive_miner_change_is_adopted_before_results_freeze(tmp_pa
     assert store.bind_campaign_protocols((changed,)) == (changed,)
 
 
+def test_zero_value_v3_campaign_reopens_after_contract_edit(tmp_path) -> None:
+    """Reproduce the quarantined campaign's empty V3 state and recover it in place."""
+
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    original = campaign("083_bittensor", MiningProtocol.PRECLAIM_V2)
+    changed = original.model_copy(update={"tag": "@@Bitcast_network"})
+    store.bind_campaign_protocols((original,))
+    store.persist_reconciliation(
+        snapshot_id="old-snapshot",
+        campaign_id=original.access.campaign_id,
+        campaign_json=original.model_dump_json(),
+        results=[],
+    )
+    store.persist_scores("old-snapshot", original.access.campaign_id, [])
+    store.persist_campaign_rewards(
+        snapshot_id="old-snapshot",
+        campaign_id=original.access.campaign_id,
+        campaign_json=original.model_dump_json(),
+        rewards=[],
+        decisions=[],
+    )
+    store.record_publication(
+        "old-snapshot",
+        original.access.campaign_id,
+        run_id="v3:old-snapshot:083_bittensor",
+        payload={"brief_id": original.access.campaign_id, "tweets": []},
+        succeeded=True,
+    )
+
+    assert store.campaign_finalized(original.access.campaign_id) is False
+    assert store.publication_succeeded("old-snapshot", original.access.campaign_id) is False
+    assert store.bind_campaign_protocols((changed,)) == (changed,)
+
+    store.persist_reconciliation(
+        snapshot_id="new-snapshot",
+        campaign_id=changed.access.campaign_id,
+        campaign_json=changed.model_dump_json(),
+        results=[],
+    )
+
+    assert (
+        store.reconciliation(
+            "new-snapshot",
+            changed.access.campaign_id,
+            changed.model_dump_json(),
+        )
+        == []
+    )
+    assert store.scored_reconciliation("new-snapshot", changed.access.campaign_id) is None
+    assert store.campaign_rewards(changed.access.campaign_id, changed.model_dump_json()) is None
+
+
 @pytest.mark.parametrize("field", MUTABLE_CAMPAIGN_FIELDS)
 def test_complete_campaign_contract_adopts_latest_feed_before_results_freeze(
     tmp_path, field: str
@@ -238,12 +320,7 @@ def test_complete_campaign_contract_uses_frozen_version_after_results_freeze(
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     original = campaign("same", MiningProtocol.PRECLAIM_V2)
     store.bind_campaign_protocols((original,))
-    store.persist_reconciliation(
-        snapshot_id="frozen",
-        campaign_id="same",
-        campaign_json=original.model_dump_json(),
-        results=[],
-    )
+    freeze_positive_campaign(store, original)
 
     with caplog.at_level("ERROR"):
         bound = store.bind_campaign_protocols((mutate_campaign_contract(original, field),))
@@ -257,12 +334,7 @@ def test_frozen_campaign_mutation_does_not_stall_unrelated_campaigns(tmp_path) -
     frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
     unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
     store.bind_campaign_protocols((frozen, unaffected))
-    store.persist_reconciliation(
-        snapshot_id="frozen",
-        campaign_id="frozen",
-        campaign_json=frozen.model_dump_json(),
-        results=[],
-    )
+    freeze_positive_campaign(store, frozen)
 
     bound = store.bind_campaign_protocols((mutate_campaign_contract(frozen, "brief"), unaffected))
 
@@ -276,12 +348,7 @@ def test_unreadable_frozen_campaign_contract_quarantines_only_that_campaign(
     frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
     unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
     store.bind_campaign_protocols((frozen, unaffected))
-    store.persist_reconciliation(
-        snapshot_id="frozen",
-        campaign_id="frozen",
-        campaign_json=frozen.model_dump_json(),
-        results=[],
-    )
+    freeze_positive_campaign(store, frozen)
     with sqlite3.connect(store.path) as connection:
         connection.execute(
             """
@@ -320,12 +387,7 @@ def test_published_rank_cutoff_cannot_change_after_results_freeze(tmp_path) -> N
     original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 150})
     changed = original.model_copy(update={"max_members": 151})
     store.bind_campaign_protocols((original,))
-    store.persist_reconciliation(
-        snapshot_id="frozen",
-        campaign_id="same",
-        campaign_json=original.model_dump_json(),
-        results=[],
-    )
+    freeze_positive_campaign(store, original)
 
     assert store.bind_campaign_protocols((changed,)) == (original,)
 

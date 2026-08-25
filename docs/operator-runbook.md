@@ -240,6 +240,7 @@ directory; never run two writers against one SQLite volume.
   its last verified cursor.
 - Commitment space exhausted: stop accepting platform work through backpressure; never overwrite
   or skip queued evidence to make room.
-- Campaign mutation after scoring close or frozen-weight replay mismatch: treat as a consensus
-  incident, preserve the database and logs, and stop weight submission until the incident is
-  resolved.
+- Campaign mutation after a positive reward allocation or frozen-weight replay mismatch: treat as
+  a consensus incident, preserve the database and logs, and stop weight submission until the
+  incident is resolved. A zero-value campaign mutation is expected: confirm the
+  `reopened zero-value campaign with latest contract` log and the next replaceable status update.

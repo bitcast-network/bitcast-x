@@ -106,6 +106,13 @@ class CampaignReconciler:
         self._x = x_provider
         self._qualification = qualification
         self._qualification_cache: dict[tuple[str, int], bool] = {}
+        self._completed_campaign_ids: frozenset[str] = frozenset()
+
+    @property
+    def completed_campaign_ids(self) -> frozenset[str]:
+        """Return campaigns successfully reconciled during the latest feed cycle."""
+
+        return self._completed_campaign_ids
 
     async def reconcile_feed(
         self,
@@ -116,6 +123,8 @@ class CampaignReconciler:
         """Reconcile campaigns whose scoring close is finalized, preserving unavailable ones."""
 
         results: list[AttributionResult] = []
+        completed_campaign_ids: set[str] = set()
+        self._completed_campaign_ids = frozenset()
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
             reconciliation_block = (
                 campaign.emission_start_block
@@ -125,10 +134,14 @@ class CampaignReconciler:
             if reconciliation_block > finalized_block:
                 continue
             campaign_json = campaign.model_dump_json()
-            campaign_results = self.store.reconciliation(
-                feed.snapshot_id,
-                campaign.access.campaign_id,
-                campaign_json,
+            campaign_results = (
+                self.store.reconciliation(
+                    feed.snapshot_id,
+                    campaign.access.campaign_id,
+                    campaign_json,
+                )
+                if self.store.campaign_finalized(campaign.access.campaign_id)
+                else None
             )
             if campaign_results is None:
                 try:
@@ -152,7 +165,9 @@ class CampaignReconciler:
                 campaign_json=campaign_json,
                 results=campaign_results,
             )
+            completed_campaign_ids.add(campaign.access.campaign_id)
             results.extend(campaign_results)
+        self._completed_campaign_ids = frozenset(completed_campaign_ids)
         return results
 
     async def reconcile_campaign(

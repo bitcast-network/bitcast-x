@@ -518,9 +518,28 @@ def test_final_payload_distinguishes_attribution_from_duplicate_reward_rejection
     assert decision["daily_usd_floor"] == 0.0
 
 
-def test_publication_success_is_durable_and_changed_replay_fails(tmp_path: Path) -> None:
+def test_zero_value_publication_is_replaceable(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     payload = {"brief_id": "campaign", "tweets": []}
+
+    store.record_publication("snapshot", "campaign", run_id="run", payload=payload, succeeded=True)
+    changed = {"brief_id": "campaign", "tweets": [{"usd_target": 0.0}]}
+    store.record_publication(
+        "snapshot-2",
+        "campaign",
+        run_id="run-2",
+        payload=changed,
+        succeeded=True,
+    )
+
+    assert store.publication_succeeded("snapshot", "campaign") is False
+
+
+def test_positive_publication_success_is_durable_and_changed_replay_fails(
+    tmp_path: Path,
+) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    payload = {"brief_id": "campaign", "tweets": [{"usd_target": 1.0}]}
 
     store.record_publication("snapshot", "campaign", run_id="run", payload=payload, succeeded=True)
     with pytest.raises(ProtocolError, match="successful publication changed"):
@@ -528,7 +547,7 @@ def test_publication_success_is_durable_and_changed_replay_fails(tmp_path: Path)
             "snapshot",
             "campaign",
             run_id="run",
-            payload={"brief_id": "campaign", "tweets": ["changed"]},
+            payload={"brief_id": "campaign", "tweets": [{"usd_target": 2.0}]},
             succeeded=True,
         )
 

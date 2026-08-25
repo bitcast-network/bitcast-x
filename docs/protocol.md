@@ -19,7 +19,8 @@ consensus-visible rule.
   HTTP endpoint through its metagraph axon record, and serves the complete committed batches.
 - A **validator** discovers miners from finalized metagraph state, authenticates batch requests,
   verifies every batch against historical chain state, independently obtains public X evidence,
-  freezes attribution and scoring, and calculates mechanism-1 weights.
+  recalculates provisional campaign results, freezes positive reward allocations, and calculates
+  mechanism-1 weights.
 - X-data and LLM providers are availability and evidence dependencies. Their failure does not
   become a rejection. An unavailable tweet remains explicitly pending while independently
   verifiable campaign tweets continue through final scoring and rewards.
@@ -66,9 +67,12 @@ Each campaign configures:
 - reward pool, optional per-creator tweet limit, and emission block interval.
 
 Campaign and map schemas reject unknown fields, ambiguous duplicate IDs, naive timestamps, invalid
-windows, and incomplete emission bounds. The `campaign_id` is the stable identity. Until final
-results exist, validators adopt the latest complete record published for that ID, including routing
-and content-rule corrections. The contract stored with final reconciliation is immutable.
+windows, and incomplete emission bounds. The `campaign_id` is the stable identity. Until a positive
+reward allocation exists, validators adopt the latest complete record published for that ID,
+including routing and content-rule corrections. Attribution, scores, empty economics, and a
+successful zero-value publication are provisional: validators replace them on the next cycle and
+publish replaceable status updates for miner visibility. Once at least one positive per-tweet daily
+USD floor exists, the contract and its complete result become immutable.
 
 `prompt_version` explicitly selects one of four semantic-evaluation templates. Version 1 retains
 the original sponsor-oriented evaluation used by existing campaigns. Version 2 evaluates
@@ -196,9 +200,11 @@ is:
 A winner needs a score of at least `0.70` and a margin of at least `0.10` over the runner-up. An
 exact tie, weak match, or narrow margin abstains rather than assigning the tweet.
 
-Every submitted tweet receives a stable accepted, pending, or rejected reason. Evidence that is
-unavailable at final reconciliation is frozen as `evidence_unavailable` pending rather than
-rejecting the tweet or blocking the campaign. Campaign checks report the first failed requirement
+Every submitted tweet receives an accepted, pending, or rejected reason for the current campaign
+cycle. Evidence that is unavailable at reconciliation remains `evidence_unavailable` pending rather
+than rejecting the tweet or blocking independently verifiable campaign results. A campaign with no
+positive allocation is retried, so later evidence or an updated brief can replace that provisional
+decision. Campaign checks report the first failed requirement
 in deterministic evaluation order: `post_outside_campaign_window`,
 `creator_not_eligible_for_campaign`, `required_terms_missing`, `retweet_not_allowed`,
 `reply_not_allowed`, `campaign_tag_missing`, `required_quote_missing_or_incorrect`, or
@@ -211,13 +217,15 @@ the matcher is in [`src/bitcast_x/matcher.py`](../src/bitcast_x/matcher.py).
 
 Rank is deterministic: accounts are ordered by influence descending and immutable numeric X ID
 ascending for ties. Being present elsewhere in the full ecosystem map is not campaign eligibility,
-and prior participation does not bypass the cutoff for a later tweet. Results frozen before the v4
-cutoff was published remain immutable rather than being recalculated retroactively.
+and prior participation does not bypass the cutoff for a later tweet. Positive results settled
+before the v4 cutoff was published remain immutable rather than being recalculated retroactively;
+zero-value campaigns adopt the current cutoff when retried.
 
 ## Scoring and rewards
 
 Only accepted attributions that pass the campaign's semantic brief evaluation enter rewards.
-Engagement evidence is taken from the configured X provider and frozen for the campaign. The
+Engagement evidence is taken from the configured X provider and retained provisionally until the
+campaign produces a positive allocation. The
 validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
 passes the tweet. Unavailable engagement or semantic evidence leaves only that tweet's reward
 disposition pending; available tweets continue without translating the outage into rejection.
@@ -248,8 +256,9 @@ Reward construction then:
 
 If no `preclaim_v2` miner has productive content, its standalone fallback assigns the vector to
 burn UID 0. The formulas are in [`src/bitcast_x/scoring.py`](../src/bitcast_x/scoring.py) and
-[`src/bitcast_x/rewards.py`](../src/bitcast_x/rewards.py). Frozen attribution, evidence, reward
-decisions, and weights are durable and reused after restart.
+[`src/bitcast_x/rewards.py`](../src/bitcast_x/rewards.py). Positive attribution, evidence, reward
+decisions, and weights are durable and reused after restart. Zero-value state is also durable for
+inspection and crash recovery, but it is replaced by the next successful campaign cycle.
 
 ## Temporary legacy overlap
 
