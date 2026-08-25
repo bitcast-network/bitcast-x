@@ -1,5 +1,6 @@
 """Tests for the temporary legacy-to-preclaim weight transition."""
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -231,8 +232,8 @@ def test_complete_campaign_contract_adopts_latest_feed_before_results_freeze(
 
 
 @pytest.mark.parametrize("field", MUTABLE_CAMPAIGN_FIELDS)
-def test_complete_campaign_contract_cannot_change_after_results_freeze(
-    tmp_path, field: str
+def test_complete_campaign_contract_uses_frozen_version_after_results_freeze(
+    tmp_path, caplog: pytest.LogCaptureFixture, field: str
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     original = campaign("same", MiningProtocol.PRECLAIM_V2)
@@ -244,8 +245,59 @@ def test_complete_campaign_contract_cannot_change_after_results_freeze(
         results=[],
     )
 
-    with pytest.raises(ProtocolError, match="changed after final results froze"):
-        store.bind_campaign_protocols((mutate_campaign_contract(original, field),))
+    with caplog.at_level("ERROR"):
+        bound = store.bind_campaign_protocols((mutate_campaign_contract(original, field),))
+
+    assert bound == (original,)
+    assert "using frozen contract campaign=same" in caplog.text
+
+
+def test_frozen_campaign_mutation_does_not_stall_unrelated_campaigns(tmp_path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
+    unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
+    store.bind_campaign_protocols((frozen, unaffected))
+    store.persist_reconciliation(
+        snapshot_id="frozen",
+        campaign_id="frozen",
+        campaign_json=frozen.model_dump_json(),
+        results=[],
+    )
+
+    bound = store.bind_campaign_protocols((mutate_campaign_contract(frozen, "brief"), unaffected))
+
+    assert bound == (frozen, unaffected)
+
+
+def test_unreadable_frozen_campaign_contract_quarantines_only_that_campaign(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
+    unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
+    store.bind_campaign_protocols((frozen, unaffected))
+    store.persist_reconciliation(
+        snapshot_id="frozen",
+        campaign_id="frozen",
+        campaign_json=frozen.model_dump_json(),
+        results=[],
+    )
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            """
+            UPDATE campaign_protocols
+            SET campaign_contract_json = 'unreadable'
+            WHERE campaign_id = 'frozen'
+            """
+        )
+
+    with caplog.at_level("CRITICAL"):
+        bound = store.bind_campaign_protocols(
+            (mutate_campaign_contract(frozen, "brief"), unaffected)
+        )
+
+    assert bound == (unaffected,)
+    assert "quarantined campaign with unreadable frozen contract campaign=frozen" in caplog.text
 
 
 def test_rank_cutoff_upgrade_preserves_already_frozen_campaign_results(tmp_path) -> None:
@@ -275,8 +327,7 @@ def test_published_rank_cutoff_cannot_change_after_results_freeze(tmp_path) -> N
         results=[],
     )
 
-    with pytest.raises(ProtocolError, match="changed after final results froze"):
-        store.bind_campaign_protocols((changed,))
+    assert store.bind_campaign_protocols((changed,)) == (original,)
 
 
 def test_identical_campaign_contract_can_be_observed_repeatedly(tmp_path) -> None:

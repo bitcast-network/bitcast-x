@@ -63,6 +63,20 @@ def _campaign_has_frozen_results(connection: sqlite3.Connection, campaign_id: st
     )
 
 
+def _load_frozen_campaign(stored_json: str | None, campaign_id: str) -> "CampaignRecord | None":
+    """Validate one durable campaign contract without importing models at module load."""
+
+    from bitcast_x.campaigns import CampaignRecord
+
+    if stored_json is None:
+        return None
+    try:
+        campaign = CampaignRecord.model_validate_json(stored_json)
+    except ValueError:
+        return None
+    return campaign if campaign.access.campaign_id == campaign_id else None
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedBatchRecord:
     """A complete verified batch with its finalized timestamp and ordering position."""
@@ -315,7 +329,42 @@ class ValidatorStore:
                     bound_campaigns.append(campaign)
                     continue
                 if _campaign_has_frozen_results(connection, campaign_id):
-                    raise ProtocolError(f"campaign {campaign_id} changed after final results froze")
+                    # A changed feed record must never replace the contract that
+                    # produced durable results. It also must not deny service to
+                    # every unrelated campaign in the feed. Keep using the
+                    # frozen contract for this campaign and make the rejected
+                    # mutation operationally visible.
+                    frozen_campaign = _load_frozen_campaign(stored_json, campaign_id)
+                    if frozen_campaign is None:
+                        LOGGER.critical(
+                            "quarantined campaign with unreadable frozen contract campaign=%s",
+                            campaign_id,
+                        )
+                        continue
+
+                    changed_fields: list[str] = []
+                    for field in type(campaign).model_fields:
+                        observed = getattr(campaign, field)
+                        frozen = getattr(frozen_campaign, field)
+                        if observed == frozen:
+                            continue
+                        if field == "access":
+                            changed_fields.extend(
+                                f"access.{access_field}"
+                                for access_field in type(campaign.access).model_fields
+                                if getattr(campaign.access, access_field)
+                                != getattr(frozen_campaign.access, access_field)
+                            )
+                        else:
+                            changed_fields.append(field)
+                    LOGGER.error(
+                        "rejected campaign mutation after results froze; "
+                        "using frozen contract campaign=%s changed_fields=%s",
+                        campaign_id,
+                        ",".join(changed_fields) or "unknown",
+                    )
+                    bound_campaigns.append(frozen_campaign)
+                    continue
                 connection.execute(
                     """
                     UPDATE campaign_protocols
