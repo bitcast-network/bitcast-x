@@ -67,7 +67,9 @@ contribute no further search or scoring calls.
 - Use the immutable image tag or digest produced from a reviewed `main` commit; never deploy
   `latest` as the rollback reference.
 - Point `BITCAST_X_STATE_DIR` at operator-owned persistent storage; SQLite databases, WAL files and
-  the campaign feed cache live there.
+  the campaign feed cache and immutable map-binding record live there. Preserve the complete
+  directory across upgrades so an already-accepted ecosystem run cannot be rebound to new content.
+  On the first upgraded fetch, verified maps from the pre-binding cache are imported automatically.
 - Point `BITCAST_X_WALLET_PATH` at an existing Bittensor wallet directory. Containers may either
   mount that directory or receive `HOTKEY_DATA` through their runtime secret provider.
 - Run as UID/GID `10001`. Miner HTTP is port `8095`; validator operations are port `8096`.
