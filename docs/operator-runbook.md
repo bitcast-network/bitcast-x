@@ -57,10 +57,14 @@ engagement evidence is stored separately from consensus state and uses the v2 re
 hourly for tweets under one hour old, every four hours until 24 hours old, and daily thereafter.
 Unavailable evidence is retried no more than once per minute, and unchanged preview payloads are
 not republished. Preview rows include mutable performance-bonus percentages and breakdowns for the
-currently selected campaign tweets, but their USD targets remain zero and featured bonuses are not
-selected. Preview caching and bonuses never feed final economics: the first post-close scoring pass
-always fetches fresh evidence before assigning tweets and freezing rewards. Frozen legacy campaigns
-contribute no further search or scoring calls.
+currently selected campaign tweets, but their USD targets remain zero. At the first healthy preview
+on or after one day before `closes_at`, the validator durably pins and publishes the deterministic
+featured tweet. Failed ingestion retries the identical payload after one minute. A temporary loss
+of the selected tweet's evidence preserves the last good preview and retries on later cycles rather
+than publishing a destructive replacement. The first post-close scoring pass still fetches fresh
+evidence before assigning tweets and freezing rewards, then reuses the pinned feature. If its
+required evidence is still unavailable, final economics and weight submission wait until recovery.
+Frozen legacy campaigns contribute no further search or scoring calls.
 
 ## Runtime contract
 
@@ -133,11 +137,13 @@ the active environment, `BITCAST_X_STATE_DIR`, imported legacy files or campaign
 tracked checkout is left running and is not updated. Containers remain immutable and do not
 self-update by default.
 
-Automatic updates reject any candidate that changes an existing miner or validator database schema.
-Deploy those releases manually using the backup procedure below. Prepared code and dependency
-environments live only beneath `BITCAST_X_AUTO_UPDATE_DIR`; never point that directory at the state
-directory. Operate direct installs beneath systemd, PM2 or another process supervisor so a fatal
-validator error is restarted even when no update is in progress.
+Automatic updates reject any candidate that changes an existing miner or validator database schema
+version. A reviewed, rollback-compatible additive table may retain the existing version; candidate
+checks exercise that extension on a disposable database copy before activation. Deploy forward-only
+schema releases manually using the backup procedure below. Prepared code and dependency environments
+live only beneath `BITCAST_X_AUTO_UPDATE_DIR`; never point that directory at the state directory.
+Operate direct installs beneath systemd, PM2 or another process supervisor so a fatal validator
+error is restarted even when no update is in progress.
 
 ### PM2 source install
 

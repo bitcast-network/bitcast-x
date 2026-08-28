@@ -82,6 +82,7 @@ def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) 
         connection.execute("PRAGMA user_version = 4")
     finally:
         connection.close()
+
     original = _logical_dump(validator_path)
 
     with pytest.raises(RuntimeError, match=r"validator\.sqlite3: 4 -> 5"):
@@ -97,6 +98,41 @@ def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) 
         }
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
         assert "campaign_contract_json" not in columns
+    finally:
+        connection.close()
+
+
+def test_upgrade_check_allows_rollback_safe_featured_selection_table(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    validator_path = state / "validator.sqlite3"
+    ValidatorStore(validator_path)
+    connection = sqlite3.connect(validator_path)
+    try:
+        connection.execute("DROP TABLE featured_tweet_selections")
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+    finally:
+        connection.close()
+
+    assert auto_update.verify_automatic_upgrade(state) == {"validator.sqlite3": 5}
+    connection = sqlite3.connect(validator_path)
+    try:
+        tables_before_activation = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "featured_tweet_selections" not in tables_before_activation
+    finally:
+        connection.close()
+
+    ValidatorStore(validator_path)
+    connection = sqlite3.connect(validator_path)
+    try:
+        tables_after_activation = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert "featured_tweet_selections" in tables_after_activation
     finally:
         connection.close()
 

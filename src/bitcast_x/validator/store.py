@@ -142,6 +142,54 @@ class VerifiedBatchRecord:
     timestamp: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class FeaturedTweetSelection:
+    """One creator-visible featured tweet pinned near campaign close."""
+
+    campaign_id: str
+    tweet_id: str
+    selection_pool: tuple[str, ...]
+    selected_block: int
+    selected_at: datetime
+
+
+def _featured_tweet_selection(
+    row: sqlite3.Row,
+    campaign_id: str,
+) -> FeaturedTweetSelection:
+    """Validate and materialize one stored featured selection."""
+
+    try:
+        raw_pool = json.loads(str(row["selection_pool_json"]))
+        selected_at = datetime.fromisoformat(str(row["selected_at"]))
+        tweet_id = str(row["tweet_id"])
+        selected_block = int(row["selected_block"])
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ProtocolError(
+            f"stored featured tweet selection is invalid for campaign {campaign_id}"
+        ) from exc
+    if (
+        not isinstance(raw_pool, list)
+        or not raw_pool
+        or any(not isinstance(item, str) or not item for item in raw_pool)
+        or len(set(raw_pool)) != len(raw_pool)
+        or tweet_id not in raw_pool
+        or selected_block < 0
+        or selected_at.tzinfo is None
+        or selected_at.utcoffset() is None
+    ):
+        raise ProtocolError(
+            f"stored featured tweet selection is invalid for campaign {campaign_id}"
+        )
+    return FeaturedTweetSelection(
+        campaign_id=campaign_id,
+        tweet_id=tweet_id,
+        selection_pool=tuple(raw_pool),
+        selected_block=selected_block,
+        selected_at=selected_at.astimezone(UTC),
+    )
+
+
 class ValidatorStore:
     """Persist observed chain anchors before atomically advancing verified cursors."""
 
@@ -333,6 +381,21 @@ class ValidatorStore:
             # user_version cleared by an operator or older tooling.
             # Version five similarly records the complete campaign contract.
             apply_migrations(connection, (*base_migrations, "SELECT 1;", "SELECT 1;"))
+            # This table is a rollback-safe additive extension. It deliberately
+            # leaves user_version unchanged so an older binary can ignore it
+            # during rollback while newer binaries recreate it after recovery.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS featured_tweet_selections (
+                    campaign_id TEXT PRIMARY KEY,
+                    campaign_json TEXT NOT NULL,
+                    tweet_id TEXT NOT NULL,
+                    selection_pool_json TEXT NOT NULL,
+                    selected_block INTEGER NOT NULL CHECK(selected_block >= 0),
+                    selected_at TEXT NOT NULL
+                )
+                """
+            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO scan_state(singleton, last_finalized_block)
@@ -345,9 +408,10 @@ class ValidatorStore:
         self,
         campaigns: tuple["CampaignRecord", ...],
     ) -> tuple["CampaignRecord", ...]:
-        """Treat campaign ID as stable and adopt feed edits until results freeze."""
+        """Adopt mutable feed records and retain creator-visible pinned contracts."""
 
         bound_campaigns: list[CampaignRecord] = []
+        observed_campaign_ids = {item.access.campaign_id for item in campaigns}
         with self._transaction() as connection:
             for campaign in campaigns:
                 campaign_id = campaign.access.campaign_id
@@ -384,7 +448,14 @@ class ValidatorStore:
                 if unchanged:
                     bound_campaigns.append(campaign)
                     continue
-                if _campaign_has_frozen_results(connection, campaign_id):
+                featured_selection_exists = connection.execute(
+                    "SELECT 1 FROM featured_tweet_selections WHERE campaign_id = ?",
+                    (campaign_id,),
+                ).fetchone()
+                if (
+                    _campaign_has_frozen_results(connection, campaign_id)
+                    or featured_selection_exists is not None
+                ):
                     # A changed feed record must never replace the contract that
                     # produced durable results. It also must not deny service to
                     # every unrelated campaign in the feed. Keep using the
@@ -414,7 +485,7 @@ class ValidatorStore:
                         else:
                             changed_fields.append(field)
                     LOGGER.error(
-                        "rejected campaign mutation after results froze; "
+                        "rejected campaign mutation after durable state froze; "
                         "using frozen contract campaign=%s changed_fields=%s",
                         campaign_id,
                         ",".join(changed_fields) or "unknown",
@@ -446,7 +517,125 @@ class ValidatorStore:
                         campaign_id,
                     )
                 bound_campaigns.append(campaign)
+            omitted_selections = connection.execute(
+                """
+                SELECT campaign_id, campaign_json
+                FROM featured_tweet_selections
+                ORDER BY campaign_id
+                """
+            ).fetchall()
+            for row in omitted_selections:
+                campaign_id = str(row["campaign_id"])
+                if campaign_id in observed_campaign_ids or _campaign_has_frozen_results(
+                    connection,
+                    campaign_id,
+                ):
+                    continue
+                pinned_campaign = _load_frozen_campaign(
+                    str(row["campaign_json"]),
+                    campaign_id,
+                )
+                if pinned_campaign is None:
+                    LOGGER.critical(
+                        "quarantined omitted campaign with unreadable featured contract "
+                        "campaign=%s",
+                        campaign_id,
+                    )
+                    continue
+                LOGGER.warning(
+                    "retained omitted campaign with pinned featured tweet campaign=%s",
+                    campaign_id,
+                )
+                bound_campaigns.append(pinned_campaign)
         return tuple(bound_campaigns)
+
+    def featured_tweet_selection(
+        self,
+        campaign_id: str,
+        campaign_json: str,
+    ) -> FeaturedTweetSelection | None:
+        """Return the durable featured selection for an unchanged campaign."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT campaign_json, tweet_id, selection_pool_json,
+                       selected_block, selected_at
+                FROM featured_tweet_selections
+                WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if not _same_campaign_contract(str(row["campaign_json"]), campaign_json):
+            raise ProtocolError(f"campaign {campaign_id} changed after featured tweet selection")
+        return _featured_tweet_selection(row, campaign_id)
+
+    def pin_featured_tweet_selection(
+        self,
+        *,
+        campaign_id: str,
+        campaign_json: str,
+        tweet_id: str,
+        selection_pool: tuple[str, ...],
+        selected_block: int,
+        selected_at: datetime,
+    ) -> FeaturedTweetSelection:
+        """Atomically pin the first valid selection and replay it thereafter."""
+
+        if not campaign_id or not tweet_id:
+            raise ValueError("campaign_id and tweet_id cannot be blank")
+        if selected_block < 0:
+            raise ValueError("selected_block cannot be negative")
+        if selected_at.tzinfo is None or selected_at.utcoffset() is None:
+            raise ValueError("selected_at must be timezone-aware")
+        if not selection_pool or tweet_id not in selection_pool:
+            raise ValueError("featured tweet must belong to a non-empty selection pool")
+        if len(set(selection_pool)) != len(selection_pool):
+            raise ValueError("featured selection pool must contain unique tweet IDs")
+
+        normalized_at = selected_at.astimezone(UTC)
+        pool_json = json.dumps(selection_pool, separators=(",", ":"))
+        with self._transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT campaign_json, tweet_id, selection_pool_json,
+                       selected_block, selected_at
+                FROM featured_tweet_selections
+                WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    """
+                    INSERT INTO featured_tweet_selections(
+                        campaign_id, campaign_json, tweet_id, selection_pool_json,
+                        selected_block, selected_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        campaign_id,
+                        campaign_json,
+                        tweet_id,
+                        pool_json,
+                        selected_block,
+                        normalized_at.isoformat(),
+                    ),
+                )
+                return FeaturedTweetSelection(
+                    campaign_id=campaign_id,
+                    tweet_id=tweet_id,
+                    selection_pool=selection_pool,
+                    selected_block=selected_block,
+                    selected_at=normalized_at,
+                )
+            if not _same_campaign_contract(str(row["campaign_json"]), campaign_json):
+                raise ProtocolError(
+                    f"campaign {campaign_id} changed after featured tweet selection"
+                )
+            return _featured_tweet_selection(row, campaign_id)
 
     def scanned_block(self) -> int:
         """Return the last fully persisted finalized block."""

@@ -250,8 +250,10 @@ Reward construction then:
    per-creator campaign limit;
 3. applies four relative performance bonuses—views, views per follower, total engagements, and
    engagements per view—each adding at most 5% to score;
-4. deterministically selects one of the five most-viewed assigned tweets as featured and applies a
-   1.05 score multiplier to its author and engaging accounts;
+4. at the first healthy preview on or after one day before the campaign's UTC `closes_at`,
+   deterministically selects one of the five most-viewed campaign-local assigned tweets and pins
+   that featured identity; final rewards replay it and apply a 1.05 score multiplier to its author
+   and engaging accounts;
 5. divides the daily budget in proportion to `max(score, 0) ** 0.65` and freezes the per-tweet
    daily USD floors;
 6. sums floors by miner UID and normalizes them into the mechanism-1 weight vector.
@@ -261,6 +263,13 @@ burn UID 0. The formulas are in [`src/bitcast_x/scoring.py`](../src/bitcast_x/sc
 [`src/bitcast_x/rewards.py`](../src/bitcast_x/rewards.py). Positive attribution, evidence, reward
 decisions, and weights are durable and reused after restart. Zero-value state is also durable for
 inspection and crash recovery, but it is replaced by the next successful campaign cycle.
+The featured identity is the exception: once pinned it is creator-visible protocol state and is
+never reselected. If selection was missed during downtime, the first later healthy preview or final
+reward cycle creates it. Temporary provider or ingestion failures preserve the last successful
+preview and retry; missing selected-tweet evidence at finalization defers the complete coupled
+assignment and weight submission rather than silently dropping or changing the bonus. If the
+campaign feed temporarily omits a pinned, unsettled campaign, validators retain its stored contract
+and continue recovery from that authoritative record.
 
 ## Temporary legacy overlap
 
