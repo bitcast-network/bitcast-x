@@ -2,7 +2,7 @@
 
 import gzip
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,6 +27,7 @@ from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet
 
 NOW = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+BEFORE_FEATURED_SELECTION = datetime(2026, 8, 3, 12, 0, tzinfo=UTC)
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
 SUBMISSION_ID = "01" * 16
 
@@ -62,9 +63,10 @@ class FakeHotkey:
 
 
 class CapturingDataPublisher:
-    def __init__(self) -> None:
+    def __init__(self, outcomes: list[bool] | None = None) -> None:
         self.payloads: list[dict[str, object]] = []
         self.run_ids: list[str] = []
+        self._outcomes = list(outcomes or [])
 
     async def publish(
         self,
@@ -79,7 +81,7 @@ class CapturingDataPublisher:
         assert run_id.startswith("v3-preview:snapshot:campaign:")
         self.run_ids.append(run_id)
         self.payloads.append(payload)
-        return True
+        return self._outcomes.pop(0) if self._outcomes else True
 
 
 def scored() -> ScoredAttribution:
@@ -310,6 +312,7 @@ async def test_preview_omits_accepted_tweet_when_its_scoring_evidence_is_unavail
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        now=lambda: BEFORE_FEATURED_SELECTION,
     )
 
     published = await publisher.publish_preview(
@@ -343,6 +346,7 @@ async def test_preview_publishes_performance_breakdown_without_payment_targets(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        now=lambda: BEFORE_FEATURED_SELECTION,
     )
 
     published = await publisher.publish_preview(
@@ -386,6 +390,7 @@ async def test_preview_is_not_republished_until_its_semantic_payload_changes(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        now=lambda: BEFORE_FEATURED_SELECTION,
     )
 
     first = await publisher.publish_preview(
@@ -419,6 +424,147 @@ async def test_preview_is_not_republished_until_its_semantic_payload_changes(
     assert changed is True
     assert len(data_publisher.payloads) == 2
     assert data_publisher.run_ids[0] != data_publisher.run_ids[1]
+
+
+@pytest.mark.asyncio
+async def test_preview_pins_featured_tweet_and_recovers_after_missing_evidence(
+    tmp_path: Path,
+) -> None:
+    selected_at = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
+    snapshot = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign(),),
+        ecosystem_maps=(),
+    )
+    path = tmp_path / "validator.sqlite3"
+    first_store = ValidatorStore(path)
+    first_data_publisher = CapturingDataPublisher()
+    first_publisher = ShadowResultPublisher(
+        first_store,
+        first_data_publisher,  # type: ignore[arg-type]
+        endpoint="https://ingestion.example/api/v1/brief-tweets",
+        now=lambda: selected_at,
+    )
+
+    assert await first_publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=90,
+        hotkey_to_uid={MINER: 7},
+    )
+    selection = first_store.featured_tweet_selection(
+        "campaign",
+        campaign().model_dump_json(),
+    )
+    assert selection is not None
+    assert selection.tweet_id == "123"
+    assert selection.selected_block == 90
+    first_payload = first_data_publisher.payloads[0]
+    assert first_payload["featured_tweet"] == {
+        "brief_id": "campaign",
+        "tweet_id": "123",
+        "author": "alice",
+        "views_count": 100,
+        "selected_at": selected_at.isoformat(),
+        "selection_pool": ["123"],
+        "selection_method": "sha256_mod",
+    }
+    assert first_payload["tweets"][0]["featured_tweet_bonus"] is True  # type: ignore[index]
+
+    restarted_store = ValidatorStore(path)
+    restarted_data_publisher = CapturingDataPublisher()
+    restarted_publisher = ShadowResultPublisher(
+        restarted_store,
+        restarted_data_publisher,  # type: ignore[arg-type]
+        endpoint="https://ingestion.example/api/v1/brief-tweets",
+        now=lambda: selected_at + timedelta(minutes=5),
+    )
+    rejected = AttributionResult(
+        tweet_id="999",
+        campaign_id="campaign",
+        accepted=False,
+        reason=AttributionReason.AMBIGUOUS_MATCH,
+    )
+
+    assert not await restarted_publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [],
+        [rejected],
+        block=91,
+        hotkey_to_uid={MINER: 7},
+    )
+    assert restarted_data_publisher.payloads == []
+
+    recovered = scored().model_copy(update={"score": scored().score + 1})
+    assert await restarted_publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [recovered],
+        [recovered.attribution],
+        block=92,
+        hotkey_to_uid={MINER: 7},
+    )
+    replayed = restarted_store.featured_tweet_selection(
+        "campaign",
+        campaign().model_dump_json(),
+    )
+    assert replayed == selection
+    assert restarted_data_publisher.payloads[0]["featured_tweet"] == first_payload["featured_tweet"]
+
+
+@pytest.mark.asyncio
+async def test_failed_preview_publication_retries_same_payload_after_one_minute(
+    tmp_path: Path,
+) -> None:
+    clock = [BEFORE_FEATURED_SELECTION]
+    snapshot = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign(),),
+        ecosystem_maps=(),
+    )
+    data_publisher = CapturingDataPublisher([False, True])
+    publisher = ShadowResultPublisher(
+        ValidatorStore(tmp_path / "validator.sqlite3"),
+        data_publisher,  # type: ignore[arg-type]
+        endpoint="https://ingestion.example/api/v1/brief-tweets",
+        now=lambda: clock[0],
+    )
+
+    assert not await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=50,
+        hotkey_to_uid={MINER: 7},
+    )
+    clock[0] += timedelta(seconds=30)
+    assert not await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=51,
+        hotkey_to_uid={MINER: 7},
+    )
+    assert len(data_publisher.payloads) == 1
+
+    clock[0] += timedelta(seconds=31)
+    assert await publisher.publish_preview(
+        snapshot,
+        campaign(),
+        [scored()],
+        [scored().attribution],
+        block=52,
+        hotkey_to_uid={MINER: 7},
+    )
+    assert data_publisher.run_ids == [data_publisher.run_ids[0]] * 2
+    assert data_publisher.payloads[0] == data_publisher.payloads[1]
 
 
 def test_payload_publishes_unqualified_preview_as_pending() -> None:

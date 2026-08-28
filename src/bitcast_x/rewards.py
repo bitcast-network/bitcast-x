@@ -91,6 +91,14 @@ class AssignmentOutcome:
     reasons: dict[tuple[str, str], AttributionReason]
 
 
+@dataclass(frozen=True, slots=True)
+class FeaturedTweetCandidate:
+    """Deterministic featured tweet and the ranked pool it was selected from."""
+
+    tweet_id: str
+    selection_pool: tuple[str, ...]
+
+
 def estimate_payouts(
     daily_budget: float,
     tweets: tuple[RewardTweet, ...],
@@ -226,23 +234,48 @@ def apply_v2_bonuses(
 ) -> RewardCampaign:
     """Apply v2 performance then featured bonuses to the final assigned subset."""
 
-    performance_adjusted = apply_v2_performance_bonus(campaign, assigned_tweet_ids)
-    selected = [
-        tweet for tweet in performance_adjusted.tweets if tweet.tweet_id in assigned_tweet_ids
-    ]
+    performance_adjusted = apply_v2_performance_bonus(
+        campaign,
+        assigned_tweet_ids,
+        max_bonus_per_metric=max_bonus_per_metric,
+    )
+    selection = select_v2_featured_tweet(
+        performance_adjusted,
+        assigned_tweet_ids,
+        featured_top_n=featured_top_n,
+    )
+    if selection is None:
+        return performance_adjusted
+    return apply_v2_featured_bonus(
+        performance_adjusted,
+        assigned_tweet_ids,
+        selection.tweet_id,
+        featured_multiplier=featured_multiplier,
+    )
+
+
+def select_v2_featured_tweet(
+    campaign: RewardCampaign,
+    assigned_tweet_ids: set[str],
+    *,
+    featured_top_n: int = 5,
+) -> FeaturedTweetCandidate | None:
+    """Select one tweet deterministically from the most-viewed assigned tweets."""
+
+    if featured_top_n < 1:
+        raise ValueError("featured_top_n must be positive")
+    selected = [tweet for tweet in campaign.tweets if tweet.tweet_id in assigned_tweet_ids]
     if not selected:
-        return campaign
+        return None
     ranked = sorted(
         selected,
         key=lambda item: (-item.views_count, item.tweet_id),
     )[:featured_top_n]
     identifiers = sorted(item.tweet_id for item in ranked)
     featured = ranked[hashlib.sha256(",".join(identifiers).encode()).digest()[0] % len(ranked)]
-    return apply_v2_featured_bonus(
-        performance_adjusted,
-        assigned_tweet_ids,
-        featured.tweet_id,
-        featured_multiplier=featured_multiplier,
+    return FeaturedTweetCandidate(
+        tweet_id=featured.tweet_id,
+        selection_pool=tuple(item.tweet_id for item in ranked),
     )
 
 

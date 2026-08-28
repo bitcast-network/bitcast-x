@@ -52,7 +52,7 @@ def auto_update_enabled(settings: Settings) -> bool:
 
 
 def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
-    """Exercise candidate migrations on disposable copies and reject schema changes."""
+    """Exercise candidate migrations and reject versioned schema changes."""
 
     versions: dict[str, int] = {}
     with tempfile.TemporaryDirectory(prefix="bitcast-x-upgrade-check-") as raw_temp:

@@ -114,11 +114,14 @@ processing verified histories, becoming ready, or producing the current cycle. W
 is enabled by default and follows the configured on-chain cadence.
 
 Accepted scoring-close evidence, optimistic brief verdicts, engagement scores, participant
-exclusions, and performance/featured bonuses become immutable when they produce a positive reward
-allocation. Until then, the validator durably records but retries zero-value results and adopts the
-latest complete campaign record for the same campaign ID. This lets operators correct public,
-access, timing, scoring, or economic fields without abandoning an empty campaign. A campaign with
-an existing positive allocation requires a new campaign ID for such changes.
+exclusions, and performance bonuses become immutable when they produce a positive reward
+allocation. Featured tweet identity is pinned one day before campaign close and immediately makes
+the campaign contract immutable, while its preview evidence and zero-value bonus calculations
+remain retryable. Until either boundary, the validator durably records but retries zero-value
+results and adopts the latest complete campaign record for the same campaign ID. This lets
+operators correct public, access, timing, scoring, or economic fields without abandoning an empty
+campaign. A campaign with a pinned feature or positive allocation requires a new campaign ID for
+such changes.
 Semantic evaluation requires the selected Chutes or OpenRouter key; provider availability never
 becomes a content rejection. During the configured seven-day emission block window, the validator
 calculates the complete proposed vector and stores it durably for inspection and reproducibility,

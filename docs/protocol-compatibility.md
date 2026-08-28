@@ -19,7 +19,10 @@ strings are consensus-visible contracts.
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
-- Additive internal database or operator API changes do not change the protocol version.
+- Additive internal database or operator API changes do not change the protocol version. The
+  featured-selection table is a rollback-safe additive extension and deliberately retains the
+  validator database's existing schema version so the automatic updater can deploy or roll back
+  while older binaries safely ignore it.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.
@@ -37,6 +40,10 @@ strings are consensus-visible contracts.
   cycle, adopt the latest complete record for the same campaign ID, and use payload-addressed
   preview run IDs for replaceable status updates. The first positive per-tweet daily USD allocation
   makes the complete campaign result immutable across restarts and feed snapshots.
+- A pinned featured tweet is a narrower pre-allocation compatibility boundary: its identity and
+  campaign contract are immutable across restarts, but preview evidence, scores, bonus recipients,
+  and zero-value publications remain replaceable until positive economics freeze. Final rewards
+  must replay the pinned identity; unavailable selected-tweet evidence defers settlement.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version, golden vectors and a shadow overlap period.
 - Submission event version 3 adds `creator_x_id`. Validators replay historical version-2 events

@@ -156,6 +156,78 @@ def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: P
     ) == (original,)
 
 
+def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> None:
+    path = tmp_path / "validator.sqlite3"
+    store = ValidatorStore(path)
+    now = datetime(2026, 8, 13, tzinfo=UTC)
+    original = CampaignRecord(
+        access=CampaignAccess(
+            campaign_id="featured",
+            mechanism_id=1,
+            mining_protocol=MiningProtocol.PRECLAIM_V2,
+            scoring_close_block=20,
+        ),
+        title="Featured campaign",
+        brief="original brief",
+        ecosystem_id="eco",
+        opens_at=now,
+        closes_at=now + timedelta(days=1),
+        reward_pool_usd="700",
+        emission_start_block=30,
+        emission_end_block=40,
+    )
+    campaign_json = original.model_dump_json()
+    store.bind_campaign_protocols((original,))
+
+    selected = store.pin_featured_tweet_selection(
+        campaign_id="featured",
+        campaign_json=campaign_json,
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=19,
+        selected_at=now,
+    )
+    store.persist_reconciliation(
+        snapshot_id="first",
+        campaign_id="featured",
+        campaign_json=campaign_json,
+        results=[],
+    )
+    store.persist_reconciliation(
+        snapshot_id="recovered",
+        campaign_id="featured",
+        campaign_json=campaign_json,
+        results=[],
+    )
+
+    reopened = ValidatorStore(path)
+    replayed = reopened.pin_featured_tweet_selection(
+        campaign_id="featured",
+        campaign_json=campaign_json,
+        tweet_id="2",
+        selection_pool=("1", "2"),
+        selected_block=20,
+        selected_at=now + timedelta(minutes=1),
+    )
+    assert replayed == selected
+    assert reopened.reconciliation("recovered", "featured", campaign_json) == []
+    assert reopened.bind_campaign_protocols(
+        (original.model_copy(update={"brief": "mutated brief"}),)
+    ) == (original,)
+    assert reopened.bind_campaign_protocols(()) == (original,)
+
+    connection = sqlite3.connect(path)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert "featured_tweet_selections" in tables
+    finally:
+        connection.close()
+
+
 def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -> None:
     path = tmp_path / "validator.sqlite3"
     path.write_bytes(b"not a sqlite database")
