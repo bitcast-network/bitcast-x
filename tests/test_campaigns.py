@@ -20,6 +20,7 @@ from bitcast_x.campaigns import (
     eligible_creator_ids_for_campaign,
     eligible_creator_ids_in_map,
 )
+from bitcast_x.errors import ProtocolError
 
 FEED = {
     "protocol_version": 2,
@@ -313,6 +314,150 @@ async def test_split_feed_downloads_each_map_once_then_uses_digest_cache(tmp_pat
     assert first == second
     assert calls == {"manifest": 2, "map": 1}
     assert client.cached() == second
+    bindings = json.loads((tmp_path / "feed.json.map-bindings.json").read_text())
+    assert bindings == {
+        "version": 1,
+        "maps": [
+            {
+                "ecosystem_id": "example",
+                "run_id": 7,
+                "digest": _manifest()["ecosystem_maps"][0]["digest"],  # type: ignore[index]
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_rejects_changed_digest_for_an_accepted_ecosystem_run(tmp_path: Path) -> None:
+    original_manifest = _manifest()
+    changed_map = deepcopy(FEED["ecosystem_maps"][0])  # type: ignore[index]
+    changed_map["name"] = "Mutated after publication"
+    changed_digest = _map_digest(EcosystemMap.model_validate(changed_map))
+    changed_manifest = deepcopy(original_manifest)
+    changed_manifest["ecosystem_maps"][0]["digest"] = changed_digest  # type: ignore[index]
+    changed_manifest["ecosystem_maps"][0]["path"] = (  # type: ignore[index]
+        f"/api/v2/public/x/ecosystem-maps/example/7/{changed_digest}"
+    )
+    manifest_calls = 0
+    map_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal manifest_calls, map_calls
+        if request.url.path.endswith("campaign-manifest"):
+            manifest_calls += 1
+            manifest = original_manifest if manifest_calls == 1 else changed_manifest
+            return httpx.Response(200, json=manifest, headers={"etag": f'"v{manifest_calls}"'})
+        map_calls += 1
+        return httpx.Response(200, json=FEED["ecosystem_maps"][0])  # type: ignore[index]
+
+    path = tmp_path / "feed.json"
+    client = CampaignFeedClient(
+        "https://feed.example/api/v2/public/x/campaign-manifest",
+        cache_path=path,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        first = await client.fetch()
+        with pytest.raises(ProtocolError, match="changed the digest"):
+            await client.fetch()
+    finally:
+        await client.close()
+
+    assert map_calls == 1
+    assert client.cached() == first
+    cached = json.loads(path.read_text())
+    assert (
+        cached["manifest"]["ecosystem_maps"][0]["digest"]
+        == (  # type: ignore[index]
+            original_manifest["ecosystem_maps"][0]["digest"]  # type: ignore[index]
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_upgrade_imports_verified_cached_map_before_accepting_new_digest(
+    tmp_path: Path,
+) -> None:
+    original_manifest = _manifest()
+    changed_map = deepcopy(FEED["ecosystem_maps"][0])  # type: ignore[index]
+    changed_map["name"] = "Mutated after the validator cached the run"
+    changed_digest = _map_digest(EcosystemMap.model_validate(changed_map))
+    changed_manifest = deepcopy(original_manifest)
+    changed_manifest["ecosystem_maps"][0]["digest"] = changed_digest  # type: ignore[index]
+    changed_manifest["ecosystem_maps"][0]["path"] = (  # type: ignore[index]
+        f"/api/v2/public/x/ecosystem-maps/example/7/{changed_digest}"
+    )
+    manifest_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal manifest_calls
+        if request.url.path.endswith("campaign-manifest"):
+            manifest_calls += 1
+            manifest = original_manifest if manifest_calls == 1 else changed_manifest
+            return httpx.Response(200, json=manifest)
+        return httpx.Response(200, json=FEED["ecosystem_maps"][0])  # type: ignore[index]
+
+    path = tmp_path / "feed.json"
+    client = CampaignFeedClient(
+        "https://feed.example/api/v2/public/x/campaign-manifest",
+        cache_path=path,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await client.fetch()
+        bindings_path = tmp_path / "feed.json.map-bindings.json"
+        bindings_path.unlink()  # Simulate a cache written by the previous release.
+
+        with pytest.raises(ProtocolError, match="changed the digest"):
+            await client.fetch()
+    finally:
+        await client.close()
+
+    imported = json.loads(bindings_path.read_text())
+    assert imported["maps"] == [
+        {
+            "ecosystem_id": "example",
+            "run_id": 7,
+            "digest": original_manifest["ecosystem_maps"][0]["digest"],  # type: ignore[index]
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_accepts_and_records_a_new_ecosystem_run(tmp_path: Path) -> None:
+    first_manifest = _manifest()
+    next_manifest = deepcopy(first_manifest)
+    next_manifest["ecosystem_maps"][0]["run_id"] = 8  # type: ignore[index]
+    next_manifest["ecosystem_maps"][0]["path"] = (  # type: ignore[index]
+        f"/api/v2/public/x/ecosystem-maps/example/8/"
+        f"{next_manifest['ecosystem_maps'][0]['digest']}"  # type: ignore[index]
+    )
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        if request.url.path.endswith("campaign-manifest"):
+            calls += 1
+            manifest = first_manifest if calls == 1 else next_manifest
+            return httpx.Response(200, json=manifest)
+        return httpx.Response(200, json=FEED["ecosystem_maps"][0])  # type: ignore[index]
+
+    client = CampaignFeedClient(
+        "https://feed.example/api/v2/public/x/campaign-manifest",
+        cache_path=tmp_path / "feed.json",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await client.fetch()
+        await client.fetch()
+    finally:
+        await client.close()
+
+    bindings = json.loads((tmp_path / "feed.json.map-bindings.json").read_text())
+    assert [(item["ecosystem_id"], item["run_id"]) for item in bindings["maps"]] == [
+        ("example", 7),
+        ("example", 8),
+    ]
 
 
 @pytest.mark.asyncio
@@ -334,6 +479,8 @@ async def test_split_feed_rejects_map_whose_content_does_not_match_digest(tmp_pa
             await client.fetch()
     finally:
         await client.close()
+
+    assert (tmp_path / "feed.json.map-bindings.json").exists() is False
 
 
 @pytest.mark.asyncio

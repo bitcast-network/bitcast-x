@@ -22,6 +22,7 @@ from pydantic import (
 )
 
 from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
+from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import CampaignAccess
 
 
@@ -301,6 +302,32 @@ class CampaignManifest(BaseModel):
         return self
 
 
+class _EcosystemMapBinding(BaseModel):
+    """First digest accepted for an immutable ecosystem/run identity."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ecosystem_id: str = Field(min_length=1, max_length=128)
+    run_id: int = Field(ge=1)
+    digest: str = Field(pattern=r"^sha256-[0-9a-f]{64}$")
+
+
+class _EcosystemMapBindings(BaseModel):
+    """Versioned durable validator record of accepted map identities."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    version: Literal[1] = 1
+    maps: tuple[_EcosystemMapBinding, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_uniqueness(self) -> "_EcosystemMapBindings":
+        identities = [(item.ecosystem_id, item.run_id) for item in self.maps]
+        if len(set(identities)) != len(identities):
+            raise ValueError("ecosystem map bindings must have unique identities")
+        return self
+
+
 def ecosystem_map_at(
     feed: CampaignFeed,
     ecosystem_id: str,
@@ -441,6 +468,7 @@ class CampaignFeedClient:
         if isinstance(document, CampaignFeed):
             return document
         maps = await asyncio.gather(*(self._resolve_map(item) for item in document.ecosystem_maps))
+        self._record_map_bindings(document.ecosystem_maps)
         return CampaignFeed(
             protocol_version=2,
             snapshot_id=document.snapshot_id,
@@ -464,6 +492,7 @@ class CampaignFeedClient:
         if "feed" in cached:
             return CampaignFeed.model_validate(cached["feed"])
         manifest = CampaignManifest.model_validate(cached["manifest"])
+        self._reject_map_mutations(manifest.ecosystem_maps)
         maps: list[EcosystemMap] = []
         for reference in manifest.ecosystem_maps:
             ecosystem_map = self._read_map_cache(reference)
@@ -496,12 +525,15 @@ class CampaignFeedClient:
                 if cached is None:
                     raise ValueError("campaign endpoint returned 304 without a local cache")
                 if "manifest" in cached:
-                    return CampaignManifest.model_validate(cached["manifest"])
+                    manifest = CampaignManifest.model_validate(cached["manifest"])
+                    self._reject_map_mutations(manifest.ecosystem_maps)
+                    return manifest
                 return CampaignFeed.model_validate(cached["feed"])
 
             raw = TypeAdapter(dict[str, Any]).validate_json(payload)
             if raw.get("protocol_version") in {3, 4}:
                 manifest = CampaignManifest.model_validate(raw)
+                self._reject_map_mutations(manifest.ecosystem_maps)
                 self._write_document_cache(
                     "manifest",
                     manifest.model_dump(mode="json"),
@@ -574,6 +606,73 @@ class CampaignFeedClient:
     @property
     def _map_cache_dir(self) -> Path:
         return self.cache_path.parent / f"{self.cache_path.name}.maps"
+
+    @property
+    def _map_bindings_path(self) -> Path:
+        return self.cache_path.parent / f"{self.cache_path.name}.map-bindings.json"
+
+    def _read_map_bindings(self) -> _EcosystemMapBindings:
+        if self._map_bindings_path.exists():
+            return _EcosystemMapBindings.model_validate_json(self._map_bindings_path.read_bytes())
+
+        # Upgrade existing validators without forgetting maps they verified
+        # before the binding ledger existed.  A document reference is imported
+        # only when its digest-addressed payload is still present and passes the
+        # normal identity, timestamp and content-digest checks.
+        cached = self._read_cache()
+        references: tuple[EcosystemMapReference, ...] = ()
+        if cached is not None and "manifest" in cached:
+            references = CampaignManifest.model_validate(cached["manifest"]).ecosystem_maps
+        imported = tuple(
+            _EcosystemMapBinding(
+                ecosystem_id=reference.ecosystem_id,
+                run_id=reference.run_id,
+                digest=reference.digest,
+            )
+            for reference in references
+            if self._read_map_cache(reference) is not None
+        )
+        bindings = _EcosystemMapBindings(maps=imported)
+        if imported:
+            self._write_map_bindings(bindings)
+        return bindings
+
+    def _write_map_bindings(self, bindings: _EcosystemMapBindings) -> None:
+        self._map_bindings_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._map_bindings_path.with_suffix(self._map_bindings_path.suffix + ".tmp")
+        temporary.write_bytes(bindings.model_dump_json().encode())
+        os.replace(temporary, self._map_bindings_path)
+
+    def _reject_map_mutations(self, references: tuple[EcosystemMapReference, ...]) -> None:
+        accepted = {
+            (item.ecosystem_id, item.run_id): item.digest for item in self._read_map_bindings().maps
+        }
+        for reference in references:
+            previous = accepted.get((reference.ecosystem_id, reference.run_id))
+            if previous is not None and previous != reference.digest:
+                raise ProtocolError(
+                    "campaign manifest changed the digest for immutable ecosystem map "
+                    f"{reference.ecosystem_id}/{reference.run_id}: "
+                    f"accepted {previous}, received {reference.digest}"
+                )
+
+    def _record_map_bindings(self, references: tuple[EcosystemMapReference, ...]) -> None:
+        bindings = self._read_map_bindings()
+        self._reject_map_mutations(references)
+        known = {(item.ecosystem_id, item.run_id) for item in bindings.maps}
+        additions = tuple(
+            _EcosystemMapBinding(
+                ecosystem_id=item.ecosystem_id,
+                run_id=item.run_id,
+                digest=item.digest,
+            )
+            for item in references
+            if (item.ecosystem_id, item.run_id) not in known
+        )
+        if not additions:
+            return
+        updated = bindings.model_copy(update={"maps": bindings.maps + additions})
+        self._write_map_bindings(updated)
 
     def _map_cache_path(self, reference: EcosystemMapReference) -> Path:
         return self._map_cache_dir / f"{reference.digest}.json"
