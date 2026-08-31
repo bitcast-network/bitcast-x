@@ -14,7 +14,12 @@ from bitcast_x.errors import (
     ProtocolError,
     ResponseTooLargeError,
 )
-from bitcast_x.protocol import BatchChainVerifier, CommittedBatch
+from bitcast_x.protocol import (
+    BatchChainVerifier,
+    CommitmentEnvelope,
+    CommittedBatch,
+    ResumeEnvelope,
+)
 from bitcast_x.transport import BatchPageRequest, SignedMinerClient
 from bitcast_x.validator.store import ValidatorStore
 
@@ -131,6 +136,18 @@ class ValidatorIngestor:
                     available=True,
                     quarantined=False,
                 )
+            if isinstance(expected, ResumeEnvelope):
+                if expected.next_sequence <= start_sequence:
+                    raise ProtocolError("latest resume marker regressed behind verified history")
+                return ReconciliationResult(
+                    hotkey=endpoint.hotkey,
+                    batches_verified=0,
+                    cursor=start_sequence,
+                    available=True,
+                    quarantined=False,
+                )
+            if not isinstance(expected, CommitmentEnvelope):
+                raise ProtocolError("latest on-chain commitment type is unsupported")
             if expected.sequence < start_sequence:
                 raise ProtocolError("latest on-chain commitment regressed behind verified history")
             if expected.sequence == start_sequence:
@@ -156,6 +173,26 @@ class ValidatorIngestor:
                     raise ProtocolError("response belongs to a different miner hotkey")
                 if not response.batches and response.has_more:
                     raise ProtocolError("empty batch page cannot declare more results")
+                if response.resume is not None and (
+                    verifier.last_sequence < response.resume.next_sequence - 1
+                ):
+                    marker = response.resume.envelope()
+                    marker_observation = await self.chain.commitment_at_position(
+                        endpoint.hotkey,
+                        response.resume.position,
+                    )
+                    if marker_observation.envelope != marker:
+                        raise ProtocolError("resume proof does not match finalized chain bytes")
+                    if response.batches and (
+                        response.resume.position.block,
+                        response.resume.position.extrinsic_index,
+                    ) >= (
+                        response.batches[0].position.block,
+                        response.batches[0].position.extrinsic_index,
+                    ):
+                        raise ProtocolError("resumed batches must be finalized after their marker")
+                    verifier.resume_from(marker.next_sequence, marker.digest())
+                    self.store.persist_resume(marker_observation)
                 page_batches: list[CommittedBatch] = []
                 for item in response.batches:
                     batch = CommittedBatch.model_validate(item.batch)
@@ -163,6 +200,8 @@ class ValidatorIngestor:
                         endpoint.hotkey,
                         item.position,
                     )
+                    if not isinstance(observation.envelope, CommitmentEnvelope):
+                        raise ProtocolError("batch proof points to a history resume marker")
                     verifier.verify_and_advance(batch, observation.envelope)
                     self.store.persist_verified(batch, observation)
                     page_batches.append(batch)

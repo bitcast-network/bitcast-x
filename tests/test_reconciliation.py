@@ -18,6 +18,7 @@ from bitcast_x.protocol import (
     CommittedBatch,
     DraftReveal,
     MiningProtocol,
+    ResumeEnvelope,
     SubmissionEvent,
 )
 from bitcast_x.rewards import TweetReward
@@ -324,6 +325,66 @@ async def test_open_campaign_attributes_independently_fetched_ordinary_edit(tmp_
     assert results[0].submission_id == "03" * 16
     assert results[0].claim_id == "01" * 16
     assert qualification.calls == [10, 20]
+
+
+@pytest.mark.asyncio
+async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
+    tmp_path: Path,
+) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    reveal = DraftReveal(claim_id="01" * 16, draft=tweet().text, nonce="02" * 32)
+    claim_batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(
+            ClaimEvent(
+                claim_id=reveal.claim_id,
+                campaign_id="campaign",
+                creator_x_id="456",
+                created_at=NOW + timedelta(minutes=1),
+                draft_commitment=reveal.commitment(),
+            ),
+        ),
+    )
+    persist_batch(store, claim_batch, block=10, timestamp=NOW + timedelta(minutes=1))
+    marker = ResumeEnvelope(next_sequence=4, nonce=b"r" * 32)
+    marker_observation = ChainCommitment(
+        hotkey=MINER,
+        block=11,
+        extrinsic_index=2,
+        timestamp=NOW + timedelta(minutes=2),
+        envelope=marker,
+    )
+    store.persist_block(11, [marker_observation])
+    store.persist_resume(marker_observation)
+    submission_batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=4,
+        previous_batch_hash=marker.digest(),
+        events=(
+            SubmissionEvent(
+                submission_id="03" * 16,
+                campaign_id="campaign",
+                tweet_id="999",
+                claim_id=reveal.claim_id,
+                miner_hotkey=MINER,
+                creator_x_id="456",
+            ),
+        ),
+        reveals=(reveal,),
+    )
+    persist_batch(store, submission_batch, block=12, timestamp=NOW + timedelta(minutes=20))
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    results = await reconciler.reconcile_feed(feed(campaign()), finalized_block=20)
+
+    assert results[0].accepted is False
+    assert results[0].reason is AttributionReason.CLAIM_NOT_ACTIVE
 
 
 @pytest.mark.asyncio

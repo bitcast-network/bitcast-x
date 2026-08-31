@@ -11,6 +11,12 @@ strings are consensus-visible contracts.
 
 - Validators reject unsupported protocol versions, malformed extra fields, broken sequence links
   and changed historical batches. They do not guess through incompatibility.
+- The additive `DXR` envelope is an explicit signed recovery boundary. Updated validators preserve
+  their accepted prefix, verify the marker at its exact finalized position, and accept only a
+  higher sequence whose previous hash is the marker digest. Older validators quarantine the
+  unfamiliar marker or sequence jump; they must be upgraded during the coordinated rollout.
+- Resumes are future-only. Claims and submissions must belong to the same side of the latest
+  verified marker. Existing verified batches and positive campaign economics remain immutable.
 - Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
   available unchanged during rollout; updated clients prefer v4 and fall back to v3 only when the
   v4 endpoint has not yet been published. A v3 response containing the new field is invalid.
@@ -20,9 +26,9 @@ strings are consensus-visible contracts.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version. The
-  featured-selection table is a rollback-safe additive extension and deliberately retains the
-  validator database's existing schema version so the automatic updater can deploy or roll back
-  while older binaries safely ignore it.
+  featured-selection and validator history-resume tables are rollback-safe additive extensions
+  and deliberately retain the validator database's existing schema version. Miner schema version
+  3 adds the crash-safe prepared/finalized resume record and requires a backup before rollback.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.

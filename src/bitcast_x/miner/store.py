@@ -19,6 +19,7 @@ from bitcast_x.protocol import (
     CommittedBatch,
     DraftReveal,
     ProtocolEvent,
+    ResumeEnvelope,
     SubmissionEvent,
 )
 from bitcast_x.sqlite import apply_migrations
@@ -49,6 +50,14 @@ class OperationMetadata:
     ecosystem_ids: tuple[str, ...]
     creator_x_id: str
     external_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryResume:
+    """Durable local state for one signed future-only history boundary."""
+
+    envelope: ResumeEnvelope
+    position: CommitmentPosition | None
 
 
 class MinerStore:
@@ -155,8 +164,145 @@ class MinerStore:
                 CREATE INDEX IF NOT EXISTS idx_operation_ecosystem_lookup
                     ON operation_ecosystem(ecosystem_id, event_id);
                     """,
+                    """
+                CREATE TABLE IF NOT EXISTS history_resume (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    next_sequence INTEGER NOT NULL CHECK(next_sequence >= 2),
+                    nonce TEXT NOT NULL,
+                    cutoff_ns INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('prepared', 'finalized')),
+                    finalized_block INTEGER,
+                    extrinsic_index INTEGER
+                );
+                    """,
                 ),
             )
+
+    def history_resume(self) -> HistoryResume | None:
+        """Return the current prepared or finalized future-only boundary."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT next_sequence, nonce, state, finalized_block, extrinsic_index
+                FROM history_resume WHERE singleton = 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        position = None
+        if row["state"] == "finalized":
+            position = CommitmentPosition(
+                block=int(row["finalized_block"]),
+                extrinsic_index=int(row["extrinsic_index"]),
+            )
+        return HistoryResume(
+            envelope=ResumeEnvelope(
+                next_sequence=int(row["next_sequence"]),
+                nonce=bytes.fromhex(str(row["nonce"])),
+            ),
+            position=position,
+        )
+
+    def prepare_history_resume(self, envelope: ResumeEnvelope) -> HistoryResume:
+        """Persist a recovery marker before submitting it to the chain."""
+
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT next_sequence, nonce, state, finalized_block, extrinsic_index "
+                "FROM history_resume WHERE singleton = 1"
+            ).fetchone()
+            if existing is not None:
+                current = ResumeEnvelope(
+                    next_sequence=int(existing["next_sequence"]),
+                    nonce=bytes.fromhex(str(existing["nonce"])),
+                )
+                if current != envelope and existing["state"] == "prepared":
+                    raise ProtocolError("a different history resume is already being submitted")
+                position = None
+                if existing["state"] == "finalized":
+                    position = CommitmentPosition(
+                        block=int(existing["finalized_block"]),
+                        extrinsic_index=int(existing["extrinsic_index"]),
+                    )
+                if current == envelope:
+                    return HistoryResume(current, position)
+            maximum = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) FROM batches"
+            ).fetchone()[0]
+            if envelope.next_sequence <= int(maximum):
+                raise ProtocolError(
+                    "resume next_sequence must be greater than every local batch sequence"
+                )
+            connection.execute(
+                """
+                INSERT INTO history_resume(
+                    singleton, next_sequence, nonce, cutoff_ns, state,
+                    finalized_block, extrinsic_index
+                ) VALUES (1, ?, ?, ?, 'prepared', NULL, NULL)
+                ON CONFLICT(singleton) DO UPDATE SET
+                    next_sequence = excluded.next_sequence,
+                    nonce = excluded.nonce,
+                    cutoff_ns = excluded.cutoff_ns,
+                    state = 'prepared',
+                    finalized_block = NULL,
+                    extrinsic_index = NULL
+                """,
+                (envelope.next_sequence, envelope.nonce.hex(), time.time_ns()),
+            )
+        return HistoryResume(envelope, None)
+
+    def finalize_history_resume(
+        self, envelope: ResumeEnvelope, position: CommitmentPosition
+    ) -> HistoryResume:
+        """Activate a finalized marker and abandon only pre-marker pending work."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT next_sequence, nonce, cutoff_ns, state, finalized_block, extrinsic_index "
+                "FROM history_resume WHERE singleton = 1"
+            ).fetchone()
+            if (
+                row is None
+                or int(row["next_sequence"]) != envelope.next_sequence
+                or str(row["nonce"]) != envelope.nonce.hex()
+            ):
+                raise ProtocolError("finalized resume does not match prepared marker")
+            if row["state"] == "finalized":
+                if (int(row["finalized_block"]), int(row["extrinsic_index"])) != (
+                    position.block,
+                    position.extrinsic_index,
+                ):
+                    raise ProtocolError("finalized resume position changed")
+                return HistoryResume(envelope, position)
+            cutoff_ns = int(row["cutoff_ns"])
+            connection.execute("DELETE FROM batches WHERE state = 'prepared'")
+            connection.execute(
+                """
+                UPDATE events
+                SET status = ?, rejection_reason = 'history_resumed'
+                WHERE created_ns <= ?
+                  AND status IN (?, ?, ?, ?)
+                """,
+                (
+                    EventStatus.REJECTED.value,
+                    cutoff_ns,
+                    EventStatus.WAITING_FOR_COMMITMENT.value,
+                    EventStatus.SAFE_TO_POST.value,
+                    EventStatus.TWEET_RECEIVED.value,
+                    EventStatus.VERIFICATION_PENDING.value,
+                ),
+            )
+            connection.execute("DELETE FROM active_claims")
+            connection.execute(
+                """
+                UPDATE history_resume
+                SET state = 'finalized', finalized_block = ?, extrinsic_index = ?
+                WHERE singleton = 1
+                """,
+                (position.block, position.extrinsic_index),
+            )
+        return HistoryResume(envelope, position)
 
     def enqueue(
         self,
@@ -468,11 +614,15 @@ class MinerStore:
             rows = connection.execute(
                 """
                 SELECT payload_json, created_ns FROM events
-                WHERE batch_sequence IS NULL
+                WHERE batch_sequence IS NULL AND status IN (?, ?)
                 ORDER BY created_ns, event_id
                 LIMIT ?
                 """,
-                (limit,),
+                (
+                    EventStatus.WAITING_FOR_COMMITMENT.value,
+                    EventStatus.TWEET_RECEIVED.value,
+                    limit,
+                ),
             ).fetchall()
         return [
             (_EVENT_ADAPTER.validate_json(row["payload_json"]), int(row["created_ns"]))
@@ -503,14 +653,34 @@ class MinerStore:
             ).fetchone()
             if pending is not None:
                 return CommittedBatch.model_validate_json(pending["batch_json"])
+            resume = connection.execute(
+                """
+                SELECT next_sequence, nonce FROM history_resume
+                WHERE singleton = 1 AND state = 'finalized'
+                """
+            ).fetchone()
+            floor = int(resume["next_sequence"]) if resume is not None else 1
             last = connection.execute(
                 """
                 SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' ORDER BY sequence DESC LIMIT 1
-                """
+                WHERE state = 'finalized' AND sequence >= ?
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (floor,),
             ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else 1
-            previous_hash = str(last["batch_hash"]) if last else None
+            sequence = int(last["sequence"]) + 1 if last else floor
+            previous_hash = (
+                str(last["batch_hash"])
+                if last
+                else (
+                    ResumeEnvelope(
+                        next_sequence=floor,
+                        nonce=bytes.fromhex(str(resume["nonce"])),
+                    ).digest()
+                    if resume is not None
+                    else None
+                )
+            )
             rows = connection.execute(
                 """
                 SELECT event_id, payload_json, private_reveal_json, batch_sequence
@@ -559,14 +729,34 @@ class MinerStore:
             ).fetchone()
             if pending is not None:
                 raise ProtocolError("cannot preview while a prepared batch exists")
+            resume = connection.execute(
+                """
+                SELECT next_sequence, nonce FROM history_resume
+                WHERE singleton = 1 AND state = 'finalized'
+                """
+            ).fetchone()
+            floor = int(resume["next_sequence"]) if resume is not None else 1
             last = connection.execute(
                 """
                 SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' ORDER BY sequence DESC LIMIT 1
-                """
+                WHERE state = 'finalized' AND sequence >= ?
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (floor,),
             ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else 1
-            previous_hash = str(last["batch_hash"]) if last else None
+            sequence = int(last["sequence"]) + 1 if last else floor
+            previous_hash = (
+                str(last["batch_hash"])
+                if last
+                else (
+                    ResumeEnvelope(
+                        next_sequence=floor,
+                        nonce=bytes.fromhex(str(resume["nonce"])),
+                    ).digest()
+                    if resume is not None
+                    else None
+                )
+            )
             reveals = self._reveals_for(connection, events)
         return CommittedBatch.create(
             miner_hotkey=miner_hotkey,
@@ -738,6 +928,12 @@ class MinerStore:
         """Page finalized batches with their durable chain positions."""
 
         with self._connect() as connection:
+            resume = connection.execute(
+                "SELECT next_sequence FROM history_resume "
+                "WHERE singleton = 1 AND state = 'finalized'"
+            ).fetchone()
+            floor = int(resume["next_sequence"]) if resume is not None else 1
+            after_sequence = max(after_sequence, floor - 1)
             if through_sequence is None:
                 rows = connection.execute(
                     """

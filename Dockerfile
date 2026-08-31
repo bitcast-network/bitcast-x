@@ -9,7 +9,7 @@ RUN uv build --wheel
 
 FROM python:3.12.13-slim AS runtime
 
-ARG VERSION=2.1.0
+ARG VERSION=2.2.0
 ARG REVISION=unknown
 LABEL org.opencontainers.image.title="Bitcast X v3" \
       org.opencontainers.image.version="${VERSION}" \

@@ -64,6 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("shadow-report", help="hash frozen shadow outputs for validator comparison")
     backup = commands.add_parser("backup-state", help="create a consistent online state backup")
     backup.add_argument("--output", required=True)
+    resume = commands.add_parser(
+        "resume-history",
+        help="seal unusable local history and resume future participation",
+    )
+    resume.add_argument("--next-sequence", required=True, type=int)
+    resume.add_argument(
+        "--confirm-hotkey",
+        required=True,
+        help="must exactly match the configured signing hotkey",
+    )
     return parser
 
 
@@ -122,6 +132,16 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         await ReferenceMiner(settings, chain, sdk).run()
         return None
     try:
+        if arguments.command == "resume-history":
+            if arguments.confirm_hotkey != sdk.engine.miner_hotkey:
+                raise ValueError("--confirm-hotkey does not match the configured signing hotkey")
+            anchor = await sdk.engine.resume_history(next_sequence=arguments.next_sequence)
+            return {
+                "hotkey": sdk.engine.miner_hotkey,
+                "next_sequence": anchor.next_sequence,
+                "marker_hash": anchor.envelope().digest(),
+                "position": anchor.position.model_dump(mode="json"),
+            }
         if arguments.command == "claim":
             claim_id = sdk.create_claim(
                 campaign_id=arguments.campaign_id,

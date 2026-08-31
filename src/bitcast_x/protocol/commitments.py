@@ -1,14 +1,18 @@
-"""Binary envelope committed through Bittensor's Commitments pallet."""
+"""Binary envelopes committed through Bittensor's Commitments pallet."""
 
+import hashlib
 import struct
 from dataclasses import dataclass
 
 from bitcast_x.errors import ProtocolError
 
 MAGIC = b"DX2"
+RESUME_MAGIC = b"DXR"
 BATCH_HASH_BYTES = 32
 ENVELOPE_BYTES = len(MAGIC) + 8 + 2 + BATCH_HASH_BYTES
+RESUME_ENVELOPE_BYTES = len(RESUME_MAGIC) + 8 + BATCH_HASH_BYTES
 _ENVELOPE = struct.Struct(">3sQH32s")
+_RESUME_ENVELOPE = struct.Struct(">3sQ32s")
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,3 +46,49 @@ class CommitmentEnvelope:
         if magic != MAGIC:
             raise ProtocolError("unsupported commitment envelope magic")
         return cls(sequence=sequence, event_count=event_count, batch_hash=batch_hash)
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeEnvelope:
+    """A signed, future-only boundary that abandons an unusable local history."""
+
+    next_sequence: int
+    nonce: bytes
+
+    def __post_init__(self) -> None:
+        if not 2 <= self.next_sequence <= (2**64 - 1):
+            raise ProtocolError("resume next_sequence must be between 2 and 2^64-1")
+        if len(self.nonce) != BATCH_HASH_BYTES:
+            raise ProtocolError("resume nonce must contain exactly 32 bytes")
+
+    def encode(self) -> bytes:
+        """Return the consensus-stable signed marker bytes."""
+
+        return _RESUME_ENVELOPE.pack(RESUME_MAGIC, self.next_sequence, self.nonce)
+
+    def digest(self) -> str:
+        """Return the link used as the first resumed batch's previous hash."""
+
+        return hashlib.sha256(self.encode()).hexdigest()
+
+    @classmethod
+    def decode(cls, value: bytes) -> "ResumeEnvelope":
+        if len(value) != RESUME_ENVELOPE_BYTES:
+            raise ProtocolError(f"resume commitment envelope must be {RESUME_ENVELOPE_BYTES} bytes")
+        magic, next_sequence, nonce = _RESUME_ENVELOPE.unpack(value)
+        if magic != RESUME_MAGIC:
+            raise ProtocolError("unsupported resume commitment envelope magic")
+        return cls(next_sequence=next_sequence, nonce=nonce)
+
+
+type OnChainEnvelope = CommitmentEnvelope | ResumeEnvelope
+
+
+def decode_envelope(value: bytes) -> OnChainEnvelope:
+    """Decode either an append-only batch pointer or a future-only resume marker."""
+
+    if value.startswith(MAGIC):
+        return CommitmentEnvelope.decode(value)
+    if value.startswith(RESUME_MAGIC):
+        return ResumeEnvelope.decode(value)
+    raise ProtocolError("unsupported commitment envelope magic")

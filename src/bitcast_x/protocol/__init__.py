@@ -1,6 +1,11 @@
 """Consensus protocol models and canonical encodings."""
 
-from bitcast_x.protocol.commitments import CommitmentEnvelope
+from bitcast_x.protocol.commitments import (
+    CommitmentEnvelope,
+    OnChainEnvelope,
+    ResumeEnvelope,
+    decode_envelope,
+)
 from bitcast_x.protocol.models import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
     AttributionReason,
@@ -33,5 +38,8 @@ __all__ = [
     "DraftReveal",
     "MiningProtocol",
     "ProtocolEvent",
+    "OnChainEnvelope",
+    "ResumeEnvelope",
     "SubmissionEvent",
+    "decode_envelope",
 ]

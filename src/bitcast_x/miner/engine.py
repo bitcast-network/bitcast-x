@@ -16,11 +16,18 @@ from bitcast_x.protocol import (
     CommitmentPosition,
     CommittedBatch,
     DraftReveal,
+    OnChainEnvelope,
     ProtocolEvent,
+    ResumeEnvelope,
     SubmissionEvent,
 )
 from bitcast_x.protocol.canonical import canonical_json
-from bitcast_x.transport import BatchPageRequest, BatchPageResponse, PositionedBatch
+from bitcast_x.transport import (
+    BatchPageRequest,
+    BatchPageResponse,
+    PositionedBatch,
+    ResumeAnchor,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,11 +78,11 @@ class FinalizedCommitment:
 class CommitmentSubmitter(Protocol):
     """Chain operations required by the miner batching engine."""
 
-    async def capacity(self, envelope: CommitmentEnvelope) -> CapacityBudget: ...
+    async def capacity(self, envelope: OnChainEnvelope) -> CapacityBudget: ...
 
     async def latest(self) -> FinalizedCommitment | None: ...
 
-    async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment: ...
+    async def submit(self, envelope: OnChainEnvelope) -> FinalizedCommitment: ...
 
 
 class MinerEngine:
@@ -111,6 +118,45 @@ class MinerEngine:
             max_pending_events=self.policy.max_pending_events,
             max_pending_bytes=self.policy.max_pending_bytes,
         )
+
+    async def resume_history(self, *, next_sequence: int) -> ResumeAnchor:
+        """Commit and activate a crash-safe future-only history boundary."""
+
+        async with self._commit_lock:
+            pending = self.store.history_resume()
+            if pending is None or (
+                pending.position is not None and pending.envelope.next_sequence != next_sequence
+            ):
+                envelope = ResumeEnvelope(
+                    next_sequence=next_sequence,
+                    nonce=secrets.token_bytes(32),
+                )
+                pending = self.store.prepare_history_resume(envelope)
+            elif pending.envelope.next_sequence != next_sequence:
+                raise ProtocolError("a different history resume is already recorded")
+            envelope = pending.envelope
+            if pending.position is not None:
+                return ResumeAnchor(
+                    next_sequence=envelope.next_sequence,
+                    nonce=envelope.nonce.hex(),
+                    position=pending.position,
+                )
+            recovered = await self.submitter.latest()
+            if recovered is not None and recovered.stored_envelope == envelope.encode():
+                finalized = recovered
+            else:
+                budget = await self.submitter.capacity(envelope)
+                if not budget.can_commit:
+                    raise ChainOperationError("commitment epoch capacity is exhausted")
+                finalized = await self.submitter.submit(envelope)
+            if finalized.stored_envelope != envelope.encode():
+                raise ChainOperationError("finalized chain bytes differ from the resume marker")
+            self.store.finalize_history_resume(envelope, finalized.position)
+            return ResumeAnchor(
+                next_sequence=envelope.next_sequence,
+                nonce=envelope.nonce.hex(),
+                position=finalized.position,
+            )
 
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:
         """Finalize one due batch, recovering a prepared batch after restart."""
@@ -161,6 +207,16 @@ class MinerEngine:
         """Serve a bounded page of finalized complete batches."""
 
         del caller_hotkey  # authorization happens before this callback
+        resume_state = self.store.history_resume()
+        resume = (
+            ResumeAnchor(
+                next_sequence=resume_state.envelope.next_sequence,
+                nonce=resume_state.envelope.nonce.hex(),
+                position=resume_state.position,
+            )
+            if resume_state is not None and resume_state.position is not None
+            else None
+        )
         batches, has_more = self.store.finalized_batches(
             after_sequence=request.after_sequence,
             through_sequence=request.through_sequence,
@@ -174,6 +230,7 @@ class MinerEngine:
             ]
             response = BatchPageResponse(
                 miner_hotkey=self.miner_hotkey,
+                resume=resume,
                 batches=candidate,
                 next_sequence=batch.sequence,
                 has_more=has_more or len(candidate) < len(batches),
@@ -188,6 +245,7 @@ class MinerEngine:
         )
         return BatchPageResponse(
             miner_hotkey=self.miner_hotkey,
+            resume=resume,
             batches=selected,
             next_sequence=next_sequence,
             has_more=has_more or len(selected) < len(batches),

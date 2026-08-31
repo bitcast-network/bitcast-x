@@ -225,6 +225,35 @@ overwrite it), copy the backed-up `.sqlite3` files into a new empty state direct
 ownership for UID 10001, run `bitcast-x state-info`, then start the same image version that created
 the backup. Upgrade only after the restored node catches up successfully.
 
+## Recovering a miner that lost commitment history
+
+Use this only when the configured hotkey can no longer extend the batch history already accepted
+by validators. Ordinary restarts and upgrades must keep using the existing state database.
+
+1. Stop creator traffic and the miner writer, but leave its state directory intact.
+2. Back up the complete state directory and record the miner hotkey.
+3. Read the highest accepted cursor reported by every validator. Choose `next_sequence` strictly
+   greater than that cursor and every sequence in the miner's local database.
+4. Upgrade the validators and miner to the release supporting `DXR`.
+5. With the miner still stopped, submit the signed boundary once:
+
+   ```bash
+   bitcast-x resume-history \
+     --next-sequence <highest-accepted-cursor-plus-one> \
+     --confirm-hotkey <exact-configured-hotkey>
+   ```
+
+6. Record the returned marker hash and finalized position, then start the miner. Create a new
+   claim; do not reuse any claim from before the boundary.
+7. Require every validator to advance through the first resumed batch with no quarantine warning
+   before reopening creator traffic.
+
+The command is crash-safe and idempotent: it persists the random marker before chain submission,
+recovers the same finalized bytes on retry, preserves old rows for audit, marks pre-boundary pending
+operations rejected with `history_resumed`, and clears local active claims. A second recovery must
+choose another strictly higher sequence. Never guess a lower cursor to preserve a pending claim;
+that would be rejected and is exactly the history rewrite the boundary is designed to prevent.
+
 ## Upgrade and rollback
 
 1. Record the running image digest, package version, finalized cursor and readiness response.

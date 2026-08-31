@@ -39,6 +39,16 @@ class BatchChainVerifier:
         self.last_sequence = batch.sequence
         self.last_batch_hash = batch.batch_hash
 
+    def resume_from(self, next_sequence: int, marker_hash: str) -> None:
+        """Adopt a verified future-only boundary without altering accepted history."""
+
+        if next_sequence <= self.last_sequence:
+            raise ProtocolError("resume boundary must advance beyond verified history")
+        if len(marker_hash) != 64:
+            raise ProtocolError("resume marker hash must be a SHA-256 digest")
+        self.last_sequence = next_sequence - 1
+        self.last_batch_hash = marker_hash
+
 
 @dataclass(frozen=True, slots=True)
 class ClaimRecord:
