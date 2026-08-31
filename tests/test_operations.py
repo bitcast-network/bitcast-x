@@ -5,11 +5,14 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from bitcast_x import main as main_module
 from bitcast_x.campaigns import CampaignRecord
+from bitcast_x.config import Settings
 from bitcast_x.errors import ProtocolError
 from bitcast_x.logging import JsonFormatter
 from bitcast_x.miner.store import MinerStore
@@ -20,6 +23,27 @@ from bitcast_x.rewards import TweetReward
 from bitcast_x.sqlite import apply_migrations
 from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.store import ValidatorStore
+
+
+@pytest.mark.asyncio
+async def test_resume_history_command_needs_no_chain_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hotkey = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
+    monkeypatch.setattr(
+        main_module,
+        "load_wallet",
+        lambda _settings: SimpleNamespace(hotkey=SimpleNamespace(ss58_address=hotkey)),
+    )
+
+    result = await main_module.run_command(
+        SimpleNamespace(command="resume-history", confirm_hotkey=hotkey),
+        Settings(state_dir=tmp_path),
+    )
+
+    assert result is not None
+    assert result["hotkey"] == hotkey
+    assert len(str(result["history_id"])) == 64
 
 
 @pytest.mark.asyncio
@@ -53,7 +77,7 @@ def test_sqlite_stores_migrate_and_online_backup_is_consistent(tmp_path: Path) -
     manifest = backup_state(state_dir, destination)
     backup_info = inspect_state(destination)
 
-    assert {item["schema_version"] for item in info["databases"]} == {2, 5}
+    assert {item["schema_version"] for item in info["databases"]} == {3, 6}
     assert {item["integrity"] for item in backup_info["databases"]} == {"ok"}
     assert manifest["files"] == ["miner.sqlite3", "validator.sqlite3"]
     assert json.loads((destination / "manifest.json").read_text())["files"] == manifest["files"]
@@ -85,7 +109,28 @@ def test_unversioned_existing_store_is_adopted_without_losing_state(tmp_path: Pa
     assert reopened.scanned_block() == 10
     connection = sqlite3.connect(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
+    finally:
+        connection.close()
+
+
+def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "miner.sqlite3"
+    store = MinerStore(path)
+    history_id = "68" * 32
+    store.start_history(history_id)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA user_version = 0")
+    finally:
+        connection.close()
+
+    reopened = MinerStore(path)
+
+    assert reopened.current_history_id() == history_id
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
     finally:
         connection.close()
 
@@ -146,7 +191,7 @@ def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: P
         row = connection.execute(
             "SELECT campaign_contract_json FROM campaign_protocols WHERE campaign_id = 'frozen'"
         ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         assert row is not None and row[0] == original.model_dump_json()
     finally:
         connection.close()
@@ -222,7 +267,7 @@ def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> Non
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         assert "featured_tweet_selections" in tables
     finally:
         connection.close()

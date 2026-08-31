@@ -3,7 +3,12 @@
 import pytest
 
 from bitcast_x.errors import ProtocolError
-from bitcast_x.protocol.commitments import ENVELOPE_BYTES, CommitmentEnvelope
+from bitcast_x.protocol.commitments import (
+    ENVELOPE_BYTES,
+    HISTORY_ENVELOPE_BYTES,
+    CommitmentEnvelope,
+    decode_envelope,
+)
 
 
 def test_commitment_envelope_golden_vector() -> None:
@@ -21,10 +26,22 @@ def test_commitment_envelope_golden_vector() -> None:
 @pytest.mark.parametrize(
     ("value", "message"),
     [
-        (b"", "45 bytes"),
+        (b"", "45 or 77 bytes"),
         (b"BAD" + bytes(42), "magic"),
     ],
 )
 def test_commitment_envelope_rejects_malformed_bytes(value: bytes, message: str) -> None:
     with pytest.raises(ProtocolError, match=message):
         CommitmentEnvelope.decode(value)
+
+
+def test_history_envelopes_have_stable_golden_vectors() -> None:
+    history_id = bytes(range(32))
+    commitment = CommitmentEnvelope(
+        sequence=1,
+        event_count=2,
+        batch_hash=b"b" * 32,
+        history_id=history_id,
+    )
+    assert len(commitment.encode()) == HISTORY_ENVELOPE_BYTES == 77
+    assert decode_envelope(commitment.encode()) == commitment

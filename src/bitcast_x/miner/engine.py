@@ -16,11 +16,16 @@ from bitcast_x.protocol import (
     CommitmentPosition,
     CommittedBatch,
     DraftReveal,
+    OnChainEnvelope,
     ProtocolEvent,
     SubmissionEvent,
 )
 from bitcast_x.protocol.canonical import canonical_json
-from bitcast_x.transport import BatchPageRequest, BatchPageResponse, PositionedBatch
+from bitcast_x.transport import (
+    BatchPageRequest,
+    BatchPageResponse,
+    PositionedBatch,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,11 +76,11 @@ class FinalizedCommitment:
 class CommitmentSubmitter(Protocol):
     """Chain operations required by the miner batching engine."""
 
-    async def capacity(self, envelope: CommitmentEnvelope) -> CapacityBudget: ...
+    async def capacity(self, envelope: OnChainEnvelope) -> CapacityBudget: ...
 
     async def latest(self) -> FinalizedCommitment | None: ...
 
-    async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment: ...
+    async def submit(self, envelope: OnChainEnvelope) -> FinalizedCommitment: ...
 
 
 class MinerEngine:
@@ -112,6 +117,12 @@ class MinerEngine:
             max_pending_bytes=self.policy.max_pending_bytes,
         )
 
+    async def resume_history(self) -> str:
+        """Atomically abandon pending work and select a fresh local history."""
+
+        async with self._commit_lock:
+            return self.store.resume_history()
+
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:
         """Finalize one due batch, recovering a prepared batch after restart."""
 
@@ -131,6 +142,9 @@ class MinerEngine:
                 sequence=batch.sequence,
                 event_count=len(batch.events),
                 batch_hash=bytes.fromhex(batch.batch_hash),
+                history_id=(
+                    bytes.fromhex(batch.history_id) if batch.history_id is not None else None
+                ),
             )
             recovered = await self.submitter.latest()
             if recovered is not None and recovered.stored_envelope == envelope.encode():
@@ -142,7 +156,7 @@ class MinerEngine:
                 finalized = await self.submitter.submit(envelope)
             if finalized.stored_envelope != envelope.encode():
                 raise ChainOperationError("finalized chain bytes differ from the prepared batch")
-            self.store.mark_finalized(batch.sequence, finalized.position)
+            self.store.mark_finalized(batch, finalized.position)
             return batch
 
     def _select_events(self, queued: list[ProtocolEvent]) -> list[ProtocolEvent]:

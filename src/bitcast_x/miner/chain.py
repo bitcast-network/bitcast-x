@@ -6,7 +6,7 @@ from typing import Any
 from bitcast_x.chain import BittensorChain
 from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.engine import CapacityBudget, FinalizedCommitment
-from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
+from bitcast_x.protocol import CommitmentPosition, OnChainEnvelope
 
 # Subtensor's Commitments pallet applies this floor to the sum of Data field lengths.
 # It is pallet logic rather than a metadata constant; MaxSpace and UsedSpaceOf remain
@@ -23,7 +23,7 @@ class BittensorCommitmentSubmitter:
         self._wallet = wallet
         self.hotkey = str(wallet.hotkey.ss58_address)
 
-    async def capacity(self, envelope: CommitmentEnvelope) -> CapacityBudget:
+    async def capacity(self, envelope: OnChainEnvelope) -> CapacityBudget:
         """Read the epoch-aware space budget enforced by the commitments pallet."""
 
         maximum, used, _epoch = await self._chain.commitment_capacity(self.hotkey)
@@ -46,7 +46,7 @@ class BittensorCommitmentSubmitter:
             stored_envelope=stored,
         )
 
-    async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment:
+    async def submit(self, envelope: OnChainEnvelope) -> FinalizedCommitment:
         """Submit, then independently read and verify the finalized on-chain bytes."""
 
         result = await self._chain.submit_commitment(self._wallet, envelope)

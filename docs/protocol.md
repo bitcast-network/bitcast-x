@@ -38,7 +38,8 @@ Several version numbers cover different boundaries and must not be conflated:
 | Campaign manifest | `4` | Adds each campaign's required top-`max_members` creator-rank cutoff |
 | Validator-to-miner HTTP | `3` | `/v3/batches` includes each batch's claimed finalized chain position |
 | Temporary HTTP overlap | `2` | `/v2/batches` returns the same complete batches without positions |
-| Claim and batch content | `2` | Strict schemas, canonical hashing, and `DX2` on-chain envelopes |
+| Claim event | `2` | Strict claim schema and draft-commitment hashing |
+| Batch content and envelope | `2` or `3` | Version 3 identifies a post-recovery history; version 2 is historical replay |
 | Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
 | Campaign mining mode | `preclaim_v2` or `legacy_connection` | Selects the new committed-claim path or temporary imported legacy behavior |
 
@@ -126,16 +127,42 @@ operator convenience; the committed events and batches are the protocol record.
 
 ## Batches, chain anchors, and validator transport
 
-Events are durably queued and placed into append-only batches. Sequence 1 has no previous hash;
-every later batch includes the prior batch hash. Batch content is canonical UTF-8 JSON with sorted
-keys, NFKC strings, UTC timestamps, explicit nulls, and no non-finite numbers. Its digest is the
-domain-separated SHA-256 hash `dx2/batch`.
+Events are durably queued and placed into append-only batches. Within one history, sequence 1 has
+no previous hash and every later batch includes the prior batch hash. Batch content is canonical
+UTF-8 JSON with sorted keys, NFKC strings, UTC timestamps, explicit nulls, and no non-finite
+numbers. Legacy batch digests use the domain `dx2/batch`.
 
 The on-chain envelope is exactly 45 bytes:
 
 ```text
 "DX2" | sequence:u64 big-endian | event_count:u16 big-endian | batch_hash:32 bytes
 ```
+
+### Future-only history recovery
+
+Losing a miner's local batch database does not authorize rewriting the batches validators already
+accepted. It also does not permanently exclude the signing hotkey. After explicitly confirming
+the abandoned hotkey, the miner generates a random history ID. The first batch in that history is
+version 3, starts at sequence 1 with no previous hash, and uses the domain `dx3/batch`. Its on-chain
+pointer carries the same history ID and is the atomic recovery boundary:
+
+```text
+"DX3" | history_id:32 bytes | sequence:u64 big-endian |
+        event_count:u16 big-endian | batch_hash:32 bytes
+```
+
+Later batches retain the same history ID and continue the ordinary sequence and hash chain. No
+operator supplies or looks up a sequence number; sequence is local to the signed history.
+
+Validators independently read the first batch's historical position and require the signed bytes,
+hotkey, new never-before-used history ID, first sequence, and ordering to match before advancing.
+Their cursor is
+`(history_id, sequence, batch_hash)`, so the same sequence can safely exist in different histories.
+They retain all earlier batches and settled results and never return to a closed history. Claims
+do not cross the boundary: a
+post-resume submission may use only a post-resume claim, so abandoned private state cannot be
+recreated or replayed. A resume may therefore discard pending participation, but cannot create
+evidence before its first batch, change accepted evidence, or reset settled economics.
 
 The miner serves complete finalized batches through `POST /v3/batches`. Requests use Bittensor v11
 HTTP authentication bound to the miner receiver hotkey, request method, path, body, timestamp, and

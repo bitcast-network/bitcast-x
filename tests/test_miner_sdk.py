@@ -15,7 +15,13 @@ from bitcast_x.miner import (
     MinerSdk,
     MinerStore,
 )
-from bitcast_x.protocol import ClaimEvent, CommitmentEnvelope, CommitmentPosition, DraftReveal
+from bitcast_x.protocol import (
+    ClaimEvent,
+    CommitmentEnvelope,
+    CommitmentPosition,
+    DraftReveal,
+    OnChainEnvelope,
+)
 from bitcast_x.transport import BatchPageRequest
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -27,8 +33,8 @@ class FakeSubmitter:
         self.latest_commitment: FinalizedCommitment | None = None
         self.submissions = 0
 
-    async def capacity(self, envelope: CommitmentEnvelope) -> CapacityBudget:
-        assert len(envelope.encode()) == 45
+    async def capacity(self, envelope: OnChainEnvelope) -> CapacityBudget:
+        assert len(envelope.encode()) in {35, 45, 77}
         return CapacityBudget(
             remaining_space=100 if self.available else 0,
             next_call_charge=100,
@@ -37,7 +43,7 @@ class FakeSubmitter:
     async def latest(self) -> FinalizedCommitment | None:
         return self.latest_commitment
 
-    async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment:
+    async def submit(self, envelope: OnChainEnvelope) -> FinalizedCommitment:
         self.submissions += 1
         finalized = FinalizedCommitment(
             position=CommitmentPosition(block=100 + self.submissions, extrinsic_index=3),
@@ -81,6 +87,36 @@ async def test_claim_becomes_safe_only_after_finalized_batch(tmp_path: Path) -> 
     assert batch is not None
     assert sdk.claim_status(claim_id) is EventStatus.SAFE_TO_POST
     assert submitter.submissions == 1
+
+
+@pytest.mark.asyncio
+async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
+    tmp_path: Path,
+) -> None:
+    submitter = FakeSubmitter()
+    sdk = build_sdk(tmp_path / "miner.db", submitter)
+    abandoned_claim = sdk.create_claim(
+        campaign_id="campaign", creator_x_id="123", draft="old draft"
+    )
+    old_batch = await sdk.engine.commit_ready(force=True)
+    assert old_batch is not None and old_batch.sequence == 1
+
+    anchor = await sdk.engine.resume_history()
+    repeated_anchor = await sdk.engine.resume_history()
+    new_claim = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="new draft")
+    new_batch = await sdk.engine.commit_ready(force=True)
+    page = await sdk.engine.batch_page(
+        BatchPageRequest(after_sequence=0, max_batches=10), caller_hotkey="validator"
+    )
+
+    assert sdk.claim_status(abandoned_claim) is EventStatus.REJECTED
+    assert sdk.claim_status(new_claim) is EventStatus.SAFE_TO_POST
+    assert repeated_anchor == anchor
+    assert submitter.submissions == 2  # old batch and first batch in the new history
+    assert new_batch is not None and new_batch.sequence == 1
+    assert new_batch.previous_batch_hash is None
+    assert new_batch.history_id == anchor
+    assert [item.batch["sequence"] for item in page.batches] == [1]
 
 
 @pytest.mark.asyncio

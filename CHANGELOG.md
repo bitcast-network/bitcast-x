@@ -6,6 +6,22 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-08-31
+
+### Added
+
+- A miner hotkey can recover from lost local commitment state with the explicit `resume-history`
+  operator command. The command generates the history ID itself; no validator cursor or sequence
+  number is operator input.
+- The first signed `DX3` batch is the atomic future-only boundary. Validators preserve accepted
+  history, reject reused history IDs, and isolate claims across histories.
+
+### Compatibility
+
+- This is a coordinated miner-validator protocol rollout. Validators without `DX3` support will
+  quarantine a resumed miner until upgraded; ordinary `DX2` histories remain
+  unchanged.
+
 ## [2.1.0] - 2026-08-22
 
 ### Added

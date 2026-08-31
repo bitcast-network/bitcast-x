@@ -14,7 +14,10 @@ from bitcast_x.errors import (
     ProtocolError,
     ResponseTooLargeError,
 )
-from bitcast_x.protocol import BatchChainVerifier, CommittedBatch
+from bitcast_x.protocol import (
+    BatchChainVerifier,
+    CommittedBatch,
+)
 from bitcast_x.transport import BatchPageRequest, SignedMinerClient
 from bitcast_x.validator.store import ValidatorStore
 
@@ -114,8 +117,9 @@ class ValidatorIngestor:
         """Verify contiguous pages for one miner and persist each batch before cursor advance."""
 
         client = self._client_factory(endpoint)
-        start_sequence, start_hash = self.store.cursor(endpoint.hotkey)
+        start_history_id, start_sequence, start_hash = self.store.history_cursor(endpoint.hotkey)
         verifier = BatchChainVerifier(endpoint.hotkey)
+        verifier.history_id = start_history_id
         verifier.last_sequence = start_sequence
         verifier.last_batch_hash = start_hash
         verified = 0
@@ -131,9 +135,17 @@ class ValidatorIngestor:
                     available=True,
                     quarantined=False,
                 )
-            if expected.sequence < start_sequence:
+            expected_history_id = (
+                expected.history_id.hex() if expected.history_id is not None else None
+            )
+            changing_history = expected_history_id != start_history_id
+            if changing_history:
+                if expected_history_id is None:
+                    raise ProtocolError("legacy history cannot replace an active miner history")
+                verifier.start_history(expected_history_id)
+            if not changing_history and expected.sequence < start_sequence:
                 raise ProtocolError("latest on-chain commitment regressed behind verified history")
-            if expected.sequence == start_sequence:
+            if not changing_history and expected.sequence == start_sequence:
                 if expected.batch_hash.hex() != start_hash:
                     raise ProtocolError("latest on-chain commitment changed verified history")
                 return ReconciliationResult(
@@ -143,7 +155,7 @@ class ValidatorIngestor:
                     available=True,
                     quarantined=False,
                 )
-            after = start_sequence
+            after = 0 if changing_history else start_sequence
             for _page_number in range(self._max_pages):
                 response = await client.fetch_batches(
                     BatchPageRequest(

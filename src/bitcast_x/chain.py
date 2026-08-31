@@ -13,7 +13,11 @@ import bittensor as bt
 from bittensor._generated import runtime_apis as runtime_api
 
 from bitcast_x.errors import ChainOperationError, ProtocolError
-from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
+from bitcast_x.protocol import (
+    CommitmentPosition,
+    OnChainEnvelope,
+    decode_envelope,
+)
 
 _GLOBAL_MAX_SUBNET_COUNT = 4096
 _WEIGHT_NONCE_ATTEMPTS = 3
@@ -30,7 +34,7 @@ class ChainCommitment:
     block: int
     extrinsic_index: int
     timestamp: datetime
-    envelope: CommitmentEnvelope
+    envelope: OnChainEnvelope
 
 
 class BittensorChain:
@@ -132,7 +136,7 @@ class BittensorChain:
                     block=block,
                     extrinsic_index=indexes[0],
                     timestamp=info.timestamp,
-                    envelope=CommitmentEnvelope.decode(raw),
+                    envelope=decode_envelope(raw),
                 )
             )
         return observations
@@ -161,13 +165,13 @@ class BittensorChain:
         hotkey: str,
         *,
         block: int | None = None,
-    ) -> CommitmentEnvelope | None:
+    ) -> OnChainEnvelope | None:
         """Return a miner's latest protocol envelope at one finalized snapshot."""
 
         stored = await self.commitment(hotkey, block=block)
         if stored is None:
             return None
-        return CommitmentEnvelope.decode(_raw_fields(stored.fields))
+        return decode_envelope(_raw_fields(stored.fields))
 
     async def miner_qualification_inputs(
         self,
@@ -224,7 +228,7 @@ class BittensorChain:
         ratio = int(split[self.mechanism_id]) / split_total
         return 7200.0 * (alpha_out_rao / 1_000_000_000) * 0.41 * ratio
 
-    async def submit_commitment(self, wallet: Any, envelope: CommitmentEnvelope) -> Any:
+    async def submit_commitment(self, wallet: Any, envelope: OnChainEnvelope) -> Any:
         """Submit one finalized raw commitment signed by the miner hotkey."""
 
         encoded = envelope.encode()

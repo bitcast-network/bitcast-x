@@ -225,6 +225,32 @@ overwrite it), copy the backed-up `.sqlite3` files into a new empty state direct
 ownership for UID 10001, run `bitcast-x state-info`, then start the same image version that created
 the backup. Upgrade only after the restored node catches up successfully.
 
+## Recovering a miner that lost commitment history
+
+Use this only when the configured hotkey can no longer extend the batch history already accepted
+by validators. Ordinary restarts and upgrades must keep using the existing state database.
+
+1. Stop creator traffic and the miner writer, but leave its state directory intact.
+2. Back up the complete state directory and record the miner hotkey.
+3. Upgrade all validators, then upgrade the miner to the release supporting `DX3` histories.
+4. With the miner still stopped, rotate its local history once:
+
+   ```bash
+   bitcast-x resume-history \
+     --confirm-hotkey <exact-configured-hotkey>
+   ```
+
+5. Record the returned history ID, then start the miner. Create a new
+   claim; do not reuse any claim from before the boundary.
+6. Require every validator to advance through the first resumed batch with no quarantine warning
+   before reopening creator traffic.
+
+The command is local, transactional, and idempotent until the first new batch is committed. It
+persists the random history ID, preserves old rows for audit, marks pre-boundary pending operations rejected with
+`history_resumed`, and clears local active claims. The first batch in the new history starts at
+sequence 1 automatically and becomes the signed on-chain boundary. Running recovery again after
+new batches exist creates another new history; it never alters either older history.
+
 ## Upgrade and rollback
 
 1. Record the running image digest, package version, finalized cursor and readiness response.

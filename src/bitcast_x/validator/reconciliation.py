@@ -64,6 +64,7 @@ class _LocatedClaim:
     position: CommitmentPosition
     timestamp: datetime
     event_index: int
+    history_start: CommitmentPosition | None
 
     @property
     def order(self) -> tuple[int, int, int, str]:
@@ -82,6 +83,7 @@ class _LocatedSubmission:
     timestamp: datetime
     event_index: int
     reveal: DraftReveal | None
+    history_start: CommitmentPosition | None
 
     @property
     def order(self) -> tuple[int, int, int, str]:
@@ -200,6 +202,7 @@ class CampaignReconciler:
                             position=record.position,
                             timestamp=record.timestamp,
                             event_index=event_index,
+                            history_start=record.history_start,
                         )
                     )
                 else:
@@ -210,6 +213,7 @@ class CampaignReconciler:
                             timestamp=record.timestamp,
                             event_index=event_index,
                             reveal=reveals.get(event.claim_id) if event.claim_id else None,
+                            history_start=record.history_start,
                         )
                     )
         by_tweet: dict[str, list[_LocatedSubmission]] = defaultdict(list)
@@ -452,7 +456,9 @@ class CampaignReconciler:
     ) -> AttributionResult:
         if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
             return self._reject(tweet.tweet_id, campaign, AttributionReason.CAMPAIGN_INELIGIBLE)
-        claims_by_id = {(item.miner_hotkey, item.claim.claim_id): item for item in claims}
+        claims_by_id = {
+            (item.miner_hotkey, item.claim.claim_id, item.history_start): item for item in claims
+        }
         valid_by_miner: dict[str, MatchCandidate] = {}
         located_by_candidate: dict[tuple[str, str], _LocatedClaim] = {}
         submission_by_candidate: dict[tuple[str, str], SubmissionEvent] = {}
@@ -462,7 +468,9 @@ class CampaignReconciler:
         ] = {}
         for located in submissions:
             event = located.submission
-            claim = claims_by_id.get((event.miner_hotkey, event.claim_id or ""))
+            claim = claims_by_id.get(
+                (event.miner_hotkey, event.claim_id or "", located.history_start)
+            )
             if claim is None:
                 failures.append((located.order, AttributionReason.CLAIM_NOT_ACTIVE))
                 continue
@@ -577,6 +585,7 @@ class CampaignReconciler:
                 if item.miner_hotkey == target.miner_hotkey
                 and item.claim.campaign_id == target.claim.campaign_id
                 and item.claim.creator_x_id == target.claim.creator_x_id
+                and item.history_start == target.history_start
                 and item.timestamp < published_at
                 and (item.miner_hotkey, item.claim.claim_id) not in consumed
             ),
