@@ -18,7 +18,8 @@ from bitcast_x.campaigns import CampaignFeedClient
 from bitcast_x.config import Settings, get_settings
 from bitcast_x.legacy.preflight import inspect_legacy_state
 from bitcast_x.logging import configure_logging
-from bitcast_x.miner.service import ReferenceMiner, build_sdk
+from bitcast_x.miner.service import ReferenceMiner, build_sdk, load_wallet
+from bitcast_x.miner.store import MinerStore
 from bitcast_x.miner.web import run_miner_api
 from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.service import ValidatorService
@@ -93,6 +94,12 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         return backup_state(settings.state_dir, Path(arguments.output))
     if arguments.command == "_auto-update-check":
         return {"schemas": verify_automatic_upgrade(settings.state_dir)}
+    if arguments.command == "resume-history":
+        hotkey = str(load_wallet(settings).hotkey.ss58_address)
+        if arguments.confirm_hotkey != hotkey:
+            raise ValueError("--confirm-hotkey does not match the configured signing hotkey")
+        history_id = MinerStore(settings.state_dir / "miner.sqlite3").resume_history()
+        return {"hotkey": hotkey, "history_id": history_id}
 
     if arguments.command == "campaigns":
         if settings.campaign_feed_url is None:
@@ -131,14 +138,6 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         await ReferenceMiner(settings, chain, sdk).run()
         return None
     try:
-        if arguments.command == "resume-history":
-            if arguments.confirm_hotkey != sdk.engine.miner_hotkey:
-                raise ValueError("--confirm-hotkey does not match the configured signing hotkey")
-            history_id = await sdk.engine.resume_history()
-            return {
-                "hotkey": sdk.engine.miner_hotkey,
-                "history_id": history_id,
-            }
         if arguments.command == "claim":
             claim_id = sdk.create_claim(
                 campaign_id=arguments.campaign_id,

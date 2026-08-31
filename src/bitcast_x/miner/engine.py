@@ -121,10 +121,7 @@ class MinerEngine:
         """Atomically abandon pending work and select a fresh local history."""
 
         async with self._commit_lock:
-            existing = self.store.current_history_id()
-            if existing is not None and not self.store.history_has_batches(existing):
-                return existing
-            return self.store.start_history(secrets.token_hex(32))
+            return self.store.resume_history()
 
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:
         """Finalize one due batch, recovering a prepared batch after restart."""

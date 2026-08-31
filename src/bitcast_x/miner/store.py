@@ -1,6 +1,7 @@
 """Crash-safe SQLite state for the reference miner and reusable SDK."""
 
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -239,36 +240,63 @@ class MinerStore:
                 is not None
             ):
                 raise ProtocolError("history_id was already used by this miner")
-            cutoff_ns = time.time_ns()
-            connection.execute("DELETE FROM batches WHERE state = 'prepared'")
-            connection.execute(
-                """
-                UPDATE events
-                SET status = ?, rejection_reason = 'history_resumed'
-                WHERE created_ns <= ?
-                  AND status IN (?, ?, ?, ?)
-                """,
-                (
-                    EventStatus.REJECTED.value,
-                    cutoff_ns,
-                    EventStatus.WAITING_FOR_COMMITMENT.value,
-                    EventStatus.SAFE_TO_POST.value,
-                    EventStatus.TWEET_RECEIVED.value,
-                    EventStatus.VERIFICATION_PENDING.value,
-                ),
-            )
-            connection.execute("DELETE FROM active_claims")
-            connection.execute(
-                """
-                INSERT INTO history_state(singleton, history_id, cutoff_ns)
-                VALUES (1, ?, ?)
-                ON CONFLICT(singleton) DO UPDATE SET
-                    history_id = excluded.history_id,
-                    cutoff_ns = excluded.cutoff_ns
-                """,
-                (history_id, cutoff_ns),
-            )
+            self._activate_history(connection, history_id)
         return history_id
+
+    def resume_history(self) -> str:
+        """Return an unused current history or atomically rotate to a random one."""
+
+        with self._transaction() as connection:
+            current = connection.execute(
+                "SELECT history_id FROM history_state WHERE singleton = 1"
+            ).fetchone()
+            if current is not None:
+                history_id = str(current["history_id"])
+                used = connection.execute(
+                    "SELECT 1 FROM batches WHERE history_id = ? LIMIT 1", (history_id,)
+                ).fetchone()
+                if used is None:
+                    return history_id
+            while True:
+                history_id = secrets.token_hex(32)
+                duplicate = connection.execute(
+                    "SELECT 1 FROM batches WHERE history_id = ? LIMIT 1", (history_id,)
+                ).fetchone()
+                if duplicate is None:
+                    self._activate_history(connection, history_id)
+                    return history_id
+
+    @staticmethod
+    def _activate_history(connection: sqlite3.Connection, history_id: str) -> None:
+        cutoff_ns = time.time_ns()
+        connection.execute("DELETE FROM batches WHERE state = 'prepared'")
+        connection.execute(
+            """
+            UPDATE events
+            SET status = ?, rejection_reason = 'history_resumed'
+            WHERE created_ns <= ?
+              AND status IN (?, ?, ?, ?)
+            """,
+            (
+                EventStatus.REJECTED.value,
+                cutoff_ns,
+                EventStatus.WAITING_FOR_COMMITMENT.value,
+                EventStatus.SAFE_TO_POST.value,
+                EventStatus.TWEET_RECEIVED.value,
+                EventStatus.VERIFICATION_PENDING.value,
+            ),
+        )
+        connection.execute("DELETE FROM active_claims")
+        connection.execute(
+            """
+            INSERT INTO history_state(singleton, history_id, cutoff_ns)
+            VALUES (1, ?, ?)
+            ON CONFLICT(singleton) DO UPDATE SET
+                history_id = excluded.history_id,
+                cutoff_ns = excluded.cutoff_ns
+            """,
+            (history_id, cutoff_ns),
+        )
 
     def enqueue(
         self,

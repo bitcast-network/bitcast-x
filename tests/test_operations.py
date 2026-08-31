@@ -5,11 +5,14 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+from bitcast_x import main as main_module
 from bitcast_x.campaigns import CampaignRecord
+from bitcast_x.config import Settings
 from bitcast_x.errors import ProtocolError
 from bitcast_x.logging import JsonFormatter
 from bitcast_x.miner.store import MinerStore
@@ -20,6 +23,27 @@ from bitcast_x.rewards import TweetReward
 from bitcast_x.sqlite import apply_migrations
 from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.store import ValidatorStore
+
+
+@pytest.mark.asyncio
+async def test_resume_history_command_needs_no_chain_connection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hotkey = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
+    monkeypatch.setattr(
+        main_module,
+        "load_wallet",
+        lambda _settings: SimpleNamespace(hotkey=SimpleNamespace(ss58_address=hotkey)),
+    )
+
+    result = await main_module.run_command(
+        SimpleNamespace(command="resume-history", confirm_hotkey=hotkey),
+        Settings(state_dir=tmp_path),
+    )
+
+    assert result is not None
+    assert result["hotkey"] == hotkey
+    assert len(str(result["history_id"])) == 64
 
 
 @pytest.mark.asyncio
