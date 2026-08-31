@@ -18,7 +18,6 @@ from bitcast_x.protocol import (
     CommittedBatch,
     DraftReveal,
     MiningProtocol,
-    ResumeEnvelope,
     SubmissionEvent,
 )
 from bitcast_x.rewards import TweetReward
@@ -194,6 +193,7 @@ def persist_batch(
             sequence=batch.sequence,
             event_count=len(batch.events),
             batch_hash=bytes.fromhex(batch.batch_hash),
+            history_id=(bytes.fromhex(batch.history_id) if batch.history_id else None),
         ),
     )
     store.persist_block(block, [anchor])
@@ -348,21 +348,12 @@ async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
         ),
     )
     persist_batch(store, claim_batch, block=10, timestamp=NOW + timedelta(minutes=1))
-    marker = ResumeEnvelope(history_id=b"r" * 32)
-    marker_observation = ChainCommitment(
-        hotkey=MINER,
-        block=11,
-        extrinsic_index=2,
-        timestamp=NOW + timedelta(minutes=2),
-        envelope=marker,
-    )
-    store.persist_block(11, [marker_observation])
-    store.persist_resume(marker_observation)
+    history_id = "72" * 32
     submission_batch = CommittedBatch.create(
         miner_hotkey=MINER,
         sequence=1,
         previous_batch_hash=None,
-        history_id=marker.history_id.hex(),
+        history_id=history_id,
         events=(
             SubmissionEvent(
                 submission_id="03" * 16,
@@ -375,7 +366,7 @@ async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
         ),
         reveals=(reveal,),
     )
-    persist_batch(store, submission_batch, block=12, timestamp=NOW + timedelta(minutes=20))
+    persist_batch(store, submission_batch, block=11, timestamp=NOW + timedelta(minutes=20))
     reconciler = CampaignReconciler(
         store,
         FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),

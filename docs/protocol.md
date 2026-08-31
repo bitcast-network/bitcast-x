@@ -40,7 +40,6 @@ Several version numbers cover different boundaries and must not be conflated:
 | Temporary HTTP overlap | `2` | `/v2/batches` returns the same complete batches without positions |
 | Claim event | `2` | Strict claim schema and draft-commitment hashing |
 | Batch content and envelope | `2` or `3` | Version 3 identifies a post-recovery history; version 2 is historical replay |
-| History recovery marker | `DXR` | Signed future-only boundary; it never replaces accepted batches |
 | Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
 | Campaign mining mode | `preclaim_v2` or `legacy_connection` | Selects the new committed-claim path or temporary imported legacy behavior |
 
@@ -143,32 +142,27 @@ The on-chain envelope is exactly 45 bytes:
 
 Losing a miner's local batch database does not authorize rewriting the batches validators already
 accepted. It also does not permanently exclude the signing hotkey. After explicitly confirming
-the abandoned hotkey, the miner generates a random history ID and commits this 35-byte marker:
-
-```text
-"DXR" | history_id:32 bytes
-```
-
-The first batch in that history is version 3, starts at sequence 1 with no previous hash, and uses
-the domain `dx3/batch`. Its on-chain pointer carries the same history ID:
+the abandoned hotkey, the miner generates a random history ID. The first batch in that history is
+version 3, starts at sequence 1 with no previous hash, and uses the domain `dx3/batch`. Its on-chain
+pointer carries the same history ID and is the atomic recovery boundary:
 
 ```text
 "DX3" | history_id:32 bytes | sequence:u64 big-endian |
         event_count:u16 big-endian | batch_hash:32 bytes
 ```
 
-The first batch's finalized position must be strictly after the marker. Later batches retain the
-same history ID and continue the ordinary sequence and hash chain. No operator supplies or looks
-up a sequence number; sequence is local to the signed history.
+Later batches retain the same history ID and continue the ordinary sequence and hash chain. No
+operator supplies or looks up a sequence number; sequence is local to the signed history.
 
-The miner serves the marker's exact `(block, extrinsic_index)` alongside all post-resume pages.
-Validators independently read that historical position and require the signed bytes, hotkey,
-history ID, first sequence, and ordering to match before advancing. Their cursor is
+Validators independently read the first batch's historical position and require the signed bytes,
+hotkey, new never-before-used history ID, first sequence, and ordering to match before advancing.
+Their cursor is
 `(history_id, sequence, batch_hash)`, so the same sequence can safely exist in different histories.
-They retain all pre-marker batches and settled results. Claims do not cross the boundary: a
+They retain all earlier batches and settled results and never return to a closed history. Claims
+do not cross the boundary: a
 post-resume submission may use only a post-resume claim, so abandoned private state cannot be
 recreated or replayed. A resume may therefore discard pending participation, but cannot create
-evidence before its on-chain boundary, change accepted evidence, or reset settled economics.
+evidence before its first batch, change accepted evidence, or reset settled economics.
 
 The miner serves complete finalized batches through `POST /v3/batches`. Requests use Bittensor v11
 HTTP authentication bound to the miner receiver hotkey, request method, path, body, timestamp, and

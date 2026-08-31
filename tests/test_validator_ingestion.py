@@ -16,9 +16,8 @@ from bitcast_x.protocol import (
     CommitmentPosition,
     CommittedBatch,
     OnChainEnvelope,
-    ResumeEnvelope,
 )
-from bitcast_x.transport import BatchPageResponse, PositionedBatch, ResumeAnchor
+from bitcast_x.transport import BatchPageResponse, PositionedBatch
 from bitcast_x.validator.ingestion import (
     MinerEndpoint,
     ValidatorIngestor,
@@ -81,13 +80,11 @@ class FakeClient:
         *,
         fail: bool = False,
         timeout: bool = False,
-        resume: ResumeAnchor | None = None,
         block_offset: int = 9,
     ) -> None:
         self.available = available
         self.fail = fail
         self.timeout = timeout
-        self.resume = resume
         self.block_offset = block_offset
         self.closed = False
 
@@ -102,7 +99,6 @@ class FakeClient:
         selected = selected[: request.max_batches]
         return BatchPageResponse(
             miner_hotkey=MINER,
-            resume=self.resume,
             batches=[
                 PositionedBatch(
                     batch=batch.model_dump(mode="json"),
@@ -259,26 +255,19 @@ async def test_latest_recommitment_cannot_hide_changed_history(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_signed_resume_preserves_old_batches_and_accepts_only_linked_future(
+async def test_first_history_batch_atomically_preserves_old_batches_and_starts_future(
     tmp_path: Path,
 ) -> None:
     first, second = batches()
     store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
     store.persist_verified(first, observation(first, 10))
     store.persist_verified(second, observation(second, 11))
-    marker = ResumeEnvelope(history_id=b"r" * 32)
-    marker_observation = ChainCommitment(
-        hotkey=MINER,
-        block=12,
-        extrinsic_index=2,
-        timestamp=datetime(2026, 8, 5, 12, 2, tzinfo=UTC),
-        envelope=marker,
-    )
+    history_id = "72" * 32
     resumed = CommittedBatch.create(
         miner_hotkey=MINER,
         sequence=1,
         previous_batch_hash=None,
-        history_id=marker.history_id.hex(),
+        history_id=history_id,
         events=(
             ClaimEvent(
                 claim_id="05" * 16,
@@ -290,59 +279,137 @@ async def test_signed_resume_preserves_old_batches_and_accepts_only_linked_futur
         ),
     )
     resumed_observation = observation(resumed, 13)
-    anchor = ResumeAnchor(
-        history_id=marker.history_id.hex(),
-        position=CommitmentPosition(block=12, extrinsic_index=2),
-    )
-    chain = FakeChain(
-        {12: [marker_observation], 13: [resumed_observation]},
-        latest=resumed_observation.envelope,
-    )
+    chain = FakeChain({13: [resumed_observation]}, latest=resumed_observation.envelope)
 
-    result = await ingestor(
-        store, FakeClient([resumed], resume=anchor, block_offset=12), chain
-    ).reconcile(MinerEndpoint(MINER, "http://miner"))
+    result = await ingestor(store, FakeClient([resumed], block_offset=12), chain).reconcile(
+        MinerEndpoint(MINER, "http://miner")
+    )
 
     assert result.quarantined is False
     assert result.cursor == 1
     assert [record.batch.sequence for record in store.verified_batches()] == [1, 2, 1]
-    assert store.verified_batches()[-1].history_start == anchor.position
+    assert store.verified_batches()[-1].history_start == CommitmentPosition(
+        block=13, extrinsic_index=2
+    )
 
 
 @pytest.mark.asyncio
-async def test_resume_rejects_batch_finalized_before_marker(tmp_path: Path) -> None:
-    marker = ResumeEnvelope(history_id=b"r" * 32)
+async def test_history_boundary_converges_validators_with_different_old_prefixes(
+    tmp_path: Path,
+) -> None:
+    first, second = batches()
+    ahead = ValidatorStore(tmp_path / "ahead.sqlite3", start_block=10)
+    behind = ValidatorStore(tmp_path / "behind.sqlite3", start_block=10)
+    ahead.persist_verified(first, observation(first, 10))
+    ahead.persist_verified(second, observation(second, 11))
+    behind.persist_verified(first, observation(first, 10))
     resumed = CommittedBatch.create(
         miner_hotkey=MINER,
         sequence=1,
         previous_batch_hash=None,
-        history_id=marker.history_id.hex(),
-        events=(batches()[0].events[0],),
+        history_id="72" * 32,
+        events=(first.events[0].model_copy(update={"claim_id": "05" * 16}),),
     )
-    anchor = ResumeAnchor(
-        history_id=marker.history_id.hex(),
-        position=CommitmentPosition(block=20, extrinsic_index=2),
+    resumed_observation = observation(resumed, 13)
+    chain = FakeChain({13: [resumed_observation]}, latest=resumed_observation.envelope)
+
+    ahead_result = await ingestor(ahead, FakeClient([resumed], block_offset=12), chain).reconcile(
+        MinerEndpoint(MINER, "http://miner")
     )
-    marker_observation = ChainCommitment(
-        hotkey=MINER,
-        block=20,
-        extrinsic_index=2,
-        timestamp=datetime(2026, 8, 5, 12, 2, tzinfo=UTC),
-        envelope=marker,
-    )
-    batch_observation = observation(resumed, 13)
-    chain = FakeChain(
-        {13: [batch_observation], 20: [marker_observation]}, latest=batch_observation.envelope
+    behind_result = await ingestor(behind, FakeClient([resumed], block_offset=12), chain).reconcile(
+        MinerEndpoint(MINER, "http://miner")
     )
 
+    assert ahead_result.quarantined is False
+    assert behind_result.quarantined is False
+    assert ahead.history_cursor(MINER) == behind.history_cursor(MINER)
+
+
+def test_closed_history_cannot_be_reactivated(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    legacy, _ = batches()
+    first_history = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="71" * 32,
+        events=(legacy.events[0],),
+    )
+    second_history = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="72" * 32,
+        events=(legacy.events[0].model_copy(update={"claim_id": "05" * 16}),),
+    )
+    reused = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="71" * 32,
+        events=(legacy.events[0].model_copy(update={"claim_id": "07" * 16}),),
+    )
+    store.persist_verified(first_history, observation(first_history, 10))
+    store.persist_verified(second_history, observation(second_history, 11))
+
+    with pytest.raises(ProtocolError, match="history ID was already used"):
+        store.persist_verified(reused, observation(reused, 12))
+
+
+def test_observed_unverified_history_id_cannot_be_reused(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    legacy, _ = batches()
+    observed = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="71" * 32,
+        events=(legacy.events[0],),
+    )
+    active = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="72" * 32,
+        events=(legacy.events[0].model_copy(update={"claim_id": "05" * 16}),),
+    )
+    reused = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="71" * 32,
+        events=(legacy.events[0].model_copy(update={"claim_id": "07" * 16}),),
+    )
+    store.persist_block(10, [observation(observed, 10)])
+    store.persist_verified(active, observation(active, 11))
+
+    with pytest.raises(ProtocolError, match="history ID was already used"):
+        store.persist_verified(reused, observation(reused, 12))
+
+
+@pytest.mark.asyncio
+async def test_new_history_rejects_boundary_before_verified_history(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    old, _ = batches()
+    store.persist_verified(old, observation(old, 20))
+    resumed = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        history_id="72" * 32,
+        events=(batches()[0].events[0],),
+    )
+    batch_observation = observation(resumed, 13)
+    chain = FakeChain({13: [batch_observation]}, latest=batch_observation.envelope)
+
     result = await ingestor(
-        ValidatorStore(tmp_path / "validator.sqlite3", start_block=10),
-        FakeClient([resumed], resume=anchor, block_offset=12),
+        store,
+        FakeClient([resumed], block_offset=12),
         chain,
     ).reconcile(MinerEndpoint(MINER, "http://miner"))
 
     assert result.quarantined is True
-    assert result.error == "resumed batches must be finalized after their marker"
+    assert result.error == "new history must begin after verified history"
 
 
 @pytest.mark.asyncio

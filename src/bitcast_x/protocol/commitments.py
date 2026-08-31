@@ -7,14 +7,11 @@ from bitcast_x.errors import ProtocolError
 
 MAGIC = b"DX2"
 HISTORY_MAGIC = b"DX3"
-RESUME_MAGIC = b"DXR"
 BATCH_HASH_BYTES = 32
 ENVELOPE_BYTES = len(MAGIC) + 8 + 2 + BATCH_HASH_BYTES
 HISTORY_ENVELOPE_BYTES = len(HISTORY_MAGIC) + BATCH_HASH_BYTES + 8 + 2 + BATCH_HASH_BYTES
-RESUME_ENVELOPE_BYTES = len(RESUME_MAGIC) + BATCH_HASH_BYTES
 _ENVELOPE = struct.Struct(">3sQH32s")
 _HISTORY_ENVELOPE = struct.Struct(">3s32sQH32s")
-_RESUME_ENVELOPE = struct.Struct(">3s32s")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,39 +68,10 @@ class CommitmentEnvelope:
         raise ProtocolError("unsupported commitment envelope magic")
 
 
-@dataclass(frozen=True, slots=True)
-class ResumeEnvelope:
-    """A signed, future-only boundary that abandons an unusable local history."""
-
-    history_id: bytes
-
-    def __post_init__(self) -> None:
-        if len(self.history_id) != BATCH_HASH_BYTES:
-            raise ProtocolError("history_id must contain exactly 32 bytes")
-
-    def encode(self) -> bytes:
-        """Return the consensus-stable signed marker bytes."""
-
-        return _RESUME_ENVELOPE.pack(RESUME_MAGIC, self.history_id)
-
-    @classmethod
-    def decode(cls, value: bytes) -> "ResumeEnvelope":
-        if len(value) != RESUME_ENVELOPE_BYTES:
-            raise ProtocolError(f"resume commitment envelope must be {RESUME_ENVELOPE_BYTES} bytes")
-        magic, history_id = _RESUME_ENVELOPE.unpack(value)
-        if magic != RESUME_MAGIC:
-            raise ProtocolError("unsupported resume commitment envelope magic")
-        return cls(history_id=history_id)
+type OnChainEnvelope = CommitmentEnvelope
 
 
-type OnChainEnvelope = CommitmentEnvelope | ResumeEnvelope
+def decode_envelope(value: bytes) -> CommitmentEnvelope:
+    """Decode a legacy or history-scoped batch pointer."""
 
-
-def decode_envelope(value: bytes) -> OnChainEnvelope:
-    """Decode either an append-only batch pointer or a future-only resume marker."""
-
-    if value.startswith((MAGIC, HISTORY_MAGIC)):
-        return CommitmentEnvelope.decode(value)
-    if value.startswith(RESUME_MAGIC):
-        return ResumeEnvelope.decode(value)
-    raise ProtocolError("unsupported commitment envelope magic")
+    return CommitmentEnvelope.decode(value)

@@ -16,9 +16,7 @@ from bitcast_x.errors import (
 )
 from bitcast_x.protocol import (
     BatchChainVerifier,
-    CommitmentEnvelope,
     CommittedBatch,
-    ResumeEnvelope,
 )
 from bitcast_x.transport import BatchPageRequest, SignedMinerClient
 from bitcast_x.validator.store import ValidatorStore
@@ -137,20 +135,14 @@ class ValidatorIngestor:
                     available=True,
                     quarantined=False,
                 )
-            if isinstance(expected, ResumeEnvelope):
-                return ReconciliationResult(
-                    hotkey=endpoint.hotkey,
-                    batches_verified=0,
-                    cursor=start_sequence,
-                    available=True,
-                    quarantined=False,
-                )
-            if not isinstance(expected, CommitmentEnvelope):
-                raise ProtocolError("latest on-chain commitment type is unsupported")
             expected_history_id = (
                 expected.history_id.hex() if expected.history_id is not None else None
             )
             changing_history = expected_history_id != start_history_id
+            if changing_history:
+                if expected_history_id is None:
+                    raise ProtocolError("legacy history cannot replace an active miner history")
+                verifier.start_history(expected_history_id)
             if not changing_history and expected.sequence < start_sequence:
                 raise ProtocolError("latest on-chain commitment regressed behind verified history")
             if not changing_history and expected.sequence == start_sequence:
@@ -176,31 +168,6 @@ class ValidatorIngestor:
                     raise ProtocolError("response belongs to a different miner hotkey")
                 if not response.batches and response.has_more:
                     raise ProtocolError("empty batch page cannot declare more results")
-                if (
-                    response.resume is not None
-                    and response.resume.history_id != verifier.history_id
-                ):
-                    marker = response.resume.envelope()
-                    marker_observation = await self.chain.commitment_at_position(
-                        endpoint.hotkey,
-                        response.resume.position,
-                    )
-                    if marker_observation.envelope != marker:
-                        raise ProtocolError("resume proof does not match finalized chain bytes")
-                    if response.batches and (
-                        response.resume.position.block,
-                        response.resume.position.extrinsic_index,
-                    ) >= (
-                        response.batches[0].position.block,
-                        response.batches[0].position.extrinsic_index,
-                    ):
-                        raise ProtocolError("resumed batches must be finalized after their marker")
-                    if marker.history_id.hex() != expected_history_id:
-                        raise ProtocolError("resume marker does not identify the latest history")
-                    verifier.resume_from(marker.history_id.hex())
-                    self.store.persist_resume(marker_observation)
-                if changing_history and verifier.history_id != expected_history_id:
-                    raise ProtocolError("new miner history has no verified signed resume marker")
                 page_batches: list[CommittedBatch] = []
                 for item in response.batches:
                     batch = CommittedBatch.model_validate(item.batch)
@@ -208,8 +175,6 @@ class ValidatorIngestor:
                         endpoint.hotkey,
                         item.position,
                     )
-                    if not isinstance(observation.envelope, CommitmentEnvelope):
-                        raise ProtocolError("batch proof points to a history resume marker")
                     verifier.verify_and_advance(batch, observation.envelope)
                     self.store.persist_verified(batch, observation)
                     page_batches.append(batch)

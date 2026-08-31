@@ -19,7 +19,6 @@ from bitcast_x.protocol import (
     CommitmentEnvelope,
     CommitmentPosition,
     CommittedBatch,
-    ResumeEnvelope,
 )
 from bitcast_x.protocol.models import AttributionResult
 from bitcast_x.sqlite import apply_migrations
@@ -452,24 +451,6 @@ class ValidatorStore:
                 )
                 """
             )
-            resume_columns = {
-                str(row[1]) for row in connection.execute("PRAGMA table_info(history_resumes)")
-            }
-            if resume_columns and "history_id" not in resume_columns:
-                connection.execute("DROP TABLE history_resumes")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS history_resumes (
-                    hotkey TEXT NOT NULL,
-                    history_id TEXT NOT NULL,
-                    block INTEGER NOT NULL,
-                    extrinsic_index INTEGER NOT NULL,
-                    block_timestamp TEXT NOT NULL,
-                    PRIMARY KEY(hotkey, history_id),
-                    UNIQUE(hotkey, block, extrinsic_index)
-                )
-                """
-            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO scan_state(singleton, last_finalized_block)
@@ -734,11 +715,6 @@ class ValidatorStore:
             if block != current + 1:
                 raise ProtocolError(f"expected finalized block {current + 1}")
             for observation in observations:
-                if isinstance(observation.envelope, ResumeEnvelope):
-                    # The global scanner observes markers, but only targeted miner
-                    # reconciliation may adopt one. Otherwise a marker scanned before
-                    # its accepted prefix would make historical batches look skipped.
-                    continue
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO commitments(
@@ -763,56 +739,6 @@ class ValidatorStore:
                 "UPDATE scan_state SET last_finalized_block = ? WHERE singleton = 1",
                 (block,),
             )
-
-    def persist_resume(self, observation: ChainCommitment) -> None:
-        """Journal an exact signed resume marker without advancing batch history."""
-
-        with self._transaction() as connection:
-            self._persist_resume_connection(connection, observation)
-
-    @staticmethod
-    def _persist_resume_connection(
-        connection: sqlite3.Connection, observation: ChainCommitment
-    ) -> None:
-        envelope = observation.envelope
-        if not isinstance(envelope, ResumeEnvelope):
-            raise ProtocolError("history resume position does not contain a resume marker")
-        previous = connection.execute(
-            """
-            SELECT block, extrinsic_index FROM verified_batches
-            WHERE hotkey = ? ORDER BY block DESC, extrinsic_index DESC LIMIT 1
-            """,
-            (observation.hotkey,),
-        ).fetchone()
-        if previous is not None and (observation.block, observation.extrinsic_index) <= (
-            int(previous["block"]),
-            int(previous["extrinsic_index"]),
-        ):
-            raise ProtocolError("resume marker must follow verified history")
-        expected = (
-            observation.block,
-            observation.extrinsic_index,
-            observation.timestamp.isoformat(),
-        )
-        existing = connection.execute(
-            """
-            SELECT block, extrinsic_index, block_timestamp
-            FROM history_resumes WHERE hotkey = ? AND history_id = ?
-            """,
-            (observation.hotkey, envelope.history_id.hex()),
-        ).fetchone()
-        if existing is not None:
-            if tuple(existing) != expected:
-                raise ProtocolError("signed history resume changed")
-            return
-        connection.execute(
-            """
-            INSERT INTO history_resumes(
-                hotkey, history_id, block, extrinsic_index, block_timestamp
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (observation.hotkey, envelope.history_id.hex(), *expected),
-        )
 
     def cursor(self, hotkey: str) -> tuple[int, str | None]:
         """Return the last atomically verified sequence and hash for a miner."""
@@ -905,8 +831,15 @@ class ValidatorStore:
     def persist_verified(self, batch: CommittedBatch, observation: ChainCommitment) -> None:
         """Atomically journal a targeted chain proof and advance one miner cursor."""
 
-        if not isinstance(observation.envelope, CommitmentEnvelope):
-            raise ProtocolError("batch position contains a history resume marker")
+        if observation.hotkey != batch.miner_hotkey:
+            raise ProtocolError("batch proof belongs to a different miner hotkey")
+        envelope_history_id = (
+            observation.envelope.history_id.hex()
+            if observation.envelope.history_id is not None
+            else ""
+        )
+        if envelope_history_id != (batch.history_id or ""):
+            raise ProtocolError("batch proof belongs to a different miner history")
         position = CommitmentPosition(
             block=observation.block,
             extrinsic_index=observation.extrinsic_index,
@@ -964,20 +897,41 @@ class ValidatorStore:
             if batch_history_id != current_history_id:
                 if not batch_history_id:
                     raise ProtocolError("legacy batch cannot replace the active miner history")
-                resume = connection.execute(
+                if batch.sequence != 1 or batch.previous_batch_hash is not None:
+                    raise ProtocolError("new miner history must begin with sequence 1")
+                reused = connection.execute(
                     """
-                    SELECT block, extrinsic_index FROM history_resumes
+                    SELECT 1 FROM verified_batches
                     WHERE hotkey = ? AND history_id = ?
+                    UNION ALL
+                    SELECT 1 FROM commitments
+                    WHERE hotkey = ? AND history_id = ?
+                      AND (block != ? OR extrinsic_index != ?)
+                    LIMIT 1
                     """,
-                    (batch.miner_hotkey, batch_history_id),
+                    (
+                        batch.miner_hotkey,
+                        batch_history_id,
+                        batch.miner_hotkey,
+                        batch_history_id,
+                        position.block,
+                        position.extrinsic_index,
+                    ),
                 ).fetchone()
-                if resume is None:
-                    raise ProtocolError("batch history has no verified signed resume marker")
-                if (position.block, position.extrinsic_index) <= (
-                    int(resume["block"]),
-                    int(resume["extrinsic_index"]),
+                if reused is not None:
+                    raise ProtocolError("miner history ID was already used")
+                previous = connection.execute(
+                    """
+                    SELECT block, extrinsic_index FROM verified_batches
+                    WHERE hotkey = ? ORDER BY block DESC, extrinsic_index DESC LIMIT 1
+                    """,
+                    (batch.miner_hotkey,),
+                ).fetchone()
+                if previous is not None and (position.block, position.extrinsic_index) <= (
+                    int(previous["block"]),
+                    int(previous["extrinsic_index"]),
                 ):
-                    raise ProtocolError("resumed batches must follow their signed marker")
+                    raise ProtocolError("new history must begin after verified history")
                 last_sequence = 0
                 last_hash = None
             if batch.sequence <= last_sequence:
@@ -1065,14 +1019,18 @@ class ValidatorStore:
             rows = connection.execute(
                 """
                 SELECT b.batch_json, b.block, b.extrinsic_index, c.block_timestamp,
-                       (
-                           SELECT r.block FROM history_resumes r
-                           WHERE r.hotkey = b.hotkey AND r.history_id = b.history_id
-                       ) AS resume_block,
-                       (
-                           SELECT r.extrinsic_index FROM history_resumes r
-                           WHERE r.hotkey = b.hotkey AND r.history_id = b.history_id
-                       ) AS resume_index
+                       CASE WHEN b.history_id != '' THEN (
+                           SELECT first.block FROM verified_batches first
+                           WHERE first.hotkey = b.hotkey
+                             AND first.history_id = b.history_id
+                             AND first.sequence = 1
+                       ) END AS history_block,
+                       CASE WHEN b.history_id != '' THEN (
+                           SELECT first.extrinsic_index FROM verified_batches first
+                           WHERE first.hotkey = b.hotkey
+                             AND first.history_id = b.history_id
+                             AND first.sequence = 1
+                       ) END AS history_index
                 FROM verified_batches b
                 JOIN commitments c
                   ON c.hotkey = b.hotkey
@@ -1093,10 +1051,10 @@ class ValidatorStore:
                 timestamp=datetime.fromisoformat(row["block_timestamp"]),
                 history_start=(
                     CommitmentPosition(
-                        block=int(row["resume_block"]),
-                        extrinsic_index=int(row["resume_index"]),
+                        block=int(row["history_block"]),
+                        extrinsic_index=int(row["history_index"]),
                     )
-                    if row["resume_block"] is not None
+                    if row["history_block"] is not None
                     else None
                 ),
             )

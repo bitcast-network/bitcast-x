@@ -3,7 +3,6 @@
 from bitcast_x.protocol.commitments import (
     CommitmentEnvelope,
     OnChainEnvelope,
-    ResumeEnvelope,
     decode_envelope,
 )
 from bitcast_x.protocol.models import (
@@ -39,7 +38,6 @@ __all__ = [
     "MiningProtocol",
     "ProtocolEvent",
     "OnChainEnvelope",
-    "ResumeEnvelope",
     "SubmissionEvent",
     "decode_envelope",
 ]

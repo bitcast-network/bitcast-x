@@ -112,12 +112,11 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     assert sdk.claim_status(abandoned_claim) is EventStatus.REJECTED
     assert sdk.claim_status(new_claim) is EventStatus.SAFE_TO_POST
     assert repeated_anchor == anchor
-    assert submitter.submissions == 3  # old batch, one marker, new batch
+    assert submitter.submissions == 2  # old batch and first batch in the new history
     assert new_batch is not None and new_batch.sequence == 1
     assert new_batch.previous_batch_hash is None
-    assert new_batch.history_id == anchor.history_id
+    assert new_batch.history_id == anchor
     assert [item.batch["sequence"] for item in page.batches] == [1]
-    assert page.resume == anchor
 
 
 @pytest.mark.asyncio

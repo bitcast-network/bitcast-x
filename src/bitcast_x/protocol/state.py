@@ -45,13 +45,13 @@ class BatchChainVerifier:
         self.last_sequence = batch.sequence
         self.last_batch_hash = batch.batch_hash
 
-    def resume_from(self, history_id: str) -> None:
-        """Adopt a verified future-only boundary without altering accepted history."""
+    def start_history(self, history_id: str) -> None:
+        """Start verification of a new history-scoped batch chain."""
 
         if len(history_id) != 64:
             raise ProtocolError("history_id must be a 32-byte hexadecimal value")
         if history_id == self.history_id:
-            raise ProtocolError("resume marker must select a new miner history")
+            raise ProtocolError("history boundary must select a new miner history")
         self.history_id = history_id
         self.last_sequence = 0
         self.last_batch_hash = None

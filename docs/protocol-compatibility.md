@@ -11,13 +11,12 @@ strings are consensus-visible contracts.
 
 - Validators reject unsupported protocol versions, malformed extra fields, broken sequence links
   and changed historical batches. They do not guess through incompatibility.
-- The additive `DXR` envelope is an explicit signed recovery boundary. Updated validators preserve
-  their accepted prefix, verify the marker at its exact finalized position, and accept only `DX3`
-  batches carrying that marker's history ID. Each history starts at sequence 1 and remains
-  internally append-only. Older validators quarantine the unfamiliar envelopes; they must be
-  upgraded during the coordinated rollout.
+- The first signed `DX3` batch is an atomic recovery boundary. Updated validators preserve their
+  accepted prefix and accept a new, never-before-used history ID only at sequence 1 with no
+  previous hash. Each history remains internally append-only and a closed history cannot be
+  reactivated. Older validators quarantine `DX3`; they must be upgraded during the rollout.
 - Resumes are future-only. Claims and submissions must belong to the same side of the latest
-  verified marker. Existing verified batches and positive campaign economics remain immutable.
+  verified history boundary. Existing verified batches and positive campaign economics remain immutable.
 - Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
   available unchanged during rollout; updated clients prefer v4 and fall back to v3 only when the
   v4 endpoint has not yet been published. A v3 response containing the new field is invalid.
@@ -27,7 +26,7 @@ strings are consensus-visible contracts.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version. Miner
-  schema version 4 and validator schema version 6 key batches by history ID and are forward-only;
+  schema version 3 and validator schema version 6 key batches by history ID and are forward-only;
   create a verified backup before upgrading and restore that backup to roll back.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason

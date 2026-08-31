@@ -134,11 +134,10 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         if arguments.command == "resume-history":
             if arguments.confirm_hotkey != sdk.engine.miner_hotkey:
                 raise ValueError("--confirm-hotkey does not match the configured signing hotkey")
-            anchor = await sdk.engine.resume_history()
+            history_id = await sdk.engine.resume_history()
             return {
                 "hotkey": sdk.engine.miner_hotkey,
-                "history_id": anchor.history_id,
-                "position": anchor.position.model_dump(mode="json"),
+                "history_id": history_id,
             }
         if arguments.command == "claim":
             claim_id = sdk.create_claim(

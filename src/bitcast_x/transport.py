@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from bitcast_x.errors import AuthenticationError, ResponseTooLargeError
-from bitcast_x.protocol import CommitmentPosition, ResumeEnvelope
+from bitcast_x.protocol import CommitmentPosition
 
 BATCHES_PATH = "/v3/batches"
 LEGACY_BATCHES_PATH = "/v2/batches"
@@ -69,18 +69,6 @@ class PositionedBatch(BaseModel):
     position: CommitmentPosition
 
 
-class ResumeAnchor(BaseModel):
-    """Exact finalized proof of the miner-signed future-only boundary."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    history_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    position: CommitmentPosition
-
-    def envelope(self) -> ResumeEnvelope:
-        return ResumeEnvelope(history_id=bytes.fromhex(self.history_id))
-
-
 class BatchPageResponse(BaseModel):
     """Positioned complete batches returned by one miner in sequence order."""
 
@@ -88,7 +76,6 @@ class BatchPageResponse(BaseModel):
 
     protocol_version: int = Field(default=3, frozen=True)
     miner_hotkey: str
-    resume: ResumeAnchor | None = None
     batches: list[PositionedBatch]
     next_sequence: int = Field(ge=0)
     has_more: bool

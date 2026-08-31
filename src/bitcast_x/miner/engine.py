@@ -18,7 +18,6 @@ from bitcast_x.protocol import (
     DraftReveal,
     OnChainEnvelope,
     ProtocolEvent,
-    ResumeEnvelope,
     SubmissionEvent,
 )
 from bitcast_x.protocol.canonical import canonical_json
@@ -26,7 +25,6 @@ from bitcast_x.transport import (
     BatchPageRequest,
     BatchPageResponse,
     PositionedBatch,
-    ResumeAnchor,
 )
 
 
@@ -119,42 +117,14 @@ class MinerEngine:
             max_pending_bytes=self.policy.max_pending_bytes,
         )
 
-    async def resume_history(self) -> ResumeAnchor:
-        """Commit and activate a crash-safe future-only history boundary."""
+    async def resume_history(self) -> str:
+        """Atomically abandon pending work and select a fresh local history."""
 
         async with self._commit_lock:
-            pending = self.store.history_resume()
-            recovered = await self.submitter.latest()
-            if (
-                pending is not None
-                and pending.position is not None
-                and recovered is not None
-                and recovered.stored_envelope == pending.envelope.encode()
-            ):
-                return ResumeAnchor(
-                    history_id=pending.envelope.history_id.hex(),
-                    position=pending.position,
-                )
-            if pending is None or pending.position is not None:
-                envelope = ResumeEnvelope(
-                    history_id=secrets.token_bytes(32),
-                )
-                pending = self.store.prepare_history_resume(envelope)
-            envelope = pending.envelope
-            if recovered is not None and recovered.stored_envelope == envelope.encode():
-                finalized = recovered
-            else:
-                budget = await self.submitter.capacity(envelope)
-                if not budget.can_commit:
-                    raise ChainOperationError("commitment epoch capacity is exhausted")
-                finalized = await self.submitter.submit(envelope)
-            if finalized.stored_envelope != envelope.encode():
-                raise ChainOperationError("finalized chain bytes differ from the resume marker")
-            self.store.finalize_history_resume(envelope, finalized.position)
-            return ResumeAnchor(
-                history_id=envelope.history_id.hex(),
-                position=finalized.position,
-            )
+            existing = self.store.current_history_id()
+            if existing is not None and not self.store.history_has_batches(existing):
+                return existing
+            return self.store.start_history(secrets.token_hex(32))
 
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:
         """Finalize one due batch, recovering a prepared batch after restart."""
@@ -208,15 +178,6 @@ class MinerEngine:
         """Serve a bounded page of finalized complete batches."""
 
         del caller_hotkey  # authorization happens before this callback
-        resume_state = self.store.history_resume()
-        resume = (
-            ResumeAnchor(
-                history_id=resume_state.envelope.history_id.hex(),
-                position=resume_state.position,
-            )
-            if resume_state is not None and resume_state.position is not None
-            else None
-        )
         batches, has_more = self.store.finalized_batches(
             after_sequence=request.after_sequence,
             through_sequence=request.through_sequence,
@@ -230,7 +191,6 @@ class MinerEngine:
             ]
             response = BatchPageResponse(
                 miner_hotkey=self.miner_hotkey,
-                resume=resume,
                 batches=candidate,
                 next_sequence=batch.sequence,
                 has_more=has_more or len(candidate) < len(batches),
@@ -245,7 +205,6 @@ class MinerEngine:
         )
         return BatchPageResponse(
             miner_hotkey=self.miner_hotkey,
-            resume=resume,
             batches=selected,
             next_sequence=next_sequence,
             has_more=has_more or len(selected) < len(batches),
