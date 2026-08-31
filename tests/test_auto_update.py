@@ -85,7 +85,7 @@ def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) 
 
     original = _logical_dump(validator_path)
 
-    with pytest.raises(RuntimeError, match=r"validator\.sqlite3: 4 -> 5"):
+    with pytest.raises(RuntimeError, match=r"validator\.sqlite3: 4 -> 6"):
         auto_update.verify_automatic_upgrade(state)
 
     # Opening a WAL database for online backup may checkpoint it on newer SQLite
@@ -109,11 +109,11 @@ def test_upgrade_check_allows_rollback_safe_featured_selection_table(tmp_path: P
     connection = sqlite3.connect(validator_path)
     try:
         connection.execute("DROP TABLE featured_tweet_selections")
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
     finally:
         connection.close()
 
-    assert auto_update.verify_automatic_upgrade(state) == {"validator.sqlite3": 5}
+    assert auto_update.verify_automatic_upgrade(state) == {"validator.sqlite3": 6}
     connection = sqlite3.connect(validator_path)
     try:
         tables_before_activation = {
@@ -131,7 +131,7 @@ def test_upgrade_check_allows_rollback_safe_featured_selection_table(tmp_path: P
             str(row[0])
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
         assert "featured_tweet_selections" in tables_after_activation
     finally:
         connection.close()

@@ -119,8 +119,9 @@ class ValidatorIngestor:
         """Verify contiguous pages for one miner and persist each batch before cursor advance."""
 
         client = self._client_factory(endpoint)
-        start_sequence, start_hash = self.store.cursor(endpoint.hotkey)
+        start_history_id, start_sequence, start_hash = self.store.history_cursor(endpoint.hotkey)
         verifier = BatchChainVerifier(endpoint.hotkey)
+        verifier.history_id = start_history_id
         verifier.last_sequence = start_sequence
         verifier.last_batch_hash = start_hash
         verified = 0
@@ -137,8 +138,6 @@ class ValidatorIngestor:
                     quarantined=False,
                 )
             if isinstance(expected, ResumeEnvelope):
-                if expected.next_sequence <= start_sequence:
-                    raise ProtocolError("latest resume marker regressed behind verified history")
                 return ReconciliationResult(
                     hotkey=endpoint.hotkey,
                     batches_verified=0,
@@ -148,9 +147,13 @@ class ValidatorIngestor:
                 )
             if not isinstance(expected, CommitmentEnvelope):
                 raise ProtocolError("latest on-chain commitment type is unsupported")
-            if expected.sequence < start_sequence:
+            expected_history_id = (
+                expected.history_id.hex() if expected.history_id is not None else None
+            )
+            changing_history = expected_history_id != start_history_id
+            if not changing_history and expected.sequence < start_sequence:
                 raise ProtocolError("latest on-chain commitment regressed behind verified history")
-            if expected.sequence == start_sequence:
+            if not changing_history and expected.sequence == start_sequence:
                 if expected.batch_hash.hex() != start_hash:
                     raise ProtocolError("latest on-chain commitment changed verified history")
                 return ReconciliationResult(
@@ -160,7 +163,7 @@ class ValidatorIngestor:
                     available=True,
                     quarantined=False,
                 )
-            after = start_sequence
+            after = 0 if changing_history else start_sequence
             for _page_number in range(self._max_pages):
                 response = await client.fetch_batches(
                     BatchPageRequest(
@@ -173,8 +176,9 @@ class ValidatorIngestor:
                     raise ProtocolError("response belongs to a different miner hotkey")
                 if not response.batches and response.has_more:
                     raise ProtocolError("empty batch page cannot declare more results")
-                if response.resume is not None and (
-                    verifier.last_sequence < response.resume.next_sequence - 1
+                if (
+                    response.resume is not None
+                    and response.resume.history_id != verifier.history_id
                 ):
                     marker = response.resume.envelope()
                     marker_observation = await self.chain.commitment_at_position(
@@ -191,8 +195,12 @@ class ValidatorIngestor:
                         response.batches[0].position.extrinsic_index,
                     ):
                         raise ProtocolError("resumed batches must be finalized after their marker")
-                    verifier.resume_from(marker.next_sequence, marker.digest())
+                    if marker.history_id.hex() != expected_history_id:
+                        raise ProtocolError("resume marker does not identify the latest history")
+                    verifier.resume_from(marker.history_id.hex())
                     self.store.persist_resume(marker_observation)
+                if changing_history and verifier.history_id != expected_history_id:
+                    raise ProtocolError("new miner history has no verified signed resume marker")
                 page_batches: list[CommittedBatch] = []
                 for item in response.batches:
                     batch = CommittedBatch.model_validate(item.batch)

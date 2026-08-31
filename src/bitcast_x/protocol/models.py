@@ -18,6 +18,7 @@ from pydantic import (
 from bitcast_x.protocol.canonical import hash_hex, normalize_text
 
 ProtocolId = Literal[2]
+BatchProtocolId = Literal[2, 3]
 SubmissionProtocolId = Literal[2, 3]
 # Direct submissions committed before this block use the legacy creator-resolution
 # rule. At and after it, validators require the version-3 creator binding.
@@ -156,8 +157,9 @@ class DraftReveal(ProtocolModel):
 class BatchContent(ProtocolModel):
     """The exact fields covered by a batch hash."""
 
-    version: ProtocolId = 2
+    version: BatchProtocolId = 2
     miner_hotkey: Hotkey
+    history_id: Hash256 | None = None
     sequence: int = Field(ge=1)
     previous_batch_hash: Hash256 | None
     events: tuple[ProtocolEvent, ...] = Field(min_length=1, max_length=65_535)
@@ -168,6 +170,8 @@ class BatchContent(ProtocolModel):
 
         if (self.sequence == 1) != (self.previous_batch_hash is None):
             raise ValueError("only sequence 1 may omit previous_batch_hash")
+        if (self.version == 2) != (self.history_id is None):
+            raise ValueError("only version 3 batches may include history_id")
         for event in self.events:
             if isinstance(event, SubmissionEvent) and event.miner_hotkey != self.miner_hotkey:
                 raise ValueError("submission miner_hotkey must match its batch")
@@ -176,7 +180,19 @@ class BatchContent(ProtocolModel):
     def hash(self) -> str:
         """Return the protocol-defined complete batch hash."""
 
-        return hash_hex("dx2/batch", self)
+        return hash_hex("dx2/batch" if self.version == 2 else "dx3/batch", self)
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_history_id(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        """Preserve hashes for version-2 batches that predate history epochs."""
+
+        data: dict[str, Any] = handler(self)
+        if self.history_id is None:
+            data.pop("history_id", None)
+        return data
 
 
 class CommittedBatch(BatchContent):
@@ -214,11 +230,14 @@ class CommittedBatch(BatchContent):
         previous_batch_hash: str | None,
         events: tuple[ProtocolEvent, ...],
         reveals: tuple[DraftReveal, ...] = (),
+        history_id: str | None = None,
     ) -> "CommittedBatch":
         """Create a committed batch without allowing a caller-supplied digest."""
 
         content = BatchContent(
+            version=3 if history_id is not None else 2,
             miner_hotkey=miner_hotkey,
+            history_id=history_id,
             sequence=sequence,
             previous_batch_hash=previous_batch_hash,
             events=events,

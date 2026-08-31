@@ -119,29 +119,28 @@ class MinerEngine:
             max_pending_bytes=self.policy.max_pending_bytes,
         )
 
-    async def resume_history(self, *, next_sequence: int) -> ResumeAnchor:
+    async def resume_history(self) -> ResumeAnchor:
         """Commit and activate a crash-safe future-only history boundary."""
 
         async with self._commit_lock:
             pending = self.store.history_resume()
-            if pending is None or (
-                pending.position is not None and pending.envelope.next_sequence != next_sequence
+            recovered = await self.submitter.latest()
+            if (
+                pending is not None
+                and pending.position is not None
+                and recovered is not None
+                and recovered.stored_envelope == pending.envelope.encode()
             ):
-                envelope = ResumeEnvelope(
-                    next_sequence=next_sequence,
-                    nonce=secrets.token_bytes(32),
-                )
-                pending = self.store.prepare_history_resume(envelope)
-            elif pending.envelope.next_sequence != next_sequence:
-                raise ProtocolError("a different history resume is already recorded")
-            envelope = pending.envelope
-            if pending.position is not None:
                 return ResumeAnchor(
-                    next_sequence=envelope.next_sequence,
-                    nonce=envelope.nonce.hex(),
+                    history_id=pending.envelope.history_id.hex(),
                     position=pending.position,
                 )
-            recovered = await self.submitter.latest()
+            if pending is None or pending.position is not None:
+                envelope = ResumeEnvelope(
+                    history_id=secrets.token_bytes(32),
+                )
+                pending = self.store.prepare_history_resume(envelope)
+            envelope = pending.envelope
             if recovered is not None and recovered.stored_envelope == envelope.encode():
                 finalized = recovered
             else:
@@ -153,8 +152,7 @@ class MinerEngine:
                 raise ChainOperationError("finalized chain bytes differ from the resume marker")
             self.store.finalize_history_resume(envelope, finalized.position)
             return ResumeAnchor(
-                next_sequence=envelope.next_sequence,
-                nonce=envelope.nonce.hex(),
+                history_id=envelope.history_id.hex(),
                 position=finalized.position,
             )
 
@@ -177,6 +175,9 @@ class MinerEngine:
                 sequence=batch.sequence,
                 event_count=len(batch.events),
                 batch_hash=bytes.fromhex(batch.batch_hash),
+                history_id=(
+                    bytes.fromhex(batch.history_id) if batch.history_id is not None else None
+                ),
             )
             recovered = await self.submitter.latest()
             if recovered is not None and recovered.stored_envelope == envelope.encode():
@@ -188,7 +189,7 @@ class MinerEngine:
                 finalized = await self.submitter.submit(envelope)
             if finalized.stored_envelope != envelope.encode():
                 raise ChainOperationError("finalized chain bytes differ from the prepared batch")
-            self.store.mark_finalized(batch.sequence, finalized.position)
+            self.store.mark_finalized(batch, finalized.position)
             return batch
 
     def _select_events(self, queued: list[ProtocolEvent]) -> list[ProtocolEvent]:
@@ -210,8 +211,7 @@ class MinerEngine:
         resume_state = self.store.history_resume()
         resume = (
             ResumeAnchor(
-                next_sequence=resume_state.envelope.next_sequence,
-                nonce=resume_state.envelope.nonce.hex(),
+                history_id=resume_state.envelope.history_id.hex(),
                 position=resume_state.position,
             )
             if resume_state is not None and resume_state.position is not None

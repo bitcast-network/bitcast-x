@@ -348,7 +348,7 @@ async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
         ),
     )
     persist_batch(store, claim_batch, block=10, timestamp=NOW + timedelta(minutes=1))
-    marker = ResumeEnvelope(next_sequence=4, nonce=b"r" * 32)
+    marker = ResumeEnvelope(history_id=b"r" * 32)
     marker_observation = ChainCommitment(
         hotkey=MINER,
         block=11,
@@ -360,8 +360,9 @@ async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
     store.persist_resume(marker_observation)
     submission_batch = CommittedBatch.create(
         miner_hotkey=MINER,
-        sequence=4,
-        previous_batch_hash=marker.digest(),
+        sequence=1,
+        previous_batch_hash=None,
+        history_id=marker.history_id.hex(),
         events=(
             SubmissionEvent(
                 submission_id="03" * 16,

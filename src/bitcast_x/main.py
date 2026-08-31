@@ -68,7 +68,6 @@ def build_parser() -> argparse.ArgumentParser:
         "resume-history",
         help="seal unusable local history and resume future participation",
     )
-    resume.add_argument("--next-sequence", required=True, type=int)
     resume.add_argument(
         "--confirm-hotkey",
         required=True,
@@ -135,11 +134,10 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         if arguments.command == "resume-history":
             if arguments.confirm_hotkey != sdk.engine.miner_hotkey:
                 raise ValueError("--confirm-hotkey does not match the configured signing hotkey")
-            anchor = await sdk.engine.resume_history(next_sequence=arguments.next_sequence)
+            anchor = await sdk.engine.resume_history()
             return {
                 "hotkey": sdk.engine.miner_hotkey,
-                "next_sequence": anchor.next_sequence,
-                "marker_hash": anchor.envelope().digest(),
+                "history_id": anchor.history_id,
                 "position": anchor.position.model_dump(mode="json"),
             }
         if arguments.command == "claim":

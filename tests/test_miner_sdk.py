@@ -34,7 +34,7 @@ class FakeSubmitter:
         self.submissions = 0
 
     async def capacity(self, envelope: OnChainEnvelope) -> CapacityBudget:
-        assert len(envelope.encode()) in {43, 45}
+        assert len(envelope.encode()) in {35, 45, 77}
         return CapacityBudget(
             remaining_space=100 if self.available else 0,
             next_call_charge=100,
@@ -101,7 +101,8 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     old_batch = await sdk.engine.commit_ready(force=True)
     assert old_batch is not None and old_batch.sequence == 1
 
-    anchor = await sdk.engine.resume_history(next_sequence=4)
+    anchor = await sdk.engine.resume_history()
+    repeated_anchor = await sdk.engine.resume_history()
     new_claim = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="new draft")
     new_batch = await sdk.engine.commit_ready(force=True)
     page = await sdk.engine.batch_page(
@@ -110,9 +111,12 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
 
     assert sdk.claim_status(abandoned_claim) is EventStatus.REJECTED
     assert sdk.claim_status(new_claim) is EventStatus.SAFE_TO_POST
-    assert new_batch is not None and new_batch.sequence == 4
-    assert new_batch.previous_batch_hash == anchor.envelope().digest()
-    assert [item.batch["sequence"] for item in page.batches] == [4]
+    assert repeated_anchor == anchor
+    assert submitter.submissions == 3  # old batch, one marker, new batch
+    assert new_batch is not None and new_batch.sequence == 1
+    assert new_batch.previous_batch_hash is None
+    assert new_batch.history_id == anchor.history_id
+    assert [item.batch["sequence"] for item in page.batches] == [1]
     assert page.resume == anchor
 
 

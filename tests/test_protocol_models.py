@@ -53,6 +53,27 @@ def test_create_batch_golden_hash_and_reveal() -> None:
     )
 
 
+def test_new_history_batch_is_domain_separated_and_self_identifying() -> None:
+    legacy = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(make_claim(),),
+    )
+    resumed = CommittedBatch.create(
+        miner_hotkey=MINER,
+        history_id="04" * 32,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(make_claim(),),
+    )
+
+    assert resumed.version == 3
+    assert resumed.history_id == "04" * 32
+    assert resumed.batch_hash != legacy.batch_hash
+    assert "history_id" not in legacy.model_dump()
+
+
 def test_batch_rejects_wrong_hash() -> None:
     claim = make_claim()
     with pytest.raises(ValidationError, match="batch_hash"):

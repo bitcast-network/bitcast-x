@@ -386,7 +386,57 @@ class ValidatorStore:
             # keeps re-adoption safe when an otherwise-current DB has its
             # user_version cleared by an operator or older tooling.
             # Version five similarly records the complete campaign contract.
-            apply_migrations(connection, (*base_migrations, "SELECT 1;", "SELECT 1;"))
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            cursor_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(miner_cursors)")
+            }
+            commitment_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(commitments)")
+            }
+            verified_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(verified_batches)")
+            }
+            if (
+                current <= 5
+                and "history_id" in cursor_columns
+                and "history_id" in commitment_columns
+                and "history_id" in verified_columns
+            ):
+                connection.execute("PRAGMA user_version = 6")
+            apply_migrations(
+                connection,
+                (
+                    *base_migrations,
+                    "SELECT 1;",
+                    "SELECT 1;",
+                    """
+                    ALTER TABLE miner_cursors
+                        ADD COLUMN history_id TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE commitments
+                        ADD COLUMN history_id TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE verified_batches RENAME TO verified_batches_pre_history;
+                    CREATE TABLE verified_batches (
+                        hotkey TEXT NOT NULL,
+                        history_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        block INTEGER NOT NULL,
+                        extrinsic_index INTEGER NOT NULL,
+                        batch_hash TEXT NOT NULL,
+                        batch_json TEXT NOT NULL,
+                        PRIMARY KEY(hotkey, history_id, sequence),
+                        UNIQUE(hotkey, block, extrinsic_index)
+                    );
+                    INSERT INTO verified_batches(
+                        hotkey, history_id, sequence, block, extrinsic_index,
+                        batch_hash, batch_json
+                    )
+                    SELECT hotkey, '', sequence, block, extrinsic_index,
+                           batch_hash, batch_json
+                    FROM verified_batches_pre_history;
+                    DROP TABLE verified_batches_pre_history;
+                    """,
+                ),
+            )
             # This table is a rollback-safe additive extension. It deliberately
             # leaves user_version unchanged so an older binary can ignore it
             # during rollback while newer binaries recreate it after recovery.
@@ -402,17 +452,20 @@ class ValidatorStore:
                 )
                 """
             )
+            resume_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(history_resumes)")
+            }
+            if resume_columns and "history_id" not in resume_columns:
+                connection.execute("DROP TABLE history_resumes")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS history_resumes (
                     hotkey TEXT NOT NULL,
-                    next_sequence INTEGER NOT NULL,
-                    nonce TEXT NOT NULL,
+                    history_id TEXT NOT NULL,
                     block INTEGER NOT NULL,
                     extrinsic_index INTEGER NOT NULL,
                     block_timestamp TEXT NOT NULL,
-                    marker_hash TEXT NOT NULL,
-                    PRIMARY KEY(hotkey, next_sequence),
+                    PRIMARY KEY(hotkey, history_id),
                     UNIQUE(hotkey, block, extrinsic_index)
                 )
                 """
@@ -690,14 +743,17 @@ class ValidatorStore:
                     """
                     INSERT OR IGNORE INTO commitments(
                         hotkey, block, extrinsic_index, block_timestamp,
-                        sequence, event_count, batch_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        history_id, sequence, event_count, batch_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         observation.hotkey,
                         observation.block,
                         observation.extrinsic_index,
                         observation.timestamp.isoformat(),
+                        observation.envelope.history_id.hex()
+                        if observation.envelope.history_id is not None
+                        else "",
                         observation.envelope.sequence,
                         observation.envelope.event_count,
                         observation.envelope.batch_hash.hex(),
@@ -721,17 +777,10 @@ class ValidatorStore:
         envelope = observation.envelope
         if not isinstance(envelope, ResumeEnvelope):
             raise ProtocolError("history resume position does not contain a resume marker")
-        cursor = connection.execute(
-            "SELECT last_sequence FROM miner_cursors WHERE hotkey = ?",
-            (observation.hotkey,),
-        ).fetchone()
-        last_sequence = int(cursor["last_sequence"]) if cursor else 0
-        if envelope.next_sequence <= last_sequence:
-            raise ProtocolError("resume boundary does not advance verified history")
         previous = connection.execute(
             """
             SELECT block, extrinsic_index FROM verified_batches
-            WHERE hotkey = ? ORDER BY sequence DESC LIMIT 1
+            WHERE hotkey = ? ORDER BY block DESC, extrinsic_index DESC LIMIT 1
             """,
             (observation.hotkey,),
         ).fetchone()
@@ -741,18 +790,16 @@ class ValidatorStore:
         ):
             raise ProtocolError("resume marker must follow verified history")
         expected = (
-            envelope.nonce.hex(),
             observation.block,
             observation.extrinsic_index,
             observation.timestamp.isoformat(),
-            envelope.digest(),
         )
         existing = connection.execute(
             """
-            SELECT nonce, block, extrinsic_index, block_timestamp, marker_hash
-            FROM history_resumes WHERE hotkey = ? AND next_sequence = ?
+            SELECT block, extrinsic_index, block_timestamp
+            FROM history_resumes WHERE hotkey = ? AND history_id = ?
             """,
-            (observation.hotkey, envelope.next_sequence),
+            (observation.hotkey, envelope.history_id.hex()),
         ).fetchone()
         if existing is not None:
             if tuple(existing) != expected:
@@ -761,11 +808,10 @@ class ValidatorStore:
         connection.execute(
             """
             INSERT INTO history_resumes(
-                hotkey, next_sequence, nonce, block, extrinsic_index,
-                block_timestamp, marker_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                hotkey, history_id, block, extrinsic_index, block_timestamp
+            ) VALUES (?, ?, ?, ?, ?)
             """,
-            (observation.hotkey, envelope.next_sequence, *expected),
+            (observation.hotkey, envelope.history_id.hex(), *expected),
         )
 
     def cursor(self, hotkey: str) -> tuple[int, str | None]:
@@ -777,6 +823,22 @@ class ValidatorStore:
                 (hotkey,),
             ).fetchone()
         return (int(row["last_sequence"]), row["last_batch_hash"]) if row else (0, None)
+
+    def history_cursor(self, hotkey: str) -> tuple[str | None, int, str | None]:
+        """Return the active history ID and its independently scoped batch cursor."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT history_id, last_sequence, last_batch_hash
+                FROM miner_cursors WHERE hotkey = ?
+                """,
+                (hotkey,),
+            ).fetchone()
+        if row is None:
+            return None, 0, None
+        history_id = str(row["history_id"])
+        return (history_id or None, int(row["last_sequence"]), row["last_batch_hash"])
 
     def commitment_for_sequence(
         self,
@@ -794,7 +856,8 @@ class ValidatorStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT block, extrinsic_index, block_timestamp, event_count, batch_hash
+                SELECT block, extrinsic_index, block_timestamp, history_id,
+                       event_count, batch_hash
                 FROM commitments
                 WHERE hotkey = ? AND sequence = ? ORDER BY block, extrinsic_index
                 """,
@@ -822,6 +885,7 @@ class ValidatorStore:
                 sequence=sequence,
                 event_count=int(row["event_count"]),
                 batch_hash=bytes.fromhex(row["batch_hash"]),
+                history_id=(bytes.fromhex(str(row["history_id"])) if row["history_id"] else None),
             ),
         )
 
@@ -850,7 +914,7 @@ class ValidatorStore:
         with self._transaction() as connection:
             existing_anchor = connection.execute(
                 """
-                SELECT sequence, event_count, batch_hash, block_timestamp
+                SELECT sequence, event_count, batch_hash, block_timestamp, history_id
                 FROM commitments
                 WHERE hotkey = ? AND block = ? AND extrinsic_index = ?
                 """,
@@ -861,20 +925,24 @@ class ValidatorStore:
                 observation.envelope.event_count,
                 observation.envelope.batch_hash.hex(),
                 observation.timestamp.isoformat(),
+                observation.envelope.history_id.hex()
+                if observation.envelope.history_id is not None
+                else "",
             )
             if existing_anchor is None:
                 connection.execute(
                     """
                     INSERT INTO commitments(
                         hotkey, block, extrinsic_index, block_timestamp,
-                        sequence, event_count, batch_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        history_id, sequence, event_count, batch_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         batch.miner_hotkey,
                         position.block,
                         position.extrinsic_index,
                         expected_anchor[3],
+                        expected_anchor[4],
                         expected_anchor[0],
                         expected_anchor[1],
                         expected_anchor[2],
@@ -883,29 +951,42 @@ class ValidatorStore:
             elif tuple(existing_anchor) != expected_anchor:
                 raise ProtocolError("verified commitment position changed")
             row = connection.execute(
-                "SELECT last_sequence, last_batch_hash FROM miner_cursors WHERE hotkey = ?",
+                """
+                SELECT history_id, last_sequence, last_batch_hash
+                FROM miner_cursors WHERE hotkey = ?
+                """,
                 (batch.miner_hotkey,),
             ).fetchone()
+            current_history_id = str(row["history_id"]) if row else ""
             last_sequence = int(row["last_sequence"]) if row else 0
             last_hash = row["last_batch_hash"] if row else None
-            resume = connection.execute(
-                """
-                SELECT next_sequence, marker_hash FROM history_resumes
-                WHERE hotkey = ? AND next_sequence > ?
-                ORDER BY next_sequence LIMIT 1
-                """,
-                (batch.miner_hotkey, last_sequence),
-            ).fetchone()
-            if resume is not None:
-                last_sequence = int(resume["next_sequence"]) - 1
-                last_hash = str(resume["marker_hash"])
+            batch_history_id = batch.history_id or ""
+            if batch_history_id != current_history_id:
+                if not batch_history_id:
+                    raise ProtocolError("legacy batch cannot replace the active miner history")
+                resume = connection.execute(
+                    """
+                    SELECT block, extrinsic_index FROM history_resumes
+                    WHERE hotkey = ? AND history_id = ?
+                    """,
+                    (batch.miner_hotkey, batch_history_id),
+                ).fetchone()
+                if resume is None:
+                    raise ProtocolError("batch history has no verified signed resume marker")
+                if (position.block, position.extrinsic_index) <= (
+                    int(resume["block"]),
+                    int(resume["extrinsic_index"]),
+                ):
+                    raise ProtocolError("resumed batches must follow their signed marker")
+                last_sequence = 0
+                last_hash = None
             if batch.sequence <= last_sequence:
                 existing = connection.execute(
                     """
                     SELECT batch_hash, block, extrinsic_index FROM verified_batches
-                    WHERE hotkey = ? AND sequence = ?
+                    WHERE hotkey = ? AND history_id = ? AND sequence = ?
                     """,
-                    (batch.miner_hotkey, batch.sequence),
+                    (batch.miner_hotkey, batch_history_id, batch.sequence),
                 ).fetchone()
                 if existing is not None and (
                     existing["batch_hash"] == batch.batch_hash
@@ -919,9 +1000,9 @@ class ValidatorStore:
             previous_position = connection.execute(
                 """
                 SELECT block, extrinsic_index FROM verified_batches
-                WHERE hotkey = ? AND sequence = ?
+                WHERE hotkey = ? AND history_id = ? AND sequence = ?
                 """,
-                (batch.miner_hotkey, last_sequence),
+                (batch.miner_hotkey, batch_history_id, last_sequence),
             ).fetchone()
             if previous_position is not None and (
                 position.block,
@@ -934,11 +1015,13 @@ class ValidatorStore:
             connection.execute(
                 """
                 INSERT INTO verified_batches(
-                    hotkey, sequence, block, extrinsic_index, batch_hash, batch_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    hotkey, history_id, sequence, block, extrinsic_index,
+                    batch_hash, batch_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     batch.miner_hotkey,
+                    batch_history_id,
                     batch.sequence,
                     position.block,
                     position.extrinsic_index,
@@ -948,28 +1031,31 @@ class ValidatorStore:
             )
             connection.execute(
                 """
-                INSERT INTO miner_cursors(hotkey, last_sequence, last_batch_hash, last_error)
-                VALUES (?, ?, ?, NULL)
+                INSERT INTO miner_cursors(
+                    hotkey, history_id, last_sequence, last_batch_hash, last_error
+                ) VALUES (?, ?, ?, ?, NULL)
                 ON CONFLICT(hotkey) DO UPDATE SET
+                    history_id = excluded.history_id,
                     last_sequence = excluded.last_sequence,
                     last_batch_hash = excluded.last_batch_hash,
                     last_error = NULL
                 """,
-                (batch.miner_hotkey, batch.sequence, batch.batch_hash),
+                (batch.miner_hotkey, batch_history_id, batch.sequence, batch.batch_hash),
             )
 
     def record_error(self, hotkey: str, error: str) -> None:
         """Record an explanatory reconciliation error without advancing state."""
 
         with self._transaction() as connection:
-            sequence, batch_hash = self.cursor(hotkey)
+            history_id, sequence, batch_hash = self.history_cursor(hotkey)
             connection.execute(
                 """
-                INSERT INTO miner_cursors(hotkey, last_sequence, last_batch_hash, last_error)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO miner_cursors(
+                    hotkey, history_id, last_sequence, last_batch_hash, last_error
+                ) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(hotkey) DO UPDATE SET last_error = excluded.last_error
                 """,
-                (hotkey, sequence, batch_hash, error),
+                (hotkey, history_id or "", sequence, batch_hash, error),
             )
 
     def verified_batches(self, *, through_block: int | None = None) -> list[VerifiedBatchRecord]:
@@ -981,19 +1067,11 @@ class ValidatorStore:
                 SELECT b.batch_json, b.block, b.extrinsic_index, c.block_timestamp,
                        (
                            SELECT r.block FROM history_resumes r
-                           WHERE r.hotkey = b.hotkey
-                             AND (r.block < b.block OR (
-                                 r.block = b.block AND r.extrinsic_index < b.extrinsic_index
-                             ))
-                           ORDER BY r.block DESC, r.extrinsic_index DESC LIMIT 1
+                           WHERE r.hotkey = b.hotkey AND r.history_id = b.history_id
                        ) AS resume_block,
                        (
                            SELECT r.extrinsic_index FROM history_resumes r
-                           WHERE r.hotkey = b.hotkey
-                             AND (r.block < b.block OR (
-                                 r.block = b.block AND r.extrinsic_index < b.extrinsic_index
-                             ))
-                           ORDER BY r.block DESC, r.extrinsic_index DESC LIMIT 1
+                           WHERE r.hotkey = b.hotkey AND r.history_id = b.history_id
                        ) AS resume_index
                 FROM verified_batches b
                 JOIN commitments c

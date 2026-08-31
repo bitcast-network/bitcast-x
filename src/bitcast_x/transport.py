@@ -74,12 +74,11 @@ class ResumeAnchor(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    next_sequence: int = Field(ge=2)
-    nonce: str = Field(pattern=r"^[0-9a-f]{64}$")
+    history_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     position: CommitmentPosition
 
     def envelope(self) -> ResumeEnvelope:
-        return ResumeEnvelope(next_sequence=self.next_sequence, nonce=bytes.fromhex(self.nonce))
+        return ResumeEnvelope(history_id=bytes.fromhex(self.history_id))
 
 
 class BatchPageResponse(BaseModel):

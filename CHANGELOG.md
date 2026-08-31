@@ -11,14 +11,17 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 ### Added
 
 - A miner hotkey can recover from lost local commitment state through a signed, finalized `DXR`
-  future-only boundary and the explicit `resume-history` operator command.
+  future-only boundary and the explicit `resume-history` operator command. The command generates
+  the history ID itself; no validator cursor or sequence number is operator input.
 - Validators verify the boundary at its exact historical chain position, preserve the accepted
-  prefix, and isolate claims across the boundary before accepting higher-sequence batches.
+  prefix, and isolate claims across the boundary before accepting `DX3` batches whose local
+  sequence begins at 1.
 
 ### Compatibility
 
-- This is a coordinated miner-validator protocol rollout. Validators without `DXR` support will
-  quarantine a resumed miner until upgraded; ordinary `DX2` histories remain unchanged.
+- This is a coordinated miner-validator protocol rollout. Validators without `DXR` and `DX3`
+  support will quarantine a resumed miner until upgraded; ordinary `DX2` histories remain
+  unchanged.
 
 ## [2.1.0] - 2026-08-22
 

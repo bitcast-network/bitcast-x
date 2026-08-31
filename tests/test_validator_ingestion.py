@@ -69,6 +69,7 @@ def observation(batch: CommittedBatch, block: int) -> ChainCommitment:
             sequence=batch.sequence,
             event_count=len(batch.events),
             batch_hash=bytes.fromhex(batch.batch_hash),
+            history_id=(bytes.fromhex(batch.history_id) if batch.history_id is not None else None),
         ),
     )
 
@@ -81,11 +82,13 @@ class FakeClient:
         fail: bool = False,
         timeout: bool = False,
         resume: ResumeAnchor | None = None,
+        block_offset: int = 9,
     ) -> None:
         self.available = available
         self.fail = fail
         self.timeout = timeout
         self.resume = resume
+        self.block_offset = block_offset
         self.closed = False
 
     async def fetch_batches(self, request: Any) -> BatchPageResponse:
@@ -103,7 +106,9 @@ class FakeClient:
             batches=[
                 PositionedBatch(
                     batch=batch.model_dump(mode="json"),
-                    position=CommitmentPosition(block=9 + batch.sequence, extrinsic_index=2),
+                    position=CommitmentPosition(
+                        block=self.block_offset + batch.sequence, extrinsic_index=2
+                    ),
                 )
                 for batch in selected
             ],
@@ -261,7 +266,7 @@ async def test_signed_resume_preserves_old_batches_and_accepts_only_linked_futur
     store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
     store.persist_verified(first, observation(first, 10))
     store.persist_verified(second, observation(second, 11))
-    marker = ResumeEnvelope(next_sequence=4, nonce=b"r" * 32)
+    marker = ResumeEnvelope(history_id=b"r" * 32)
     marker_observation = ChainCommitment(
         hotkey=MINER,
         block=12,
@@ -271,8 +276,9 @@ async def test_signed_resume_preserves_old_batches_and_accepts_only_linked_futur
     )
     resumed = CommittedBatch.create(
         miner_hotkey=MINER,
-        sequence=4,
-        previous_batch_hash=marker.digest(),
+        sequence=1,
+        previous_batch_hash=None,
+        history_id=marker.history_id.hex(),
         events=(
             ClaimEvent(
                 claim_id="05" * 16,
@@ -285,8 +291,7 @@ async def test_signed_resume_preserves_old_batches_and_accepts_only_linked_futur
     )
     resumed_observation = observation(resumed, 13)
     anchor = ResumeAnchor(
-        next_sequence=4,
-        nonce=marker.nonce.hex(),
+        history_id=marker.history_id.hex(),
         position=CommitmentPosition(block=12, extrinsic_index=2),
     )
     chain = FakeChain(
@@ -294,28 +299,28 @@ async def test_signed_resume_preserves_old_batches_and_accepts_only_linked_futur
         latest=resumed_observation.envelope,
     )
 
-    result = await ingestor(store, FakeClient([resumed], resume=anchor), chain).reconcile(
-        MinerEndpoint(MINER, "http://miner")
-    )
+    result = await ingestor(
+        store, FakeClient([resumed], resume=anchor, block_offset=12), chain
+    ).reconcile(MinerEndpoint(MINER, "http://miner"))
 
     assert result.quarantined is False
-    assert result.cursor == 4
-    assert [record.batch.sequence for record in store.verified_batches()] == [1, 2, 4]
+    assert result.cursor == 1
+    assert [record.batch.sequence for record in store.verified_batches()] == [1, 2, 1]
     assert store.verified_batches()[-1].history_start == anchor.position
 
 
 @pytest.mark.asyncio
 async def test_resume_rejects_batch_finalized_before_marker(tmp_path: Path) -> None:
-    marker = ResumeEnvelope(next_sequence=4, nonce=b"r" * 32)
+    marker = ResumeEnvelope(history_id=b"r" * 32)
     resumed = CommittedBatch.create(
         miner_hotkey=MINER,
-        sequence=4,
-        previous_batch_hash=marker.digest(),
+        sequence=1,
+        previous_batch_hash=None,
+        history_id=marker.history_id.hex(),
         events=(batches()[0].events[0],),
     )
     anchor = ResumeAnchor(
-        next_sequence=4,
-        nonce=marker.nonce.hex(),
+        history_id=marker.history_id.hex(),
         position=CommitmentPosition(block=20, extrinsic_index=2),
     )
     marker_observation = ChainCommitment(
@@ -332,7 +337,7 @@ async def test_resume_rejects_batch_finalized_before_marker(tmp_path: Path) -> N
 
     result = await ingestor(
         ValidatorStore(tmp_path / "validator.sqlite3", start_block=10),
-        FakeClient([resumed], resume=anchor),
+        FakeClient([resumed], resume=anchor, block_offset=12),
         chain,
     ).reconcile(MinerEndpoint(MINER, "http://miner"))
 

@@ -12,9 +12,10 @@ strings are consensus-visible contracts.
 - Validators reject unsupported protocol versions, malformed extra fields, broken sequence links
   and changed historical batches. They do not guess through incompatibility.
 - The additive `DXR` envelope is an explicit signed recovery boundary. Updated validators preserve
-  their accepted prefix, verify the marker at its exact finalized position, and accept only a
-  higher sequence whose previous hash is the marker digest. Older validators quarantine the
-  unfamiliar marker or sequence jump; they must be upgraded during the coordinated rollout.
+  their accepted prefix, verify the marker at its exact finalized position, and accept only `DX3`
+  batches carrying that marker's history ID. Each history starts at sequence 1 and remains
+  internally append-only. Older validators quarantine the unfamiliar envelopes; they must be
+  upgraded during the coordinated rollout.
 - Resumes are future-only. Claims and submissions must belong to the same side of the latest
   verified marker. Existing verified batches and positive campaign economics remain immutable.
 - Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
@@ -25,10 +26,9 @@ strings are consensus-visible contracts.
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
-- Additive internal database or operator API changes do not change the protocol version. The
-  featured-selection and validator history-resume tables are rollback-safe additive extensions
-  and deliberately retain the validator database's existing schema version. Miner schema version
-  3 adds the crash-safe prepared/finalized resume record and requires a backup before rollback.
+- Additive internal database or operator API changes do not change the protocol version. Miner
+  schema version 4 and validator schema version 6 key batches by history ID and are forward-only;
+  create a verified backup before upgrading and restore that backup to roll back.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.
@@ -51,7 +51,9 @@ strings are consensus-visible contracts.
   and zero-value publications remain replaceable until positive economics freeze. Final rewards
   must replay the pinned identity; unavailable selected-tweet evidence defers settlement.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
-  thresholds requires a new protocol version, golden vectors and a shadow overlap period.
+  thresholds requires a new protocol version and golden vectors. The coordinated `DX3` rollout is
+  the explicit exception to an extended overlap because every current miner and validator is
+  expected to upgrade together.
 - Submission event version 3 adds `creator_x_id`. Validators replay historical version-2 events
   without changing their canonical hashes. For exclusive campaigns, version-2 direct submissions
   are accepted only when committed before block `8,920,000`; version-3 creator binding is mandatory

@@ -94,6 +94,23 @@ class MinerStore:
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
+            current = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            batch_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(batches)")
+            }
+            event_columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(events)")}
+            resume_columns = {
+                str(row[1]) for row in connection.execute("PRAGMA table_info(history_resume)")
+            }
+            if (
+                current <= 3
+                and "history_id" in batch_columns
+                and "batch_history_id" in event_columns
+                and "history_id" in resume_columns
+            ):
+                # Recover an otherwise-current store whose version pragma was
+                # cleared without destructively replaying the table rebuild.
+                connection.execute("PRAGMA user_version = 4")
             apply_migrations(
                 connection,
                 (
@@ -175,6 +192,41 @@ class MinerStore:
                     extrinsic_index INTEGER
                 );
                     """,
+                    """
+                DROP INDEX IF EXISTS idx_one_prepared_batch;
+                ALTER TABLE batches RENAME TO batches_pre_history;
+                CREATE TABLE batches (
+                    history_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    batch_json TEXT NOT NULL,
+                    batch_hash TEXT NOT NULL UNIQUE,
+                    state TEXT NOT NULL CHECK (state IN ('prepared', 'finalized')),
+                    created_ns INTEGER NOT NULL,
+                    finalized_block INTEGER,
+                    extrinsic_index INTEGER,
+                    PRIMARY KEY(history_id, sequence)
+                );
+                INSERT INTO batches(
+                    history_id, sequence, batch_json, batch_hash, state,
+                    created_ns, finalized_block, extrinsic_index
+                )
+                SELECT '', sequence, batch_json, batch_hash, state,
+                       created_ns, finalized_block, extrinsic_index
+                FROM batches_pre_history;
+                DROP TABLE batches_pre_history;
+                CREATE UNIQUE INDEX idx_one_prepared_batch
+                    ON batches(state) WHERE state = 'prepared';
+                ALTER TABLE events ADD COLUMN batch_history_id TEXT NOT NULL DEFAULT '';
+                DROP TABLE history_resume;
+                CREATE TABLE history_resume (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                    history_id TEXT NOT NULL,
+                    cutoff_ns INTEGER NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('prepared', 'finalized')),
+                    finalized_block INTEGER,
+                    extrinsic_index INTEGER
+                );
+                    """,
                 ),
             )
 
@@ -184,7 +236,7 @@ class MinerStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT next_sequence, nonce, state, finalized_block, extrinsic_index
+                SELECT history_id, state, finalized_block, extrinsic_index
                 FROM history_resume WHERE singleton = 1
                 """
             ).fetchone()
@@ -198,8 +250,7 @@ class MinerStore:
             )
         return HistoryResume(
             envelope=ResumeEnvelope(
-                next_sequence=int(row["next_sequence"]),
-                nonce=bytes.fromhex(str(row["nonce"])),
+                history_id=bytes.fromhex(str(row["history_id"])),
             ),
             position=position,
         )
@@ -209,13 +260,12 @@ class MinerStore:
 
         with self._transaction() as connection:
             existing = connection.execute(
-                "SELECT next_sequence, nonce, state, finalized_block, extrinsic_index "
+                "SELECT history_id, state, finalized_block, extrinsic_index "
                 "FROM history_resume WHERE singleton = 1"
             ).fetchone()
             if existing is not None:
                 current = ResumeEnvelope(
-                    next_sequence=int(existing["next_sequence"]),
-                    nonce=bytes.fromhex(str(existing["nonce"])),
+                    history_id=bytes.fromhex(str(existing["history_id"])),
                 )
                 if current != envelope and existing["state"] == "prepared":
                     raise ProtocolError("a different history resume is already being submitted")
@@ -227,28 +277,26 @@ class MinerStore:
                     )
                 if current == envelope:
                     return HistoryResume(current, position)
-            maximum = connection.execute(
-                "SELECT COALESCE(MAX(sequence), 0) FROM batches"
-            ).fetchone()[0]
-            if envelope.next_sequence <= int(maximum):
-                raise ProtocolError(
-                    "resume next_sequence must be greater than every local batch sequence"
-                )
+            duplicate = connection.execute(
+                "SELECT 1 FROM batches WHERE history_id = ?",
+                (envelope.history_id.hex(),),
+            ).fetchone()
+            if duplicate is not None:
+                raise ProtocolError("history_id was already used by this miner")
             connection.execute(
                 """
                 INSERT INTO history_resume(
-                    singleton, next_sequence, nonce, cutoff_ns, state,
+                    singleton, history_id, cutoff_ns, state,
                     finalized_block, extrinsic_index
-                ) VALUES (1, ?, ?, ?, 'prepared', NULL, NULL)
+                ) VALUES (1, ?, ?, 'prepared', NULL, NULL)
                 ON CONFLICT(singleton) DO UPDATE SET
-                    next_sequence = excluded.next_sequence,
-                    nonce = excluded.nonce,
+                    history_id = excluded.history_id,
                     cutoff_ns = excluded.cutoff_ns,
                     state = 'prepared',
                     finalized_block = NULL,
                     extrinsic_index = NULL
                 """,
-                (envelope.next_sequence, envelope.nonce.hex(), time.time_ns()),
+                (envelope.history_id.hex(), time.time_ns()),
             )
         return HistoryResume(envelope, None)
 
@@ -259,14 +307,10 @@ class MinerStore:
 
         with self._transaction() as connection:
             row = connection.execute(
-                "SELECT next_sequence, nonce, cutoff_ns, state, finalized_block, extrinsic_index "
+                "SELECT history_id, cutoff_ns, state, finalized_block, extrinsic_index "
                 "FROM history_resume WHERE singleton = 1"
             ).fetchone()
-            if (
-                row is None
-                or int(row["next_sequence"]) != envelope.next_sequence
-                or str(row["nonce"]) != envelope.nonce.hex()
-            ):
+            if row is None or str(row["history_id"]) != envelope.history_id.hex():
                 raise ProtocolError("finalized resume does not match prepared marker")
             if row["state"] == "finalized":
                 if (int(row["finalized_block"]), int(row["extrinsic_index"])) != (
@@ -445,14 +489,16 @@ class MinerStore:
         ecosystem_json = json.dumps(ecosystem_ids, separators=(",", ":"))
         query = """
             SELECT e.event_id, e.kind, e.payload_json, e.status, e.created_ns,
-                   e.batch_sequence, e.rejection_reason,
+                   e.batch_history_id, e.batch_sequence, e.rejection_reason,
                    b.batch_json, b.batch_hash, b.state AS batch_state, b.finalized_block,
                    b.extrinsic_index, m.external_id, m.campaign_snapshot_id,
                    m.ecosystem_ids_json, m.creator_x_id,
                    m.consumed_by_submission_id, m.evicted_by_claim_id,
                    COALESCE(m.updated_ns, e.created_ns) AS updated_ns
             FROM events e
-            LEFT JOIN batches b ON b.sequence = e.batch_sequence
+            LEFT JOIN batches b
+              ON b.history_id = e.batch_history_id
+             AND b.sequence = e.batch_sequence
             LEFT JOIN operation_metadata m ON m.event_id = e.event_id
             WHERE (? IS NULL OR e.kind = ?)
               AND (? IS NULL OR e.event_id = ?)
@@ -512,6 +558,7 @@ class MinerStore:
                     "commitment": {
                         "status": ("finalized" if row["batch_state"] == "finalized" else "queued"),
                         "batch_sequence": row["batch_sequence"],
+                        "history_id": batch.history_id if row["batch_json"] else None,
                         "batch_hash": (
                             f"sha256-{row['batch_hash']}" if row["batch_hash"] else None
                         ),
@@ -655,32 +702,21 @@ class MinerStore:
                 return CommittedBatch.model_validate_json(pending["batch_json"])
             resume = connection.execute(
                 """
-                SELECT next_sequence, nonce FROM history_resume
+                SELECT history_id FROM history_resume
                 WHERE singleton = 1 AND state = 'finalized'
                 """
             ).fetchone()
-            floor = int(resume["next_sequence"]) if resume is not None else 1
+            history_id = str(resume["history_id"]) if resume is not None else ""
             last = connection.execute(
                 """
                 SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' AND sequence >= ?
+                WHERE state = 'finalized' AND history_id = ?
                 ORDER BY sequence DESC LIMIT 1
                 """,
-                (floor,),
+                (history_id,),
             ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else floor
-            previous_hash = (
-                str(last["batch_hash"])
-                if last
-                else (
-                    ResumeEnvelope(
-                        next_sequence=floor,
-                        nonce=bytes.fromhex(str(resume["nonce"])),
-                    ).digest()
-                    if resume is not None
-                    else None
-                )
-            )
+            sequence = int(last["sequence"]) + 1 if last else 1
+            previous_hash = str(last["batch_hash"]) if last else None
             rows = connection.execute(
                 """
                 SELECT event_id, payload_json, private_reveal_json, batch_sequence
@@ -701,20 +737,31 @@ class MinerStore:
                 previous_batch_hash=previous_hash,
                 events=events,
                 reveals=tuple(reveals),
+                history_id=history_id or None,
             )
             connection.execute(
                 """
-                INSERT INTO batches(sequence, batch_json, batch_hash, state, created_ns)
-                VALUES (?, ?, ?, 'prepared', ?)
+                INSERT INTO batches(
+                    history_id, sequence, batch_json, batch_hash, state, created_ns
+                ) VALUES (?, ?, ?, ?, 'prepared', ?)
                 """,
-                (sequence, batch.model_dump_json(), batch.batch_hash, time.time_ns()),
+                (
+                    history_id,
+                    sequence,
+                    batch.model_dump_json(),
+                    batch.batch_hash,
+                    time.time_ns(),
+                ),
             )
             for event_id in event_ids:
                 if event_id not in by_id:
                     raise ProtocolError("event disappeared while preparing batch")
                 connection.execute(
-                    "UPDATE events SET batch_sequence = ? WHERE event_id = ?",
-                    (sequence, event_id),
+                    """
+                    UPDATE events SET batch_history_id = ?, batch_sequence = ?
+                    WHERE event_id = ?
+                    """,
+                    (history_id, sequence, event_id),
                 )
         return batch
 
@@ -731,32 +778,21 @@ class MinerStore:
                 raise ProtocolError("cannot preview while a prepared batch exists")
             resume = connection.execute(
                 """
-                SELECT next_sequence, nonce FROM history_resume
+                SELECT history_id FROM history_resume
                 WHERE singleton = 1 AND state = 'finalized'
                 """
             ).fetchone()
-            floor = int(resume["next_sequence"]) if resume is not None else 1
+            history_id = str(resume["history_id"]) if resume is not None else ""
             last = connection.execute(
                 """
                 SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' AND sequence >= ?
+                WHERE state = 'finalized' AND history_id = ?
                 ORDER BY sequence DESC LIMIT 1
                 """,
-                (floor,),
+                (history_id,),
             ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else floor
-            previous_hash = (
-                str(last["batch_hash"])
-                if last
-                else (
-                    ResumeEnvelope(
-                        next_sequence=floor,
-                        nonce=bytes.fromhex(str(resume["nonce"])),
-                    ).digest()
-                    if resume is not None
-                    else None
-                )
-            )
+            sequence = int(last["sequence"]) + 1 if last else 1
+            previous_hash = str(last["batch_hash"]) if last else None
             reveals = self._reveals_for(connection, events)
         return CommittedBatch.create(
             miner_hotkey=miner_hotkey,
@@ -764,6 +800,7 @@ class MinerStore:
             previous_batch_hash=previous_hash,
             events=events,
             reveals=tuple(reveals),
+            history_id=history_id or None,
         )
 
     @staticmethod
@@ -787,21 +824,27 @@ class MinerStore:
             reveals.append(DraftReveal.model_validate_json(claim_row["private_reveal_json"]))
         return reveals
 
-    def mark_finalized(self, sequence: int, position: CommitmentPosition) -> None:
+    def mark_finalized(self, batch: CommittedBatch, position: CommitmentPosition) -> None:
         """Atomically finalize a batch and advance every platform event status."""
 
         with self._transaction() as connection:
+            history_id = batch.history_id or ""
             batch_row = connection.execute(
-                "SELECT state, batch_json FROM batches WHERE sequence = ?", (sequence,)
+                """
+                SELECT state, batch_json FROM batches
+                WHERE history_id = ? AND sequence = ?
+                """,
+                (history_id, batch.sequence),
             ).fetchone()
             if batch_row is None:
                 raise ProtocolError("cannot finalize an unknown batch")
             if batch_row["state"] == "finalized":
                 existing = connection.execute(
                     """
-                    SELECT finalized_block, extrinsic_index FROM batches WHERE sequence = ?
+                    SELECT finalized_block, extrinsic_index FROM batches
+                    WHERE history_id = ? AND sequence = ?
                     """,
-                    (sequence,),
+                    (history_id, batch.sequence),
                 ).fetchone()
                 if (
                     int(existing["finalized_block"]) != position.block
@@ -812,9 +855,9 @@ class MinerStore:
             connection.execute(
                 """
                 UPDATE batches SET state = 'finalized', finalized_block = ?, extrinsic_index = ?
-                WHERE sequence = ?
+                WHERE history_id = ? AND sequence = ?
                 """,
-                (position.block, position.extrinsic_index, sequence),
+                (position.block, position.extrinsic_index, history_id, batch.sequence),
             )
             connection.execute(
                 """
@@ -823,22 +866,24 @@ class MinerStore:
                     WHEN 'claim' THEN ?
                     ELSE ?
                 END
-                WHERE batch_sequence = ?
+                WHERE batch_history_id = ? AND batch_sequence = ?
                 """,
                 (
                     EventStatus.SAFE_TO_POST.value,
                     EventStatus.VERIFICATION_PENDING.value,
-                    sequence,
+                    history_id,
+                    batch.sequence,
                 ),
             )
             connection.execute(
                 """
                 UPDATE operation_metadata SET updated_ns = ?
                 WHERE event_id IN (
-                    SELECT event_id FROM events WHERE batch_sequence = ?
+                    SELECT event_id FROM events
+                    WHERE batch_history_id = ? AND batch_sequence = ?
                 )
                 """,
-                (time.time_ns(), sequence),
+                (time.time_ns(), history_id, batch.sequence),
             )
             committed_batch = CommittedBatch.model_validate_json(batch_row["batch_json"])
             for event_index, event in enumerate(committed_batch.events):
@@ -929,28 +974,27 @@ class MinerStore:
 
         with self._connect() as connection:
             resume = connection.execute(
-                "SELECT next_sequence FROM history_resume "
-                "WHERE singleton = 1 AND state = 'finalized'"
+                "SELECT history_id FROM history_resume WHERE singleton = 1 AND state = 'finalized'"
             ).fetchone()
-            floor = int(resume["next_sequence"]) if resume is not None else 1
-            after_sequence = max(after_sequence, floor - 1)
+            history_id = str(resume["history_id"]) if resume is not None else ""
             if through_sequence is None:
                 rows = connection.execute(
                     """
                     SELECT batch_json, finalized_block, extrinsic_index FROM batches
-                    WHERE state = 'finalized' AND sequence > ?
+                    WHERE state = 'finalized' AND history_id = ? AND sequence > ?
                     ORDER BY sequence LIMIT ?
                     """,
-                    (after_sequence, limit + 1),
+                    (history_id, after_sequence, limit + 1),
                 ).fetchall()
             else:
                 rows = connection.execute(
                     """
                     SELECT batch_json, finalized_block, extrinsic_index FROM batches
-                    WHERE state = 'finalized' AND sequence > ? AND sequence <= ?
+                    WHERE state = 'finalized' AND history_id = ?
+                      AND sequence > ? AND sequence <= ?
                     ORDER BY sequence LIMIT ?
                     """,
-                    (after_sequence, through_sequence, limit + 1),
+                    (history_id, after_sequence, through_sequence, limit + 1),
                 ).fetchall()
         has_more = len(rows) > limit
         return (

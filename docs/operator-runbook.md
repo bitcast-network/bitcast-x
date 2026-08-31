@@ -232,27 +232,25 @@ by validators. Ordinary restarts and upgrades must keep using the existing state
 
 1. Stop creator traffic and the miner writer, but leave its state directory intact.
 2. Back up the complete state directory and record the miner hotkey.
-3. Read the highest accepted cursor reported by every validator. Choose `next_sequence` strictly
-   greater than that cursor and every sequence in the miner's local database.
-4. Upgrade the validators and miner to the release supporting `DXR`.
-5. With the miner still stopped, submit the signed boundary once:
+3. Upgrade the validators and miner to the release supporting `DXR` and `DX3`.
+4. With the miner still stopped, submit the signed boundary once:
 
    ```bash
    bitcast-x resume-history \
-     --next-sequence <highest-accepted-cursor-plus-one> \
      --confirm-hotkey <exact-configured-hotkey>
    ```
 
-6. Record the returned marker hash and finalized position, then start the miner. Create a new
+5. Record the returned history ID and finalized position, then start the miner. Create a new
    claim; do not reuse any claim from before the boundary.
-7. Require every validator to advance through the first resumed batch with no quarantine warning
+6. Require every validator to advance through the first resumed batch with no quarantine warning
    before reopening creator traffic.
 
-The command is crash-safe and idempotent: it persists the random marker before chain submission,
-recovers the same finalized bytes on retry, preserves old rows for audit, marks pre-boundary pending
-operations rejected with `history_resumed`, and clears local active claims. A second recovery must
-choose another strictly higher sequence. Never guess a lower cursor to preserve a pending claim;
-that would be rejected and is exactly the history rewrite the boundary is designed to prevent.
+The command is crash-safe and idempotent while the marker remains the hotkey's latest commitment:
+it persists the random history ID before chain submission, recovers the same finalized bytes on
+retry, preserves old rows for audit, marks pre-boundary pending operations rejected with
+`history_resumed`, and clears local active claims. The first batch in the new history starts at
+sequence 1 automatically. Running recovery again after new batches exist creates another new
+history; it never alters either older history.
 
 ## Upgrade and rollback
 
