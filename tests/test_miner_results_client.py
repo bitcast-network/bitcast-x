@@ -97,7 +97,11 @@ async def test_submission_collection_uses_owner_endpoint() -> None:
         transport=httpx.MockTransport(handler),
     )
     try:
-        submissions = await client.submissions(campaign_id="campaign", tweet_id="123")
+        submissions = await client.submissions(
+            campaign_id="campaign",
+            tweet_id="123",
+            submission_ids=("b" * 32, "a" * 32),
+        )
     finally:
         await client.close()
 
@@ -105,4 +109,8 @@ async def test_submission_collection_uses_owner_endpoint() -> None:
     assert (
         canonical_query([("tweet_id", "123"), ("campaign_id", "campaign")])
         == "campaign_id=campaign&tweet_id=123"
+    )
+    assert signer.messages[0].decode().splitlines()[2] == (
+        "/api/v2/miners/x/submissions?campaign_id=campaign&submission_id="
+        f"{'a' * 32}&submission_id={'b' * 32}&tweet_id=123"
     )

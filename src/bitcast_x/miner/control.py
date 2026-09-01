@@ -445,7 +445,8 @@ class MinerControlService:
             local = [item for item in local if item["tweet_id"] == tweet_id]
         if self.results_client is None:
             return local
-        central = await self.results_client.submissions(
+        central = await self._submission_results(
+            [str(item["submission_id"]) for item in local],
             campaign_id=campaign_id,
             tweet_id=tweet_id,
         )
@@ -462,11 +463,16 @@ class MinerControlService:
 
         if self.results_client is None:
             return
-        central = await self.results_client.submissions()
+        pending = [
+            submission
+            for submission in self.sdk.submissions()
+            if submission["status"] == EventStatus.VERIFICATION_PENDING.value
+        ]
+        central = await self._submission_results(
+            [str(submission["submission_id"]) for submission in pending]
+        )
         by_id = {str(item["submission_id"]): item for item in central}
-        for submission in self.sdk.submissions():
-            if submission["status"] != EventStatus.VERIFICATION_PENDING.value:
-                continue
+        for submission in pending:
             submission_id = str(submission["submission_id"])
             result = by_id.get(submission_id)
             if result is None:
@@ -476,6 +482,28 @@ class MinerControlService:
                 self.sdk.record_submission_result(submission_id, EventStatus.ATTRIBUTED)
             elif status == EventStatus.REJECTED.value:
                 self.sdk.record_submission_result(submission_id, EventStatus.REJECTED)
+
+    async def _submission_results(
+        self,
+        submission_ids: list[str],
+        *,
+        campaign_id: str | None = None,
+        tweet_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch central results in bounded URL-sized batches."""
+
+        if self.results_client is None or not submission_ids:
+            return []
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(submission_ids), 100):
+            results.extend(
+                await self.results_client.submissions(
+                    campaign_id=campaign_id,
+                    tweet_id=tweet_id,
+                    submission_ids=submission_ids[start : start + 100],
+                )
+            )
+        return results
 
     async def qualification(self) -> dict[str, object]:
         """Read the current on-chain miner qualification snapshot."""

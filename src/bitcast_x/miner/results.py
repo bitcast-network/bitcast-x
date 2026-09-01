@@ -1,5 +1,6 @@
 """Hotkey-signed client for the central Bitcast miner read API."""
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.parse import quote, urlencode
@@ -121,12 +122,14 @@ class MinerResultsClient:
         *,
         campaign_id: str | None = None,
         tweet_id: str | None = None,
+        submission_ids: Sequence[str] = (),
     ) -> list[dict[str, Any]]:
         params: QueryParams = []
         if campaign_id is not None:
             params.append(("campaign_id", campaign_id))
         if tweet_id is not None:
             params.append(("tweet_id", tweet_id))
+        params.extend(("submission_id", submission_id) for submission_id in submission_ids)
         body = await self._get("/api/v2/miners/x/submissions", params=params)
         return list(body.get("items", []))
 
