@@ -51,6 +51,9 @@ class Feed:
 class Results:
     """Central miner API double with one open preclaim campaign."""
 
+    def __init__(self) -> None:
+        self.submission_calls: list[dict[str, object]] = []
+
     campaign_record = {
         "campaign_id": "campaign",
         "campaign_snapshot_id": "sha256-snapshot",
@@ -138,7 +141,8 @@ class Results:
     async def submission(self, submission_id: str) -> dict[str, Any]:
         return {"submission_id": submission_id, "status": "verification_pending"}
 
-    async def submissions(self, **_filters: object) -> list[dict[str, Any]]:
+    async def submissions(self, **filters: object) -> list[dict[str, Any]]:
+        self.submission_calls.append(filters)
         return []
 
 
@@ -404,6 +408,33 @@ def test_claim_and_submission_are_durable_and_recoverable(tmp_path: Path) -> Non
     )
     assert web.get("/api/v1/claims").json()["items"][0]["claim_id"] == claim["claim_id"]
     assert web.get("/api/v1/submissions").json()["items"][0]["tweet_id"] == "999"
+
+
+def test_submission_listing_fetches_only_local_ids_from_central(tmp_path: Path) -> None:
+    results = Results()
+    web = build_client(tmp_path, results_client=results)
+    claim = _claim(web)
+    submission = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={
+            "campaign_id": "campaign",
+            "tweet_id": "999",
+            "claim_id": claim["claim_id"],
+            "creator_x_id": "123",
+        },
+    ).json()
+
+    response = web.get("/api/v1/submissions")
+
+    assert response.status_code == 200
+    assert results.submission_calls == [
+        {
+            "campaign_id": None,
+            "tweet_id": None,
+            "submission_ids": [submission["submission_id"]],
+        }
+    ]
 
 
 def test_preclaim_submission_remains_pinned_to_claim_snapshot(tmp_path: Path) -> None:
