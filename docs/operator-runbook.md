@@ -55,14 +55,16 @@ discovery and scoring until their first-emission rewards are frozen.
 New preclaim submissions receive a replaceable pre-close verification preview. Preview tweet and
 engagement evidence is stored separately from consensus state and uses the v2 refresh schedule:
 hourly for tweets under one hour old, every four hours until 24 hours old, and daily thereafter.
-Unavailable evidence is retried no more than once per minute, and unchanged preview payloads are
-not republished. Preview rows include mutable performance-bonus percentages and breakdowns for the
-currently selected campaign tweets, but their USD targets remain zero. At the first healthy preview
-on or after one day before `closes_at`, the validator durably pins and publishes the deterministic
-featured tweet. Failed ingestion retries the identical payload after one minute. A temporary loss
-of the selected tweet's evidence preserves the last good preview and retries on later cycles rather
-than publishing a destructive replacement. The first post-close scoring pass still fetches fresh
-evidence before assigning tweets and freezing rewards, then reuses the pinned feature. If its
+Once a featured tweet is pinned, its engagement identities refresh hourly until scoring close;
+other old tweets remain on the daily schedule. Unavailable evidence is retried no more than once
+per minute, and unchanged preview payloads are not republished. Preview rows include mutable
+performance-bonus percentages and breakdowns for the currently selected campaign tweets, but their
+USD targets remain zero. At the first healthy preview on or after one day before `closes_at`, the
+validator durably pins and publishes the deterministic featured tweet. Failed ingestion retries the
+identical payload after one minute. A temporary loss of the selected tweet's evidence preserves the
+last good preview and retries on later cycles rather than publishing a destructive replacement. The
+first post-close scoring pass still fetches fresh evidence before assigning tweets and freezing
+rewards, then reuses the pinned feature. If its
 required evidence is still unavailable, final economics and weight submission wait until recovery.
 Frozen legacy campaigns contribute no further search or scoring calls.
 

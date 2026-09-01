@@ -12,10 +12,12 @@ NOW = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
 
 class Provider:
-    def __init__(self) -> None:
+    def __init__(self, *, tweet_age: timedelta = timedelta(hours=12)) -> None:
         self.tweet_fetches = 0
         self.engagement_fetches = 0
+        self.engagement_tweet_ids: list[str] = []
         self.available = True
+        self.tweet_age = tweet_age
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         self.tweet_fetches += 1
@@ -25,7 +27,7 @@ class Provider:
             tweet=Tweet(
                 tweet_id=tweet_id,
                 author_x_id="1",
-                created_at=NOW - timedelta(hours=12),
+                created_at=NOW - self.tweet_age,
                 text="post",
                 author="alice",
                 views_count=self.tweet_fetches,
@@ -33,8 +35,9 @@ class Provider:
             provider_available=True,
         )
 
-    async def fetch_engagements(self, _tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
         self.engagement_fetches += 1
+        self.engagement_tweet_ids.append(tweet_id)
         if not self.available:
             return EngagementFetch(engagements={}, provider_available=False)
         username = "bob" if self.engagement_fetches > 1 else "alice"
@@ -101,6 +104,37 @@ async def test_preview_evidence_is_cached_then_refreshed_and_merged(tmp_path: Pa
     assert upstream.engagement_fetches == 2
     assert refreshed_tweet.tweet is not None and refreshed_tweet.tweet.views_count == 2
     assert refreshed_engagements.engagements == {"alice": "quote", "bob": "quote"}
+
+
+@pytest.mark.asyncio
+async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_other_old_tweets(
+    tmp_path: Path,
+) -> None:
+    current = [NOW]
+    upstream = Provider(tweet_age=timedelta(days=2))
+    provider = PreviewXProvider(
+        upstream,
+        PreviewStore(tmp_path / "preview-cache"),
+        now=lambda: current[0],
+    )
+
+    await provider.fetch_tweet_by_id("101")
+    await provider.fetch_engagements("101")
+    await provider.fetch_tweet_by_id("202")
+    await provider.fetch_engagements("202")
+    provider.set_featured_tweet_ids({"101"})
+
+    current[0] += timedelta(hours=1)
+    await provider.fetch_engagements("101")
+    await provider.fetch_engagements("202")
+
+    assert upstream.engagement_tweet_ids == ["101", "202", "101"]
+
+    provider.set_featured_tweet_ids(set())
+    current[0] += timedelta(hours=1)
+    await provider.fetch_engagements("101")
+
+    assert upstream.engagement_tweet_ids == ["101", "202", "101"]
 
 
 @pytest.mark.asyncio
