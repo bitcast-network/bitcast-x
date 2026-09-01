@@ -102,6 +102,7 @@ def create_control_app(
     async def protocol_error(_request: Request, error: BitcastXError) -> JSONResponse:
         message = str(error)
         code = "invalid_request"
+        retryable = False
         if "idempotency key" in message:
             code = "idempotency_conflict"
         elif "miner is not qualified" in message:
@@ -110,6 +111,11 @@ def create_control_app(
             code = "campaign_not_found"
         elif "claim_id does not belong" in message:
             code = "claim_not_found"
+        elif "submission deadline" in message:
+            code = "submission_deadline_passed"
+        elif "submission commitment was not confirmed" in message:
+            code = "submission_commitment_pending"
+            retryable = True
         elif "not eligible" in message:
             code = "creator_not_eligible"
         elif "not safe" in message:
@@ -125,7 +131,14 @@ def create_control_app(
             status_code = 403
         elif code in {"campaign_not_found", "claim_not_found"}:
             status_code = 404
-        return JSONResponse(status_code=status_code, content=_error(code, message))
+        elif code == "submission_deadline_passed":
+            status_code = 409
+        elif code == "submission_commitment_pending":
+            status_code = 503
+        return JSONResponse(
+            status_code=status_code,
+            content=_error(code, message, retryable=retryable),
+        )
 
     @app.exception_handler(HTTPException)
     async def http_error(_request: Request, error: HTTPException) -> JSONResponse:
