@@ -37,6 +37,17 @@ Every submission requires the immutable numeric `creator_x_id` resolved from the
 platform session. The miner commits it into the protocol event; validators independently compare
 it with the fetched tweet author before a direct/exclusive submission can be attributed.
 
+For an exclusive direct campaign, central campaign capabilities may keep `can_submit` enabled
+while the campaign is `evaluating`. This is the submission grace period for tweets that already
+exist; it does not extend the posting window. The creator must remain historically `eligible`, and
+validators still reject tweets published after the campaign's `closes_at`. Claims and new
+publications remain closed during this period, so `eligible_if_published_now` stays false.
+Before confirming a grace-period submission, the miner forces its durable event on-chain and
+checks the finalized block against `scoring_close_block`. A commitment that lands after the
+deadline returns `409 submission_deadline_passed`; a commitment not confirmed within the bounded
+request window of at most 30 seconds returns retryable
+`503 submission_commitment_pending`. Open-window submissions remain asynchronously batched.
+
 All `/api/v1` responses carry `Cache-Control: no-store`. Errors use:
 
 ```json

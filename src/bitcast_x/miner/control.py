@@ -13,6 +13,8 @@ from bitcast_x.miner.engine import MinerSdk
 from bitcast_x.miner.results import MinerResultsClient
 from bitcast_x.miner.store import EventStatus, OperationMetadata
 
+GRACE_SUBMISSION_COMMIT_TIMEOUT_SECONDS = 30.0
+
 
 class CampaignSource(Protocol):
     """Fallback campaign operation required by offline development miners."""
@@ -277,6 +279,13 @@ class MinerControlService:
             raise ProtocolError("campaign requires a safe pre-publication claim")
         if not requires_claim and claim_id is not None:
             raise ProtocolError("direct campaign submissions must not include a claim")
+        grace_submission = not requires_claim and campaign.get("status") == "evaluating"
+        scoring_close_block: int | None = None
+        if grace_submission:
+            candidate = campaign.get("scoring_close_block")
+            if isinstance(candidate, bool) or not isinstance(candidate, int) or candidate < 0:
+                raise ProtocolError("campaign scoring close block is invalid")
+            scoring_close_block = candidate
         operation_snapshot_id = str(campaign["campaign_snapshot_id"])
         operation_ecosystem_ids = tuple(campaign.get("ecosystem_ids", []))
         if claim_id is not None:
@@ -293,7 +302,12 @@ class MinerControlService:
             operation_ecosystem_ids = tuple(claim.get("ecosystem_ids", []))
         else:
             eligibility = await self.eligibility(campaign_id, creator_x_id)
-            if not eligibility.get("eligible_if_published_now", False):
+            # Direct campaigns submit an existing tweet rather than authorize a
+            # new publication. The central can_submit capability bounds both
+            # the posting window and its evaluation-day submission grace;
+            # validators separately enforce that the tweet was published by
+            # campaign.closes_at.
+            if not eligibility.get("eligible", False):
                 raise ProtocolError("creator is not eligible to submit to this campaign")
 
         metadata = OperationMetadata(
@@ -319,6 +333,10 @@ class MinerControlService:
             creator_x_id=creator_x_id,
             metadata=metadata,
         )
+        if grace_submission:
+            commitment_block = await self._await_submission_commit(submission_id)
+            if scoring_close_block is None or commitment_block > scoring_close_block:
+                raise ProtocolError("submission deadline passed before on-chain commitment")
         submission = await self.submission_status(submission_id)
         if submission is None:
             raise ProtocolError("durable submission disappeared")
@@ -492,3 +510,29 @@ class MinerControlService:
             )
         except TimeoutError:
             return
+
+    async def _await_submission_commit(self, submission_id: str) -> int:
+        """Force batches until one grace-period submission has a finalized position."""
+
+        async def commit_until_finalized() -> int:
+            while True:
+                receipt = self.sdk.engine.store.receipt(submission_id)
+                if receipt is None or receipt["kind"] != "submission":
+                    raise ProtocolError("durable submission disappeared")
+                commitment = receipt.get("commitment")
+                if isinstance(commitment, dict) and commitment.get("status") == "finalized":
+                    block = commitment.get("block")
+                    if isinstance(block, bool) or not isinstance(block, int) or block < 0:
+                        raise ProtocolError("finalized submission block is invalid")
+                    return block
+                committed = await self.sdk.engine.commit_ready(force=True)
+                if committed is None:
+                    raise ProtocolError("submission is not queued for commitment")
+
+        timeout = min(self.commit_timeout_seconds, GRACE_SUBMISSION_COMMIT_TIMEOUT_SECONDS)
+        try:
+            return await asyncio.wait_for(commit_until_finalized(), timeout=timeout)
+        except TimeoutError as error:
+            raise ProtocolError(
+                "submission commitment was not confirmed before request timeout"
+            ) from error

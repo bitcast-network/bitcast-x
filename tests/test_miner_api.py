@@ -14,6 +14,12 @@ from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
 from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
 from bitcast_x.transport import BatchPageRequest, create_miner_app
+from contracts.bitcast_api_miner_campaign import (
+    MinerCampaign as BitcastApiMinerCampaign,
+)
+from contracts.bitcast_api_miner_campaign import (
+    MinerCampaignEligibility as BitcastApiMinerCampaignEligibility,
+)
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
 INTERNAL_TOKEN = "a" * 64
@@ -40,6 +46,14 @@ class SlowSubmitter(Submitter):
         return await super().submit(envelope)
 
 
+class LateSubmitter(Submitter):
+    async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment:
+        return FinalizedCommitment(
+            position=CommitmentPosition(block=101, extrinsic_index=1),
+            stored_envelope=envelope.encode(),
+        )
+
+
 class Feed:
     async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]:
         return ()
@@ -58,6 +72,28 @@ class Results:
         "status": "open",
         "protocol": {"version": 2, "submission_mode": "preclaim"},
         "access": {"mode": "open", "exclusive_miner_hotkey": None},
+        "opens_at": "2026-08-28T00:00:00Z",
+        "closes_at": "2026-08-31T23:59:59Z",
+        "scoring_close_block": 100,
+        "brief": "Explain the campaign in your own words.",
+        "prompt_version": 2,
+        "x_brief": {"brief_id": "campaign"},
+        "required_terms": [],
+        "language": "en",
+        "tag": "@campaign",
+        "quoted_tweet_id": None,
+        "inclusion_keywords": [],
+        "reward_pool_usd": "1000.00",
+        "max_tweets_per_creator": 1,
+        "ecosystem_rules": [
+            {"ecosystem_id": "tao", "max_members": 100},
+            {"ecosystem_id": "hyperliquid", "max_members": 100},
+        ],
+        "presentation": {
+            "name": "Campaign",
+            "description": None,
+            "image_url": None,
+        },
         "capabilities": {
             "can_check_eligibility": True,
             "can_claim": True,
@@ -66,6 +102,14 @@ class Results:
             "requires_claim": True,
             "is_exclusive_to_this_miner": False,
         },
+        "stats": {
+            "matched_tweets": 0,
+            "total_views": 0,
+            "total_engagements": 0,
+            "engagement_rate": 0,
+            "data_updated_at": "2026-09-01T12:00:00Z",
+        },
+        "updated_at": "2026-09-01T12:00:00Z",
     }
 
     async def ecosystems(self) -> list[dict[str, Any]]:
@@ -110,6 +154,7 @@ class Results:
     async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
         return {
             "campaign_id": campaign_id,
+            "campaign_snapshot_id": "sha256-snapshot",
             "creator_x_id": creator_x_id,
             "eligible": True,
             "claim_eligible": True,
@@ -128,6 +173,7 @@ class Results:
                 {"ecosystem_id": "hyperliquid", "label": "Hyperliquid"},
             ],
             "reason": "eligible",
+            "checked_at": "2026-09-01T12:00:00Z",
         }
 
     async def campaign_tweets(
@@ -161,6 +207,44 @@ class DirectResults(Results):
         result = await super().eligibility(campaign_id, creator_x_id)
         result["claim_eligible"] = False
         return result
+
+
+class EvaluatingDirectResults(DirectResults):
+    """Exclusive campaign accepting existing posts during submission grace."""
+
+    campaign_record = {
+        **DirectResults.campaign_record,
+        "status": "evaluating",
+        "capabilities": {
+            **DirectResults.campaign_record["capabilities"],
+            "can_check_eligibility": True,
+            "can_submit": True,
+        },
+    }
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        result = await super().eligibility(campaign_id, creator_x_id)
+        result.update(
+            claim_eligible=False,
+            eligible_if_published_now=False,
+            reason="campaign_not_open",
+        )
+        return result
+
+
+def test_evaluating_direct_fixture_matches_pinned_bitcast_api_contract() -> None:
+    results = EvaluatingDirectResults()
+
+    campaign = BitcastApiMinerCampaign.model_validate(results.campaign_record)
+    eligibility = BitcastApiMinerCampaignEligibility.model_validate(
+        asyncio.run(results.eligibility("campaign", "123"))
+    )
+
+    assert campaign.status == "evaluating"
+    assert campaign.scoring_close_block == 100
+    assert campaign.capabilities.can_submit is True
+    assert eligibility.eligible is True
+    assert eligibility.eligible_if_published_now is False
 
 
 class FakeNotFoundResponse:
@@ -466,6 +550,72 @@ def test_direct_submission_enforces_creator_eligibility(tmp_path: Path) -> None:
 
     assert response.status_code == 200
     assert response.json()["claim_id"] is None
+    assert response.json()["submission_commitment"]["status"] == "queued"
+
+
+def test_direct_submission_accepts_existing_post_during_evaluation_grace(
+    tmp_path: Path,
+) -> None:
+    web = build_client(tmp_path, results_client=EvaluatingDirectResults())
+
+    response = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["claim_id"] is None
+    assert response.json()["status"] == "verification_pending"
+    assert response.json()["submission_commitment"]["status"] == "finalized"
+    assert response.json()["submission_commitment"]["block"] == 100
+
+
+def test_direct_submission_rejects_grace_commit_after_scoring_close(
+    tmp_path: Path,
+) -> None:
+    web = build_client(
+        tmp_path,
+        submitter=LateSubmitter(),
+        results_client=EvaluatingDirectResults(),
+    )
+
+    response = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == {
+        "code": "submission_deadline_passed",
+        "message": "submission deadline passed before on-chain commitment",
+        "retryable": False,
+    }
+
+
+def test_direct_submission_reports_unconfirmed_grace_commit_as_retryable(
+    tmp_path: Path,
+) -> None:
+    web = build_client(
+        tmp_path,
+        submitter=SlowSubmitter(),
+        timeout=0.01,
+        results_client=EvaluatingDirectResults(),
+    )
+
+    response = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "code": "submission_commitment_pending",
+        "message": "submission commitment was not confirmed before request timeout",
+        "retryable": True,
+    }
 
 
 def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path) -> None:

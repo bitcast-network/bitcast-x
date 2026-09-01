@@ -6,6 +6,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
+  period only when the creator was historically eligible and the submission is committed no later
+  than the campaign's scoring-close block.
+
 ## [2.2.0] - 2026-08-31
 
 ### Added
