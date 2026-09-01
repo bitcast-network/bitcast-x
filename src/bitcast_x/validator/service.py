@@ -202,6 +202,7 @@ class ValidatorService:
                 page_size=self.settings.max_batches_per_page,
             )
             reconciler: CampaignReconciler | None = None
+            preview_provider: PreviewXProvider | None = None
             preview_reconciler: CampaignReconciler | None = None
             reward_coordinator: RewardCoordinator | None = None
             preview_reward_coordinator: RewardCoordinator | None = None
@@ -387,12 +388,25 @@ class ValidatorService:
                             }
                             if (
                                 result_publisher is not None
+                                and preview_provider is not None
                                 and preview_reconciler is not None
                                 and preview_reward_coordinator is not None
                             ):
-                                for campaign in feed.campaigns:
-                                    if finalized_block >= campaign.access.scoring_close_block:
-                                        continue
+                                preview_campaigns = [
+                                    campaign
+                                    for campaign in feed.campaigns
+                                    if finalized_block < campaign.access.scoring_close_block
+                                ]
+                                featured_tweet_ids: set[str] = set()
+                                for campaign in preview_campaigns:
+                                    selection = store.featured_tweet_selection(
+                                        campaign.access.campaign_id,
+                                        campaign.model_dump_json(),
+                                    )
+                                    if selection is not None:
+                                        featured_tweet_ids.add(selection.tweet_id)
+                                preview_provider.set_featured_tweet_ids(featured_tweet_ids)
+                                for campaign in preview_campaigns:
                                     try:
                                         preview_attributions = (
                                             await preview_reconciler.reconcile_campaign(

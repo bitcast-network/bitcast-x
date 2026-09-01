@@ -1,7 +1,7 @@
 """Persistent, rate-bounded X evidence for replaceable pre-close previews."""
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -24,6 +24,7 @@ _UNAVAILABLE_RETRY = timedelta(minutes=1)
 _NEW_TWEET_REFRESH = timedelta(hours=1)
 _RECENT_TWEET_REFRESH = timedelta(hours=4)
 _OLD_TWEET_REFRESH = timedelta(hours=24)
+_FEATURED_TWEET_ENGAGEMENT_REFRESH = timedelta(hours=1)
 _COUNTERS = (
     "favorite_count",
     "retweet_count",
@@ -238,6 +239,12 @@ class PreviewXProvider:
         self._upstream = upstream
         self._store = store
         self._now = now or (lambda: datetime.now(UTC))
+        self._featured_tweet_ids: frozenset[str] = frozenset()
+
+    def set_featured_tweet_ids(self, tweet_ids: Collection[str]) -> None:
+        """Use the featured cadence for engagement evidence from these tweets."""
+
+        self._featured_tweet_ids = frozenset(tweet_ids)
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         """Fetch a new/due tweet, otherwise return its durable preview evidence."""
@@ -271,7 +278,15 @@ class PreviewXProvider:
         current = self._now()
         cached = self._store.preview_engagement_evidence(tweet_id)
         tweet = self._store.preview_tweet_evidence(tweet_id)
-        if cached is not None and not _engagement_refresh_due(cached, tweet, now=current):
+        refresh_interval = (
+            _FEATURED_TWEET_ENGAGEMENT_REFRESH if tweet_id in self._featured_tweet_ids else None
+        )
+        if cached is not None and not _engagement_refresh_due(
+            cached,
+            tweet,
+            now=current,
+            refresh_interval=refresh_interval,
+        ):
             return cached.result
         fresh = await self._upstream.fetch_engagements(tweet_id)
         effective = self._store.record_preview_engagement_evidence(
@@ -315,13 +330,16 @@ def _engagement_refresh_due(
     tweet_record: PreviewTweetEvidence | None,
     *,
     now: datetime,
+    refresh_interval: timedelta | None = None,
 ) -> bool:
     if not record.last_attempt_available and now - record.attempted_at < _UNAVAILABLE_RETRY:
         return False
     if not record.result.provider_available or record.refreshed_at is None:
         return now - record.attempted_at >= _UNAVAILABLE_RETRY
     tweet = tweet_record.result.tweet if tweet_record is not None else None
-    interval = _refresh_interval(tweet, now=now) if tweet is not None else _NEW_TWEET_REFRESH
+    interval = refresh_interval
+    if interval is None:
+        interval = _refresh_interval(tweet, now=now) if tweet is not None else _NEW_TWEET_REFRESH
     return now - record.refreshed_at >= interval
 
 
