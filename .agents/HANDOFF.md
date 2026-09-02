@@ -1,25 +1,34 @@
 # Handoff
 
-Goal: accept already-published tweets for exclusive/direct campaigns during the central API's one-day submission grace period.
+Goal: make campaign eligibility forward-sticky without allowing later maps to qualify older posts,
+and protect an eligible creator's author-influence baseline from later downward recalibration.
 
-Status: direct submissions use the central campaign's `can_submit` capability to bound the submission window and historical creator `eligible` status to authorize the existing post. During `evaluating`, the miner now force-commits the durable event and confirms its finalized block is no later than `scoring_close_block` before returning success. The producer contract is pinned from `bitcast-api`, and focused tests cover on-time, late, and timed-out commitments.
+Status: PR #124 is open, mergeable, and awaiting the required `mizu-tx` review. The companion
+bitcast-api PR #539 is merged and healthy on staging; its production job remains gated. Stitch PR
+#580 is merged and healthy on staging; its production job also remains gated.
 
 Files changed:
-- `src/bitcast_x/miner/control.py`
-- `src/bitcast_x/miner/api.py`
-- `tests/test_miner_api.py`
-- `tests/contracts/bitcast_api_miner_campaign.py`
-- `docs/application-api.md`
-- `CHANGELOG.md`
+- `src/bitcast_x/campaigns.py`
+- `src/bitcast_x/legacy/engine.py`
+- `src/bitcast_x/validator/reconciliation.py`
+- `src/bitcast_x/validator/scoring.py`
+- focused tests and protocol documentation
+- existing release surfaces for version `2.2.1`
+
+Decision: rank eligibility is the union of qualifying maps from campaign opening through the post
+time. Leaving the cutoff does not revoke access; entering later grants access only from that map
+onward. Author influence is the higher of the first eligibility-granting influence and the map
+active when the post was published. Stitch does not duplicate this historical calculation.
 
 Verification:
-- `pytest -q`: 423 passed, 3 expected skips
-- `ruff format --check src tests`: 109 files formatted
-- `ruff check src tests`: passed
-- `mypy src`: passed
+- Feature branch CI previously passed quality, container, CodeQL, and Semgrep checks.
+- `pytest -q`: 428 passed, 3 skipped before the release-only follow-up.
+- Release identity and metadata tests: 5 passed after the `2.2.1` bump.
+- Ruff format and lint checks pass.
 
-Decision: do not reinterpret `eligible_if_published_now`; it remains false after the posting window. Direct submission uses historical `eligible` only when the central API separately advertises `can_submit=true`. Grace submissions have a bounded 30-second confirmation wait and return retryable `503 submission_commitment_pending` if confirmation is unavailable; a finalized late commitment returns `409 submission_deadline_passed`. Open-window submissions retain asynchronous batching.
+Risk: this is shared validator scoring behavior. Do not approve the API production deployment until
+validators have upgraded to the reviewed `v2.2.1` release. Existing finalized rewards remain
+unchanged.
 
-Risk: production remains unchanged until this PR and its `bitcast-api` dependency are merged and deployed.
-
-Next action: push this branch, obtain the required protocol review, then merge and deploy the companion API commit before manually deploying this miner commit and running an end-to-end grace-period submission smoke test.
+Next action: obtain the required review, merge PR #124, publish the immutable `v2.2.1` release,
+upgrade validators, then approve the waiting API and Stitch production deployments.
