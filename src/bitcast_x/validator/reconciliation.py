@@ -342,12 +342,16 @@ class CampaignReconciler:
     ) -> AttributionReason | None:
         if not campaign.opens_at <= tweet.created_at <= campaign.closes_at:
             return AttributionReason.POST_OUTSIDE_CAMPAIGN_WINDOW
-        ecosystems = ecosystem_maps_for_campaign(feed, campaign)
+        ecosystems = ecosystem_maps_for_campaign(feed, campaign, as_of=tweet.created_at)
         if not ecosystems:
             raise ReconciliationUnavailableError(
                 f"no ecosystem map overlaps campaign {campaign.access.campaign_id}"
             )
-        if tweet.author_x_id not in eligible_creator_ids_for_campaign(feed, campaign):
+        if tweet.author_x_id not in eligible_creator_ids_for_campaign(
+            feed,
+            campaign,
+            as_of=tweet.created_at,
+        ):
             return AttributionReason.CREATOR_NOT_ELIGIBLE_FOR_CAMPAIGN
         normalized = normalize_match_text(tweet.text)
         if any(normalize_match_text(term) not in normalized for term in campaign.required_terms):

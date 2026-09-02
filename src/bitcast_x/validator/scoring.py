@@ -14,7 +14,7 @@ from bitcast_x.campaigns import (
     EcosystemMap,
     considered_accounts_for_campaign,
     ecosystem_map_at,
-    eligible_creator_ids_for_campaign,
+    first_campaign_eligible_influence,
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionResult
@@ -212,7 +212,7 @@ class AttributionScorer:
         campaign = next(
             item for item in feed.campaigns if item.access.campaign_id == attribution.campaign_id
         )
-        tweet_ecosystem = _campaign_map_at(feed, campaign, tweet)
+        tweet_ecosystem, eligibility_influence = _campaign_map_at(feed, campaign, tweet)
         try:
             considered, current_ecosystem = considered_accounts_for_campaign(
                 feed, campaign, ecosystem_id=tweet_ecosystem.ecosystem_id
@@ -238,12 +238,10 @@ class AttributionScorer:
             ),
             None,
         )
-        current_influence = considered.get(tweet.author.lower())
-        author_influence = max(
-            value
-            for value in (tweet_time_influence, current_influence, minimum)
-            if value is not None
+        pinned_influences = tuple(
+            value for value in (tweet_time_influence, eligibility_influence) if value is not None
         )
+        author_influence = max(pinned_influences, default=minimum)
         usernames = sorted(considered)
         indexes = {username: index for index, username in enumerate(usernames)}
         relationships = np.zeros((len(usernames), len(usernames)), dtype=np.float64)
@@ -279,25 +277,32 @@ class AttributionScorer:
         )
 
 
-def _campaign_map_at(feed: CampaignFeed, campaign: CampaignRecord, tweet: Tweet) -> EcosystemMap:
-    """Select the first configured pool in which the tweet author is eligible."""
+def _campaign_map_at(
+    feed: CampaignFeed,
+    campaign: CampaignRecord,
+    tweet: Tweet,
+) -> tuple[EcosystemMap, float | None]:
+    """Select the first eligible pool and its campaign-level influence floor."""
     available: list[EcosystemMap] = []
     for pool in campaign.pools:
         ecosystem = ecosystem_map_at(feed, pool, tweet.created_at)
         if ecosystem is None:
             continue
         available.append(ecosystem)
-        if tweet.author_x_id in eligible_creator_ids_for_campaign(
+        eligibility_influence = first_campaign_eligible_influence(
             feed,
             campaign,
+            as_of=tweet.created_at,
             ecosystem_id=pool,
-        ):
-            return ecosystem
+            creator_x_id=tweet.author_x_id,
+        )
+        if eligibility_influence is not None:
+            return ecosystem, eligibility_influence
     if not available:
         raise ReconciliationUnavailableError(
             f"no ecosystem map active when tweet {tweet.tweet_id} was published"
         )
-    return available[0]
+    return available[0], None
 
 
 def _exclude_participant_engagement(

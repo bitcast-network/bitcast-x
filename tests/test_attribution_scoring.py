@@ -142,7 +142,7 @@ def feed() -> CampaignFeed:
 
 
 @pytest.mark.asyncio
-async def test_uses_max_tweet_time_and_current_influence_and_excludes_self() -> None:
+async def test_future_map_does_not_change_pinned_author_influence() -> None:
     attribution = AttributionResult(
         tweet_id="999",
         campaign_id="campaign",
@@ -153,9 +153,51 @@ async def test_uses_max_tweet_time_and_current_influence_and_excludes_self() -> 
 
     result = (await AttributionScorer(FakeX()).score(feed(), [attribution]))[0]
 
-    assert result.author_influence == 999.0
-    assert result.score == 2003.75
+    assert result.author_influence == 10.0
+    assert result.score == 25.75
     assert [detail.username for detail in result.details] == ["bob", "carol"]
+
+
+@pytest.mark.asyncio
+async def test_preserves_influence_that_granted_sticky_campaign_access() -> None:
+    snapshot = feed()
+    campaign = snapshot.campaigns[0].model_copy(update={"max_members": 1})
+    old_map = EcosystemMap(
+        ecosystem_id="eco",
+        name="Old map",
+        eligible_creator_x_ids=("1", "2", "3"),
+        updated_at=NOW - timedelta(days=1),
+        accounts=(
+            SocialAccount(x_id="1", username="alice", influence=10.0),
+            SocialAccount(x_id="2", username="bob", influence=5.0),
+            SocialAccount(x_id="3", username="carol", influence=2.0),
+        ),
+    )
+    new_map = EcosystemMap(
+        ecosystem_id="eco",
+        name="New map",
+        eligible_creator_x_ids=("1", "2", "3"),
+        updated_at=NOW + timedelta(minutes=5),
+        accounts=(
+            SocialAccount(x_id="2", username="bob", influence=20.0),
+            SocialAccount(x_id="3", username="carol", influence=2.0),
+            SocialAccount(x_id="1", username="alice", influence=1.0),
+        ),
+    )
+    snapshot = snapshot.model_copy(
+        update={"campaigns": (campaign,), "ecosystem_maps": (old_map, new_map)}
+    )
+    attribution = AttributionResult(
+        tweet_id="999",
+        campaign_id="campaign",
+        accepted=True,
+        reason=AttributionReason.ACCEPTED,
+        miner_hotkey=MINER,
+    )
+
+    result = (await AttributionScorer(FakeX()).score(snapshot, [attribution]))[0]
+
+    assert result.author_influence == 10.0
 
 
 @pytest.mark.asyncio
@@ -235,7 +277,7 @@ async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     alice = next(item for item in results if item.tweet.author == "alice")
 
     assert alice.meets_brief is True
-    assert alice.score == 2001.0
+    assert alice.score == 23.0
     assert [detail.username for detail in alice.details] == ["carol"]
 
 

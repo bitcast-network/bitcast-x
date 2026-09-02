@@ -19,6 +19,7 @@ from bitcast_x.campaigns import (
     _map_digest,
     eligible_creator_ids_for_campaign,
     eligible_creator_ids_in_map,
+    first_campaign_eligible_influence,
 )
 from bitcast_x.errors import ProtocolError
 
@@ -180,7 +181,76 @@ def test_campaign_rank_eligibility_unions_top_n_across_overlapping_maps() -> Non
         }
     )
 
-    assert eligible_creator_ids_for_campaign(snapshot, campaign) == frozenset({"10", "20"})
+    assert eligible_creator_ids_for_campaign(
+        snapshot,
+        campaign,
+        as_of=new_map.updated_at - timedelta(seconds=1),
+    ) == frozenset({"10"})
+    assert eligible_creator_ids_for_campaign(
+        snapshot,
+        campaign,
+        as_of=new_map.updated_at,
+    ) == frozenset({"10", "20"})
+
+
+def test_campaign_eligible_influence_uses_first_map_that_granted_access() -> None:
+    campaign = CampaignFeed.model_validate(FEED).campaigns[0].model_copy(update={"max_members": 1})
+    old_map = EcosystemMap(
+        ecosystem_id="example",
+        name="Old map",
+        eligible_creator_x_ids=("10", "20", "30"),
+        updated_at="2026-08-01T12:00:00Z",
+        accounts=(
+            SocialAccount(x_id="10", username="incumbent", influence=10.0),
+            SocialAccount(x_id="20", username="challenger", influence=5.0),
+            SocialAccount(x_id="30", username="never_ranked", influence=4.0),
+        ),
+    )
+    new_map = EcosystemMap(
+        ecosystem_id="example",
+        name="New map",
+        eligible_creator_x_ids=("10", "20", "30"),
+        updated_at="2026-08-08T12:00:00Z",
+        accounts=(
+            SocialAccount(x_id="20", username="challenger", influence=20.0),
+            SocialAccount(x_id="30", username="never_ranked", influence=2.0),
+            SocialAccount(x_id="10", username="incumbent", influence=1.0),
+        ),
+    )
+    snapshot = CampaignFeed.model_validate(FEED).model_copy(
+        update={"campaigns": (campaign,), "ecosystem_maps": (old_map, new_map)}
+    )
+
+    assert (
+        first_campaign_eligible_influence(
+            snapshot,
+            campaign,
+            as_of=new_map.updated_at,
+            ecosystem_id="example",
+            creator_x_id="10",
+        )
+        == 10.0
+    )
+    assert (
+        first_campaign_eligible_influence(
+            snapshot,
+            campaign,
+            as_of=new_map.updated_at,
+            ecosystem_id="example",
+            creator_x_id="20",
+        )
+        == 20.0
+    )
+    assert (
+        first_campaign_eligible_influence(
+            snapshot,
+            campaign,
+            as_of=new_map.updated_at,
+            ecosystem_id="example",
+            creator_x_id="30",
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

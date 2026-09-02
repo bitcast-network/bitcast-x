@@ -141,4 +141,8 @@ class LegacyAttributionEngine:
     def _eligible(feed: CampaignFeed, campaign: CampaignRecord, tweet: Tweet) -> bool:
         if not campaign.opens_at <= tweet.created_at <= campaign.closes_at:
             return False
-        return tweet.author_x_id in eligible_creator_ids_for_campaign(feed, campaign)
+        return tweet.author_x_id in eligible_creator_ids_for_campaign(
+            feed,
+            campaign,
+            as_of=tweet.created_at,
+        )

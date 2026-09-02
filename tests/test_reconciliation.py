@@ -1436,6 +1436,70 @@ async def test_eligibility_remains_after_creator_drops_below_rank_cutoff(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("published_at", "accepted"),
+    [
+        (NOW + timedelta(minutes=10), False),
+        (NOW + timedelta(hours=2), True),
+    ],
+)
+async def test_creator_becomes_eligible_only_from_new_map_activation(
+    tmp_path: Path,
+    published_at: datetime,
+    accepted: bool,
+) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign().model_copy(update={"max_members": 1})
+    snapshot = feed(record).model_copy(
+        update={
+            "ecosystem_maps": (
+                EcosystemMap(
+                    ecosystem_id="ecosystem",
+                    name="Initially ineligible",
+                    eligible_creator_x_ids=("123", "456"),
+                    updated_at=NOW,
+                    accounts=(
+                        SocialAccount(x_id="123", username="leader", influence=2.0),
+                        SocialAccount(x_id="456", username="creator", influence=1.0),
+                    ),
+                ),
+                EcosystemMap(
+                    ecosystem_id="ecosystem",
+                    name="Enters cutoff",
+                    eligible_creator_x_ids=("123", "456"),
+                    updated_at=NOW + timedelta(hours=1),
+                    accounts=(
+                        SocialAccount(x_id="456", username="creator", influence=3.0),
+                        SocialAccount(x_id="123", username="leader", influence=2.0),
+                    ),
+                ),
+            )
+        }
+    )
+    reconciler = CampaignReconciler(
+        store,
+        FakeX(
+            {
+                "999": TweetFetch(
+                    tweet=tweet(created_at=published_at),
+                    provider_available=True,
+                )
+            }
+        ),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(record, snapshot))[0]
+
+    assert result.accepted is accepted
+    assert result.reason is (
+        AttributionReason.ACCEPTED
+        if accepted
+        else AttributionReason.CREATOR_NOT_ELIGIBLE_FOR_CAMPAIGN
+    )
+
+
+@pytest.mark.asyncio
 async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"max_members": 1})
