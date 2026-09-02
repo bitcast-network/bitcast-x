@@ -56,9 +56,10 @@ activation time, byte size, path, and `sha256-<hex>` digest. Miners may list cam
 downloading maps. Validators download the maps needed for scoring, enforce the response-size bound,
 and verify each digest before caching. After a complete map is verified, validators durably bind its
 `(ecosystem_id, run_id)` identity to the first accepted digest and reject a later manifest that
-changes that binding. Rank eligibility unions the qualifying creators from every map whose active
-interval overlaps the campaign. For scoring, validators still select the map active when the tweet
-was published as the tweet-time influence input.
+changes that binding. For each tweet, rank eligibility unions the qualifying creators from campaign
+opening through the tweet's publication time. A creator who enters the cutoff can participate from
+that map's activation onward; a creator who later leaves the cutoff keeps access. Maps activated
+after publication cannot make an older tweet eligible.
 
 Each campaign configures:
 
@@ -266,9 +267,11 @@ The engagement score starts at twice the author's influence. Retweets from consi
 `1 * influence`; quotes add `3 * influence`. When a positive relationship score exists from an
 engager to the author, that contribution is multiplied by `0.1 + 0.9 / relationship_score`.
 Self-engagement is excluded. After brief evaluation, passing campaign participants cannot increase
-one another's scores. Influence uses the maximum of the tweet-time value, current considered value,
-and the current map minimum; an account dropped from the latest map retains half its prior value.
-Scores are rounded to six decimal places.
+one another's scores. Author influence uses the higher of the map active when the tweet was
+published and the map that first granted the author campaign eligibility. A current map activated
+after publication cannot change that author influence. The current considered-account map still
+weights engagement contributions, and an engager dropped from its latest map retains half its prior
+value. Scores are rounded to six decimal places.
 
 Reward construction then:
 

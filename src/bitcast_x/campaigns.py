@@ -346,8 +346,14 @@ def ecosystem_map_at(
 def ecosystem_maps_for_campaign(
     feed: CampaignFeed,
     campaign: CampaignRecord,
+    *,
+    as_of: datetime | None = None,
 ) -> tuple[EcosystemMap, ...]:
-    """Return every ecosystem map whose active interval overlaps the campaign."""
+    """Return maps overlapping the campaign, optionally bounded by ``as_of``."""
+
+    window_end = campaign.closes_at if as_of is None else min(campaign.closes_at, as_of)
+    if window_end < campaign.opens_at:
+        return ()
 
     relevant: list[EcosystemMap] = []
     for pool in campaign.pools:
@@ -358,7 +364,7 @@ def ecosystem_maps_for_campaign(
         relevant.extend(
             item
             for index, item in enumerate(maps)
-            if item.updated_at <= campaign.closes_at
+            if item.updated_at <= window_end
             and (index + 1 == len(maps) or maps[index + 1].updated_at >= campaign.opens_at)
         )
     return tuple(relevant)
@@ -383,16 +389,41 @@ def eligible_creator_ids_for_campaign(
     feed: CampaignFeed,
     campaign: CampaignRecord,
     *,
+    as_of: datetime,
     ecosystem_id: str | None = None,
 ) -> frozenset[str]:
-    """Union the top-ranked creator IDs from every map active during the campaign."""
+    """Union top-ranked creator IDs from campaign opening through ``as_of``."""
 
     return frozenset(
         creator_x_id
-        for ecosystem in ecosystem_maps_for_campaign(feed, campaign)
+        for ecosystem in ecosystem_maps_for_campaign(feed, campaign, as_of=as_of)
         if ecosystem_id is None or ecosystem.ecosystem_id == ecosystem_id
         for creator_x_id in eligible_creator_ids_in_map(ecosystem, campaign.max_members)
     )
+
+
+def first_campaign_eligible_influence(
+    feed: CampaignFeed,
+    campaign: CampaignRecord,
+    *,
+    as_of: datetime,
+    ecosystem_id: str,
+    creator_x_id: str,
+) -> float | None:
+    """Return the influence that first granted eligibility through ``as_of``."""
+
+    for ecosystem in ecosystem_maps_for_campaign(feed, campaign, as_of=as_of):
+        if ecosystem.ecosystem_id != ecosystem_id:
+            continue
+        if creator_x_id not in eligible_creator_ids_in_map(ecosystem, campaign.max_members):
+            continue
+        account = next(
+            (item for item in ecosystem.accounts if item.x_id == creator_x_id),
+            None,
+        )
+        if account is not None:
+            return account.influence
+    return None
 
 
 def considered_accounts_for_campaign(
