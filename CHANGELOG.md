@@ -6,6 +6,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-09-02
+
 ### Fixed
 
 - Campaign eligibility is forward-sticky: creators can join from a later map without retroactively
@@ -14,6 +16,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
   period only when the creator was historically eligible and the submission is committed no later
   than the campaign's scoring-close block.
+- Featured tweets refresh their engagement identities hourly until scoring closes, keeping their
+  preview evidence current without increasing the refresh rate for other older tweets.
 
 ## [2.2.0] - 2026-08-31
 

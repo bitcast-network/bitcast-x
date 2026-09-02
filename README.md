@@ -177,7 +177,7 @@ Bitcast X is open-source software under the [MIT License](LICENSE). Contribution
 under the same license; see [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and licensing
 expectations.
 
-The current software release is `2.2.0`. Software release numbers are separate from the protocol
+The current software release is `2.2.1`. Software release numbers are separate from the protocol
 versions described in the protocol documentation. See the
 [changelog](CHANGELOG.md), [release policy](docs/release-policy.md),
 [security policy](SECURITY.md), and [support guide](SUPPORT.md).
