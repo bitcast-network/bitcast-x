@@ -8,6 +8,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Campaign eligibility is forward-sticky: creators can join from a later map without retroactively
+  qualifying older posts, and an eligible author's baseline cannot fall below the influence that
+  first qualified them.
 - Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
   period only when the creator was historically eligible and the submission is committed no later
   than the campaign's scoring-close block.
