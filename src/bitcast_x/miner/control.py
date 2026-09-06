@@ -3,7 +3,8 @@
 import asyncio
 import hashlib
 import json
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -46,14 +47,38 @@ class MinerControlService:
     commit_timeout_seconds: float
     results_client: MinerResultsClient | None = None
     enabled_ecosystem_ids: tuple[str, ...] = ()
+    # Qualification is derived from stake, which changes rarely. Caching it
+    # briefly removes live chain RPCs from every submission/claim without
+    # meaningfully delaying the moment a newly-qualified miner can act.
+    qualification_ttl_seconds: float = 60.0
+    _qualification_cache: tuple[float, dict[str, Any]] | None = field(
+        default=None, repr=False, init=False
+    )
 
     async def _require_qualified(self) -> None:
         """Fail before accepting creator operations an unqualified miner cannot earn from."""
 
-        status = await self.sdk.qualification_status()
+        status = await self.qualification_status_cached()
         if not status.get("eligible", False):
             reason = status.get("reason", "unknown")
             raise ProtocolError(f"miner is not qualified: {reason}")
+
+    async def qualification_status_cached(self) -> dict[str, Any]:
+        """Qualification snapshot, cached for a bounded window.
+
+        A negative (not-eligible) result is only trusted within the same
+        window; a fresh cache also keeps any UI-facing qualification endpoint
+        at most ``qualification_ttl_seconds`` behind the chain.
+        """
+
+        if (
+            self._qualification_cache is not None
+            and time.monotonic() - self._qualification_cache[0] < self.qualification_ttl_seconds
+        ):
+            return self._qualification_cache[1]
+        status = await self.sdk.qualification_status()
+        self._qualification_cache = (time.monotonic(), status)
+        return status
 
     def _ecosystems(self, requested: tuple[str, ...] = ()) -> tuple[str, ...]:
         configured = set(self.enabled_ecosystem_ids)
@@ -496,9 +521,9 @@ class MinerControlService:
                 self.sdk.record_submission_result(submission_id, EventStatus.REJECTED)
 
     async def qualification(self) -> dict[str, object]:
-        """Read the current on-chain miner qualification snapshot."""
+        """Read the on-chain miner qualification snapshot (cached briefly)."""
 
-        return dict(await self.sdk.qualification_status())
+        return dict(await self.qualification_status_cached())
 
     async def _await_commit(self) -> None:
         """Wait briefly for finalization while durable work survives timeout."""
