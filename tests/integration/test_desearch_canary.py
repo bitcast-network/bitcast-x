@@ -21,7 +21,9 @@ async def test_desearch_normalizes_stable_historical_tweet_evidence() -> None:
     if not api_key:
         pytest.fail("DESEARCH_API_KEY is required when the Desearch canary is enabled")
     tweet_id = os.getenv("BITCAST_X_CANARY_TWEET_ID", DEFAULT_TWEET_ID)
-    provider = DesearchProvider(api_key, timeout=15, attempts=3, retry_delay=0.25)
+    # 30s budget: Desearch's quotes search currently answers in >15s, so the
+    # historical 15s timeout fails the canary on all three attempts.
+    provider = DesearchProvider(api_key, timeout=30, attempts=3, retry_delay=0.25)
     try:
         evidence = await provider.fetch_tweet_by_id(tweet_id)
         engagements = await provider.fetch_engagements(tweet_id)
