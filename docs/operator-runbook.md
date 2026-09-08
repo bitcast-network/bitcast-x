@@ -7,6 +7,10 @@ Operators can set `BITCAST_X_ENABLE_DATA_PUBLISH=false` or
 
 ## Retired legacy campaigns
 
+Software 3.0.0 removes operator commands and Python interfaces as well as campaign execution.
+Read the [3.0 upgrade guide](upgrade-3.0.md), including the effect on source auto-updates, before
+deploying it.
+
 The final `legacy_connection` campaign (`074_nodexo`) ended its emission window on
 2026-09-01. Validators now process `preclaim_v2` campaigns only. A feed that reintroduces a
 legacy campaign fails the cycle before scoring, publishing, or submitting weights; restore the
