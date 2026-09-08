@@ -193,6 +193,10 @@ class MinerControlService:
         campaign = await self.campaign(campaign_id)
         if campaign is None:
             raise ProtocolError("campaign is not available to this miner")
+        return await self._creator_eligibility(campaign_id, creator_x_id)
+
+    async def _creator_eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        """Fetch evidence after this operation has checked campaign visibility."""
         if self.results_client is None:
             raise ProtocolError("central eligibility service is unavailable")
         result = dict(await self.results_client.eligibility(campaign_id, creator_x_id))
@@ -326,7 +330,7 @@ class MinerControlService:
             operation_snapshot_id = str(claim["campaign_snapshot_id"])
             operation_ecosystem_ids = tuple(claim.get("ecosystem_ids", []))
         else:
-            eligibility = await self.eligibility(campaign_id, creator_x_id)
+            eligibility = await self._creator_eligibility(campaign_id, creator_x_id)
             # Direct campaigns submit an existing tweet rather than authorize a
             # new publication. The central can_submit capability bounds both
             # the posting window and its evaluation-day submission grace;
