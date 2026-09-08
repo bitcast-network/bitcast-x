@@ -211,23 +211,6 @@ class BittensorChain:
             conviction_rao = int(conviction)
         return coldkey_ss58, target, conviction_rao, self_stake_rao
 
-    async def legacy_daily_miner_alpha(self, *, block: int | None = None) -> float:
-        """Return v2's mechanism-pinned daily miner emission amount in alpha."""
-
-        client = await self._client.at(block) if block is not None else self._client
-        dynamic = await client.runtime(
-            runtime_api.SubnetInfoRuntimeApi.get_dynamic_info, [self.netuid]
-        )
-        split = await client.subnets.mechanism_emission_split(netuid=self.netuid, block=block)
-        if not isinstance(dynamic, Mapping) or not isinstance(split, list):
-            raise ChainOperationError("legacy emission inputs are unavailable")
-        alpha_out_rao = int(dynamic.get("alpha_out_emission", 0))
-        split_total = sum(int(item) for item in split)
-        if alpha_out_rao <= 0 or split_total <= 0 or self.mechanism_id >= len(split):
-            raise ChainOperationError("legacy emission inputs are invalid")
-        ratio = int(split[self.mechanism_id]) / split_total
-        return 7200.0 * (alpha_out_rao / 1_000_000_000) * 0.41 * ratio
-
     async def submit_commitment(self, wallet: Any, envelope: OnChainEnvelope) -> Any:
         """Submit one finalized raw commitment signed by the miner hotkey."""
 

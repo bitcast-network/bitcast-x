@@ -14,7 +14,6 @@ from bitcast_x.x_provider import (
     EngagementFetch,
     Tweet,
     TweetFetch,
-    TweetSearchFetch,
     XProvider,
 )
 
@@ -301,16 +300,6 @@ class PreviewXProvider:
             len(effective.result.engagements),
         )
         return effective.result
-
-    async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch:
-        """Delegate searches; preclaim preview reconciliation does not call this path."""
-
-        return await self._upstream.search_tweets(query, count=count)
-
-    async def fetch_replies(self, tweet_id: str, *, count: int = 100) -> TweetSearchFetch:
-        """Delegate replies; preclaim preview reconciliation does not call this path."""
-
-        return await self._upstream.fetch_replies(tweet_id, count=count)
 
     async def close(self) -> None:
         """Leave lifecycle ownership with the final-evidence provider."""

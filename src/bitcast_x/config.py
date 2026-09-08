@@ -8,7 +8,6 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL
-from bitcast_x.legacy.constants import LEGACY_NOCODE_UID
 from bitcast_x.qualification import (
     PUBLIC_QUALIFICATION_OWNER_HOTKEY,
     QualificationConfig,
@@ -16,7 +15,6 @@ from bitcast_x.qualification import (
     resolve_qualification_policy,
 )
 
-LEGACY_CONNECTION_TWEET_IDS = "2031383975088836738"
 QUALIFICATION_OWNER_HOTKEY = PUBLIC_QUALIFICATION_OWNER_HOTKEY
 
 
@@ -54,12 +52,6 @@ class Settings(BaseSettings):
     miner_results_api_url: str = "https://bitcast-api.bitcast.network"
     miner_results_poll_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     miner_enabled_ecosystem_ids: tuple[str, ...] = ()
-    legacy_connections_path: Path | None = None
-    legacy_snapshots_path: Path | None = None
-    legacy_tweet_store_path: Path | None = None
-    legacy_nocode_uid: int = Field(default=LEGACY_NOCODE_UID, ge=0)
-    legacy_connection_tweet_ids: str = LEGACY_CONNECTION_TWEET_IDS
-    legacy_fasttrack_url: str = "https://www.stitch3.ai/api/fast-track"
     qualification_owner_hotkey: str | None = QUALIFICATION_OWNER_HOTKEY
     qualification_minimum_alpha: str = "15000"
     qualification_minimum_self_stake_alpha: str | None = None

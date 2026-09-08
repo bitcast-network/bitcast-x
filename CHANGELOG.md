@@ -4,7 +4,31 @@ All notable changes to Bitcast X are recorded here. This project follows
 [Semantic Versioning](https://semver.org/); software release versions are separate from the wire,
 campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
-## [Unreleased]
+## [3.0.0] - Unreleased
+
+### Breaking changes
+
+- Retire `legacy_connection` campaign execution, connection collection, legacy reward and referral
+  emissions, legacy pricing, and temporary treasury routing. A feed containing a retired campaign
+  aborts the entire validator cycle before campaign scoring, result publication, or weight submission.
+- Remove `legacy-state-info`, the `bitcast_x.legacy` and `bitcast_x.validator.legacy` Python modules,
+  `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
+  These incompatible operator and package changes require a software major release. See the
+  [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
+
+### Compatibility
+
+- The retirement does not change the miner application `/api/v1` contract, canonical batch hashes,
+  `DX2`/`DX3` commitments, `/v2/batches` or `/v3/batches`, or preclaim reward calculations. Historical
+  `legacy_connection` records remain readable. Miner schema 3 and validator schema 6 are unchanged.
+- Existing legacy archives are left in place. Historical settlement remains separate from validator
+  campaign emissions. Automatic source updates following `origin/main` can activate this removal
+  at merge time; they do not wait for a release tag or stop at a software major-version boundary.
+
+### Changed
+
+- Cache the miner qualification snapshot for 60 seconds and reuse a fetched campaign during direct
+  submission, reducing repeated upstream reads.
 
 ### Fixed
 

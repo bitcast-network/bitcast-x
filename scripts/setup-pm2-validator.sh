@@ -57,5 +57,5 @@ mkdir -p -- "${operator_home}/.bitcast-x/validator-state" "${project_root}/logs"
 
 printf '\nSetup complete. Next:\n'
 printf '  1. Edit %s and add the provider keys and correct wallet name/hotkey.\n' "${env_file}"
-printf '  2. Restore verified legacy state if legacy campaigns remain.\n'
+printf '  2. Restore verified validator state when migrating an existing installation.\n'
 printf '  3. Run %s/scripts/start-pm2-validator.sh\n' "${project_root}"

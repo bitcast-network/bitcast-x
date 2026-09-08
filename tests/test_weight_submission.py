@@ -101,7 +101,7 @@ def test_preclaim_economics_fail_closed_when_effective_threshold_is_zero(
         )
 
 
-def test_zero_threshold_remains_available_for_shadow_and_legacy_only_cycles() -> None:
+def test_zero_threshold_remains_available_for_shadow_and_empty_cycles() -> None:
     schedule = _qualification_schedule((0, "0"))
 
     ensure_preclaim_economics_qualified(

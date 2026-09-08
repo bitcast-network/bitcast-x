@@ -16,7 +16,6 @@ from bitcast_x.auto_update import (
 )
 from bitcast_x.campaigns import CampaignFeedClient
 from bitcast_x.config import Settings, get_settings
-from bitcast_x.legacy.preflight import inspect_legacy_state
 from bitcast_x.logging import configure_logging
 from bitcast_x.miner.service import ReferenceMiner, build_sdk, load_wallet
 from bitcast_x.miner.store import MinerStore
@@ -61,7 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
     submission_status.add_argument("submission_id")
     commands.add_parser("qualification", help="explain current miner qualification")
     commands.add_parser("state-info", help="check durable database integrity and schema versions")
-    commands.add_parser("legacy-state-info", help="verify the imported v1/v2 state read-only")
     commands.add_parser("shadow-report", help="hash frozen shadow outputs for validator comparison")
     backup = commands.add_parser("backup-state", help="create a consistent online state backup")
     backup.add_argument("--output", required=True)
@@ -82,12 +80,6 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
 
     if arguments.command == "state-info":
         return inspect_state(settings.state_dir)
-    if arguments.command == "legacy-state-info":
-        return inspect_legacy_state(
-            settings.legacy_connections_path or settings.state_dir / "connections.db",
-            settings.legacy_snapshots_path or settings.state_dir / "reward_snapshots",
-            settings.legacy_tweet_store_path or settings.state_dir / "legacy_tweet_store",
-        )
     if arguments.command == "shadow-report":
         return shadow_report(settings.state_dir)
     if arguments.command == "backup-state":
