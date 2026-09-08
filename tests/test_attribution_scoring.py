@@ -185,34 +185,6 @@ async def test_same_tweet_across_campaigns_uses_one_frozen_provider_observation(
 
 
 @pytest.mark.asyncio
-async def test_legacy_cached_tweet_is_used_when_refresh_is_unavailable() -> None:
-    attribution = AttributionResult(
-        tweet_id="999",
-        campaign_id="campaign",
-        accepted=True,
-        reason=AttributionReason.ACCEPTED,
-        miner_hotkey=MINER,
-    )
-    cached = Tweet(
-        tweet_id="999",
-        author_x_id="1",
-        created_at=NOW + timedelta(minutes=10),
-        text="post",
-        author="alice",
-    )
-
-    result = (
-        await AttributionScorer(UnavailableTweetX()).score(
-            feed(),
-            [attribution],
-            tweet_evidence={"999": cached},
-        )
-    )[0]
-
-    assert result.tweet == cached
-
-
-@pytest.mark.asyncio
 async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     snapshot = feed()
     old_map = snapshot.ecosystem_maps[0].model_copy(update={"eligible_creator_x_ids": ("1", "2")})

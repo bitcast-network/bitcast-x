@@ -159,32 +159,3 @@ async def test_quotes_override_retweets_and_false_quote_search_hits_are_ignored(
 
     assert result.provider_available is True
     assert result.engagements == {"alice": "quote", "bob": "retweet"}
-
-
-@pytest.mark.asyncio
-async def test_replies_use_legacy_endpoint_and_normalize_results() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/twitter/replies/post"
-        assert request.url.params["post_id"] == "123"
-        assert request.url.params["count"] == "100"
-        return httpx.Response(
-            200,
-            json=[
-                {
-                    "id": "501",
-                    "created_at": "2026-08-05T12:00:00Z",
-                    "text": "Stitch3-builder",
-                    "in_reply_to_status_id": "123",
-                    "user": {"id": "1", "username": "Alice"},
-                }
-            ],
-        )
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    try:
-        result = await DesearchProvider("secret", client=client).fetch_replies("123")
-    finally:
-        await client.aclose()
-
-    assert result.provider_available is True
-    assert result.tweets[0].in_reply_to_status_id == "123"

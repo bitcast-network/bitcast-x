@@ -11,7 +11,7 @@ _RETRYABLE = {408, 429, 500, 502, 503, 504}
 
 
 class Tweet(BaseModel):
-    """Stable normalized tweet evidence consumed by validation and legacy scoring."""
+    """Stable normalized tweet evidence consumed by reconciliation and scoring."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -63,25 +63,12 @@ class EngagementFetch(BaseModel):
     provider_available: bool
 
 
-class TweetSearchFetch(BaseModel):
-    """Bounded normalized search results with explicit provider availability."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    tweets: tuple[Tweet, ...]
-    provider_available: bool
-
-
 class XProvider(Protocol):
     """Fetch operations only; validation never depends on provider wire shapes."""
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch: ...
 
     async def fetch_engagements(self, tweet_id: str) -> EngagementFetch: ...
-
-    async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch: ...
-
-    async def fetch_replies(self, tweet_id: str, *, count: int = 100) -> TweetSearchFetch: ...
 
     async def close(self) -> None: ...
 
@@ -187,50 +174,6 @@ class DesearchProvider:
             if parsed is not None and parsed.quoted_tweet_id == tweet_id:
                 engagements[parsed.author] = "quote"
         return EngagementFetch(engagements=engagements, provider_available=True)
-
-    async def search_tweets(self, query: str, *, count: int = 100) -> TweetSearchFetch:
-        """Search campaign posts using the frozen v2 query boundary."""
-
-        if not query.strip() or not 1 <= count <= 100:
-            raise ValueError("tweet search query/count is invalid")
-        payload, available = await self._request_json(
-            "/twitter", {"query": query, "sort": "Latest", "count": count}
-        )
-        if not available:
-            return TweetSearchFetch(tweets=(), provider_available=False)
-        items = (
-            payload
-            if isinstance(payload, list)
-            else (payload.get("tweets", []) if isinstance(payload, dict) else [])
-        )
-        tweets = tuple(
-            parsed
-            for item in items
-            if isinstance(item, dict) and (parsed := _parse_desearch_tweet(item)) is not None
-        )
-        return TweetSearchFetch(tweets=tweets, provider_available=True)
-
-    async def fetch_replies(self, tweet_id: str, *, count: int = 100) -> TweetSearchFetch:
-        """Fetch replies through the endpoint used by the legacy validator."""
-
-        if not tweet_id.isdigit() or not 1 <= count <= 100:
-            raise ValueError("reply tweet ID/count is invalid")
-        payload, available = await self._request_json(
-            "/twitter/replies/post", {"post_id": tweet_id, "count": count}
-        )
-        if not available:
-            return TweetSearchFetch(tweets=(), provider_available=False)
-        items = (
-            payload
-            if isinstance(payload, list)
-            else (payload.get("tweets", []) if isinstance(payload, dict) else [])
-        )
-        tweets = tuple(
-            parsed
-            for item in items
-            if isinstance(item, dict) and (parsed := _parse_desearch_tweet(item)) is not None
-        )
-        return TweetSearchFetch(tweets=tweets, provider_available=True)
 
     async def _request_json(
         self, path: str, params: dict[str, Any]

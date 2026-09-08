@@ -5,50 +5,25 @@ weight vector, publishes the signed DEEBLY payload, and submits mechanism-1 weig
 Operators can set `BITCAST_X_ENABLE_DATA_PUBLISH=false` or
 `BITCAST_X_ENABLE_WEIGHT_SUBMISSION=false` for an intentional diagnostic run.
 
-## Legacy campaign overlap
+## Retired legacy campaigns
 
-Before the first v3 start, stop v2 cleanly and copy its `connections.db`, complete
-`reward_snapshots` directory, and complete diskcache `tweet_store` directory into the v3
-persistent volume. Configure their locations with `BITCAST_X_LEGACY_CONNECTIONS_PATH`,
-`BITCAST_X_LEGACY_SNAPSHOTS_PATH`, and `BITCAST_X_LEGACY_TWEET_STORE_PATH` (defaults are beneath
-`STATE_DIR`). Preserve every file in the diskcache directory, including `cache.db`; it contains
-the cumulative tweets and engagement identities that bounded provider searches cannot recreate.
-The imported connection database must remain at schema version 2. V3 fails closed while legacy
-campaigns exist if imported state is missing or malformed; it never starts fresh replacement
-state.
+The final `legacy_connection` campaign (`074_nodexo`) ended its emission window on
+2026-09-01. Validators now process `preclaim_v2` campaigns only. A feed that reintroduces a
+legacy campaign fails the cycle before scoring, publishing, or submitting weights; restore the
+canonical feed instead of changing an old campaign's protocol.
 
-Before starting v3, run `bitcast-x legacy-state-info` against the copied volume. It opens the
-legacy databases read-only, parses every reward snapshot, counts connection/tweet/engagement
-records, and emits a manifest hash. Record the JSON result before and after transferring the state;
-the hashes and counts must match. A missing or corrupt import exits non-zero.
+The legacy engine, connection collector, reward replay, referral emission logic, pricing calls,
+and temporary treasury routing have been removed. No imported connection database, reward
+snapshot directory, or cumulative tweet store is required to run a validator. Remove the old
+`BITCAST_X_LEGACY_*` environment settings when updating deployment configuration.
 
-The shipped `BITCAST_X_LEGACY_CONNECTION_TWEET_IDS` records the registration tweet used by v2, but
-v3 intentionally does not acquire new legacy registrations. It retains the imported connection
-state and continues polling `BITCAST_X_LEGACY_FASTTRACK_URL`. Fast-tracked tweets are merged into
-the cumulative tweet store before connection-tag processing. V3 deliberately does not generate
-social maps; both legacy scoring and the new protocol consume maps from the campaign feed.
-Keep `BITCAST_X_CAMPAIGN_FEED_MAX_RESPONSE_BYTES` at least 16 MB for the current approximately
-8 MB full-map snapshot; this bound is separate from miner-response and LLM-response limits.
+Retain existing archived state for audit and rollback. Retirement does not delete database rows,
+change frozen campaign contracts, or settle historical obligations. The payments service still
+handles unpaid historical referral records independently of subnet campaign emissions.
 
-Legacy non-burn weights are preserved exactly. Only the allocation on burn UID 0 is distributed
-across productive `preclaim_v2` miners. While any legacy campaign remains, if no v2 miner is
-productive that allocation is instead routed to the temporary legacy treasury UID 155, matching
-the outgoing validator. UID 155 must be present or the cycle fails closed. Remove this routing and
-the treasury constant with the isolated legacy engine after the final legacy liability drains.
-Unavailable X evidence, invalid imported state, or stale hotkey routing retains the prior durable
-shadow result and marks the current cycle unhealthy rather than silently changing allocation.
-Legacy ingestion run IDs include the finalized block, so retries of a block are idempotent while
-later blocks create distinct metric-history rows.
-
-Campaign routing is persisted in `validator.sqlite3`; changing an existing campaign between
-`legacy_connection` and `preclaim_v2` is rejected. Once the campaign feed contains no legacy
-campaigns, v3 produces its normal vector. Remove the isolated legacy engine and imported state only
-after legacy emissions and referral liabilities have independently been confirmed as drained.
-
-A canonical legacy reward snapshot is the terminal scoring boundary for that campaign. Later cycles
-replay its fixed tweet rewards and may publish them, but do not rediscover tweets, refresh engagement,
-or invoke the LLM for that campaign. Legacy campaigns without a snapshot continue cumulative
-discovery and scoring until their first-emission rewards are frozen.
+Keep `validator.sqlite3`, miner history, campaign caches, preview state, and wallets across
+upgrades. Protocol-v2 signed commitments and `/v2/batches` compatibility remain necessary to
+verify already committed preclaim history; they are separate from retired legacy campaigns.
 
 ### Desearch activity budget
 
@@ -66,7 +41,6 @@ last good preview and retries on later cycles rather than publishing a destructi
 first post-close scoring pass still fetches fresh evidence before assigning tweets and freezing
 rewards, then reuses the pinned feature. If its
 required evidence is still unavailable, final economics and weight submission wait until recovery.
-Frozen legacy campaigns contribute no further search or scoring calls.
 
 ## Runtime contract
 
@@ -101,9 +75,8 @@ validators use the rule active at each claim, submission and scoring-close block
 ## Start and verify
 
 Use `config/miner.env.example` or `config/validator.env.example` for a minimal role-specific
-installation. The root `.env.example` remains the exhaustive reference. Optional legacy and remote
-logging settings are isolated in `config/legacy.env.example` and
-`config/remote-logging.env.example`; validator evidence/LLM credentials are isolated in
+installation. The root `.env.example` remains the exhaustive reference. Optional remote logging
+settings are in `config/remote-logging.env.example`; validator evidence/LLM credentials are in
 `config/providers.env.example`.
 
 ```bash
@@ -160,8 +133,7 @@ npm install --global pm2@latest
 On first use, the setup script installs locked production dependencies and creates `.env` from the
 validator and provider templates with mode `0600`. It substitutes usable wallet, state, and update
 paths beneath the current home directory and never overwrites an existing `.env`. Edit that file to
-select the existing wallet name/hotkey and add the Desearch and selected LLM key. Restore the
-verified legacy state described above when legacy campaigns remain, then launch:
+select the existing wallet name/hotkey and add the Desearch and selected LLM key, then launch:
 
 ```bash
 ./scripts/start-pm2-validator.sh

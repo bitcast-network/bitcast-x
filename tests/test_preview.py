@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bitcast_x.validator.preview import PreviewStore, PreviewXProvider, _refresh_interval
-from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch, TweetSearchFetch
+from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 
 NOW = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
@@ -45,12 +45,6 @@ class Provider:
             engagements={username: "quote"},
             provider_available=True,
         )
-
-    async def search_tweets(self, _query: str, *, count: int = 100) -> TweetSearchFetch:
-        return TweetSearchFetch(tweets=(), provider_available=True)
-
-    async def fetch_replies(self, _tweet_id: str, *, count: int = 100) -> TweetSearchFetch:
-        return TweetSearchFetch(tweets=(), provider_available=True)
 
     async def close(self) -> None:
         pass

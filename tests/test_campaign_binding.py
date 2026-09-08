@@ -1,4 +1,4 @@
-"""Tests for the temporary legacy-to-preclaim weight transition."""
+"""Campaign contracts remain pinned across feed changes and protocol retirement."""
 
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -9,12 +9,7 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.rewards import TweetReward
-from bitcast_x.validator.legacy import (
-    LEGACY_TREASURY_UID,
-    combine_weights,
-    has_legacy_campaigns,
-    preclaim_feed,
-)
+from bitcast_x.validator.service import ensure_supported_campaigns
 from bitcast_x.validator.store import ValidatorStore
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
@@ -142,94 +137,6 @@ def freeze_positive_campaign(store: ValidatorStore, record: CampaignRecord) -> N
     )
 
 
-def test_combiner_preserves_legacy_and_redistributes_only_burn() -> None:
-    combined = combine_weights(
-        {0: 0.6, 114: 0.4},
-        {0: 0.0, 2: 0.75, 3: 0.25, 114: 0.0},
-        uids=[0, 2, 3, 114],
-    )
-
-    assert combined == pytest.approx({0: 0.0, 2: 0.45, 3: 0.15, 114: 0.4})
-
-
-def test_combiner_adds_both_paths_for_the_same_uid() -> None:
-    combined = combine_weights(
-        {0: 0.5, 7: 0.5},
-        {0: 0.0, 7: 0.25, 8: 0.75},
-        uids=[0, 7, 8],
-    )
-
-    assert combined == {0: 0.0, 7: 0.625, 8: 0.375}
-
-
-def test_shipped_legacy_treasury_uid_matches_v1() -> None:
-    assert LEGACY_TREASURY_UID == 155
-
-
-def test_combiner_routes_all_excess_to_treasury_without_productive_v2_miners() -> None:
-    legacy = {0: 0.6, 114: 0.4, LEGACY_TREASURY_UID: 0.0}
-
-    combined = combine_weights(
-        legacy,
-        {0: 1.0, 114: 0.0, LEGACY_TREASURY_UID: 0.0},
-        uids=[0, 114, LEGACY_TREASURY_UID],
-    )
-
-    assert combined == {0: 0.0, 114: 0.4, LEGACY_TREASURY_UID: 0.6}
-
-
-def test_combiner_adds_excess_to_existing_legacy_treasury_weight() -> None:
-    combined = combine_weights(
-        {0: 0.5, 7: 0.3, LEGACY_TREASURY_UID: 0.2},
-        {0: 1.0, 7: 0.0, LEGACY_TREASURY_UID: 0.0},
-        uids=[0, 7, LEGACY_TREASURY_UID],
-    )
-
-    assert combined == {0: 0.0, 7: 0.3, LEGACY_TREASURY_UID: 0.7}
-
-
-def test_combiner_routes_excess_to_productive_v2_instead_of_treasury() -> None:
-    combined = combine_weights(
-        {0: 0.6, 114: 0.4, LEGACY_TREASURY_UID: 0.0},
-        {0: 0.0, 2: 0.75, 3: 0.25, 114: 0.0, LEGACY_TREASURY_UID: 0.0},
-        uids=[0, 2, 3, 114, LEGACY_TREASURY_UID],
-    )
-
-    assert combined == pytest.approx({0: 0.0, 2: 0.45, 3: 0.15, 114: 0.4, LEGACY_TREASURY_UID: 0.0})
-
-
-def test_combiner_fails_closed_when_legacy_treasury_is_absent() -> None:
-    with pytest.raises(ProtocolError, match="treasury UID 155 is absent"):
-        combine_weights({0: 0.6, 114: 0.4}, {0: 1.0, 114: 0.0}, uids=[0, 114])
-
-
-@pytest.mark.parametrize(
-    ("legacy", "productive", "message"),
-    [
-        ({0: 0.9}, {0: 1.0}, "sum to one"),
-        ({0: 1.0}, {0: 1.0, 9: 0.1}, "unknown UIDs"),
-        ({0: 1.0}, {0: float("nan")}, "finite and non-negative"),
-    ],
-)
-def test_combiner_rejects_invalid_vectors(
-    legacy: dict[int, float], productive: dict[int, float], message: str
-) -> None:
-    with pytest.raises(ProtocolError, match=message):
-        combine_weights(legacy, productive, uids=[0])
-
-
-def test_campaign_router_keeps_only_preclaim_campaigns() -> None:
-    complete = feed(
-        campaign("legacy", MiningProtocol.LEGACY_CONNECTION),
-        campaign("new", MiningProtocol.PRECLAIM_V2),
-    )
-
-    routed = preclaim_feed(complete)
-
-    assert has_legacy_campaigns(complete)
-    assert [item.access.campaign_id for item in routed.campaigns] == ["new"]
-
-
 def test_campaign_protocol_change_is_adopted_before_results_freeze(tmp_path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     original = campaign("same", MiningProtocol.LEGACY_CONNECTION)
@@ -349,7 +256,7 @@ def test_unreadable_frozen_campaign_contract_quarantines_only_that_campaign(
     unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
     store.bind_campaign_protocols((frozen, unaffected))
     freeze_positive_campaign(store, frozen)
-    with sqlite3.connect(store.path) as connection:
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
         connection.execute(
             """
             UPDATE campaign_protocols
@@ -398,3 +305,47 @@ def test_identical_campaign_contract_can_be_observed_repeatedly(tmp_path) -> Non
 
     store.bind_campaign_protocols((original,))
     store.bind_campaign_protocols((original,))
+
+
+def test_legacy_campaign_reintroduction_rejects_the_complete_cycle() -> None:
+    snapshot = feed(
+        campaign("new", MiningProtocol.PRECLAIM_V2),
+        campaign("retired", MiningProtocol.LEGACY_CONNECTION),
+    )
+    with pytest.raises(ProtocolError, match="legacy campaign processing is retired: retired"):
+        ensure_supported_campaigns(snapshot)
+
+
+def test_preclaim_and_empty_feeds_do_not_require_imported_legacy_state() -> None:
+    ensure_supported_campaigns(feed(campaign("new", MiningProtocol.PRECLAIM_V2)))
+    ensure_supported_campaigns(feed())
+
+
+def test_retired_frozen_campaign_cannot_be_reintroduced_as_preclaim(tmp_path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    retired = campaign("retired", MiningProtocol.LEGACY_CONNECTION)
+    store.bind_campaign_protocols((retired,))
+    freeze_positive_campaign(store, retired)
+
+    replacement = campaign("retired", MiningProtocol.PRECLAIM_V2)
+    bound = store.bind_campaign_protocols((replacement,))
+
+    assert bound == (retired,)
+    with pytest.raises(ProtocolError, match="legacy campaign processing is retired: retired"):
+        ensure_supported_campaigns(feed(*bound))
+    assert ValidatorStore(store.path).bind_campaign_protocols((replacement,)) == (retired,)
+
+
+def test_archived_legacy_binding_does_not_block_current_campaigns(tmp_path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    retired = campaign("retired", MiningProtocol.LEGACY_CONNECTION)
+    store.bind_campaign_protocols((retired,))
+    current = campaign("new", MiningProtocol.PRECLAIM_V2)
+    bound = store.bind_campaign_protocols((current,))
+    assert bound == (current,)
+    ensure_supported_campaigns(feed(*bound))
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT mining_protocol FROM campaign_protocols WHERE campaign_id = ?",
+            ("retired",),
+        ).fetchone() == ("legacy_connection",)

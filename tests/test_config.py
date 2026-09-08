@@ -12,8 +12,6 @@ def test_public_protocol_defaults_match_the_published_network() -> None:
     assert settings.campaign_feed_url == (
         "https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest-v4"
     )
-    assert settings.legacy_nocode_uid == 154
-    assert settings.legacy_connection_tweet_ids == "2031383975088836738"
     assert settings.qualification_owner_hotkey == (
         "5DAoDtMxVqtMu2Nd5E7QhPEGXDMgrySvE1b3rRT5ARDhfNNK"
     )
@@ -51,8 +49,6 @@ def test_environment_template_contains_real_public_protocol_values() -> None:
 
     assert "BITCAST_X_CAMPAIGN_FEED_URL=" + str(Settings().campaign_feed_url) in template
     assert "BITCAST_X_PROTOCOL_START_BLOCK" not in template
-    assert "BITCAST_X_LEGACY_NOCODE_UID=154" in template
-    assert "BITCAST_X_LEGACY_CONNECTION_TWEET_IDS=2031383975088836738" in template
     assert "qualification history ships with each reviewed release" in template
     assert "BITCAST_X_QUALIFICATION_SCHEDULE_JSON=" not in template
     assert "BITCAST_X_VALIDATOR_PREVIEW_MAX_CONCURRENCY=2" in template

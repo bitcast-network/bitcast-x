@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from collections.abc import Callable
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict
@@ -52,21 +51,18 @@ class AttributionScorer:
         *,
         brief_filter: BriefFilter | None = None,
         max_concurrency: int = 16,
-        engagement_merger: Callable[[str, EngagementFetch], EngagementFetch] | None = None,
     ) -> None:
         if max_concurrency <= 0:
             raise ValueError("max_concurrency must be positive")
         self._x = x_provider
         self._brief_filter = brief_filter
         self._semaphore = asyncio.Semaphore(max_concurrency)
-        self._engagement_merger = engagement_merger
 
     async def score(
         self,
         feed: CampaignFeed,
         attributions: list[AttributionResult],
         *,
-        tweet_evidence: dict[str, Tweet] | None = None,
         cached_evidence: dict[str, tuple[TweetFetch, EngagementFetch]] | None = None,
         defer_unavailable_tweets: bool = False,
     ) -> list[ScoredAttribution]:
@@ -78,7 +74,6 @@ class AttributionScorer:
             *(
                 self._evidence_for_score(
                     item,
-                    fallback_tweet=(tweet_evidence or {}).get(item),
                     cached=(cached_evidence or {}).get(item),
                 )
                 for item in tweet_ids
@@ -135,12 +130,11 @@ class AttributionScorer:
         self,
         tweet_id: str,
         *,
-        fallback_tweet: Tweet | None,
         cached: tuple[TweetFetch, EngagementFetch] | None,
     ) -> tuple[TweetFetch, EngagementFetch]:
         if cached is not None:
             return cached
-        return await self._fetch_evidence(tweet_id, fallback_tweet=fallback_tweet)
+        return await self._fetch_evidence(tweet_id)
 
     async def _evaluate_with_deferral(
         self,
@@ -179,18 +173,12 @@ class AttributionScorer:
     async def _fetch_evidence(
         self,
         tweet_id: str,
-        *,
-        fallback_tweet: Tweet | None = None,
     ) -> tuple[TweetFetch, EngagementFetch]:
         async with self._semaphore:
             tweet, engagements = await asyncio.gather(
                 self._x.fetch_tweet_by_id(tweet_id),
                 self._x.fetch_engagements(tweet_id),
             )
-            if self._engagement_merger is not None:
-                engagements = self._engagement_merger(tweet_id, engagements)
-            if not tweet.provider_available and fallback_tweet is not None:
-                tweet = TweetFetch(tweet=fallback_tweet, provider_available=True)
             return tweet, engagements
 
     def _score_one(

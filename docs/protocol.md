@@ -2,7 +2,7 @@
 
 This document is the self-contained protocol overview for the Bitcast X miner and validator in
 this repository. It covers SN93 mechanism 1, the `preclaim_v2` mining path, the temporary
-`legacy_connection` overlap, scoring, and weight construction. No external source repository is
+scoring and weight construction. No external source repository is
 required to understand or implement the released behavior.
 
 The exact schemas and formulas shipped by a release are authoritative. Their primary source files
@@ -41,7 +41,7 @@ Several version numbers cover different boundaries and must not be conflated:
 | Claim event | `2` | Strict claim schema and draft-commitment hashing |
 | Batch content and envelope | `2` or `3` | Version 3 identifies a post-recovery history; version 2 is historical replay |
 | Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
-| Campaign mining mode | `preclaim_v2` or `legacy_connection` | Selects the new committed-claim path or temporary imported legacy behavior |
+| Campaign mining mode | `preclaim_v2` | Uses committed claims and submissions; legacy campaigns are retired |
 
 The strict wire models are in
 [`src/bitcast_x/protocol/models.py`](../src/bitcast_x/protocol/models.py), canonical encoding is in
@@ -298,22 +298,17 @@ assignment and weight submission rather than silently dropping or changing the b
 campaign feed temporarily omits a pinned, unsettled campaign, validators retain its stored contract
 and continue recovery from that authoritative record.
 
-## Temporary legacy overlap
+## Legacy campaign retirement
 
-`legacy_connection` is a transition path, not a second public miner wire protocol. A validator
-operating during the overlap imports the outgoing validator's complete connection database, reward
-snapshots, and cumulative tweet store. A fresh validator cannot reconstruct that historical state
-from bounded provider queries; it must start from a verified state archive or wait until all legacy
-campaign and referral liabilities have drained.
+The last `legacy_connection` campaign completed emissions on 2026-09-01. The validator no longer
+collects legacy tweets, replays legacy snapshots, emits legacy referrals, or combines legacy
+weights with preclaim rewards. All weight construction uses the preclaim reward vector, including
+its normal burn behavior. A legacy campaign in the live feed fails the cycle closed.
 
-During overlap, v3 calculates legacy campaigns locally and preserves their non-burn weights. Only
-legacy UID 0 excess is replaced by productive `preclaim_v2` weights. If no new-path miner is
-productive while a legacy campaign remains, that excess is routed to temporary treasury UID 155;
-missing UID 155 fails the cycle closed. The legacy engine, imported state, and treasury routing are
-deleted together after the final legacy liability drains.
-
-The exact migration and state verification procedure is in the
-[operator runbook](operator-runbook.md).
+Historical records retain their original protocol identifiers. Existing signed preclaim histories,
+creator-binding activation rules, and batch wire compatibility remain in force. Preserve archived
+legacy state for audit and rollback; historical payment obligations are handled outside this
+validator. See the [operator runbook](operator-runbook.md).
 
 ## External data and operator-visible effects
 

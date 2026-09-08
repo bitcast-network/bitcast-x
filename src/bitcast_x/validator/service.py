@@ -4,7 +4,6 @@ import asyncio
 import logging
 import time
 from contextlib import suppress
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -13,7 +12,7 @@ from bittensor.result import BittensorError
 
 from bitcast_x import __version__
 from bitcast_x.brief_filter import LlmBriefFilter
-from bitcast_x.campaigns import CampaignFeedClient
+from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient
 from bitcast_x.chain import BittensorChain
 from bitcast_x.config import Settings
 from bitcast_x.errors import (
@@ -22,20 +21,10 @@ from bitcast_x.errors import (
     ReconciliationUnavailableError,
     ResponseTooLargeError,
 )
-from bitcast_x.legacy import (
-    ConnectionStore,
-    LegacyAttributionEngine,
-    LegacyCadence,
-    LegacyConnectionCollector,
-    LegacyPricingService,
-    LegacyResultPublisher,
-    LegacyRewardCoordinator,
-    LegacySnapshotStore,
-    LegacyTweetStore,
-)
 from bitcast_x.logging import configure_loki_logging, shutdown_loki_logging
 from bitcast_x.miner.service import load_wallet
 from bitcast_x.ops import RuntimeHealth, create_ops_app
+from bitcast_x.protocol import MiningProtocol
 from bitcast_x.publishing import DataPublisher
 from bitcast_x.qualification import (
     HistoricalQualificationChecker,
@@ -47,11 +36,6 @@ from bitcast_x.validator.ingestion import (
     ValidatorIngestor,
     signed_client_factory,
 )
-from bitcast_x.validator.legacy import (
-    combine_weights,
-    has_legacy_campaigns,
-    preclaim_feed,
-)
 from bitcast_x.validator.preview import PreviewStore, PreviewXProvider
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
@@ -61,6 +45,18 @@ from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import DesearchProvider
 
 LOGGER = logging.getLogger(__name__)
+
+
+def ensure_supported_campaigns(feed: CampaignFeed) -> None:
+    """Reject retired campaign modes before calculating or publishing any rewards."""
+
+    unsupported = sorted(
+        campaign.access.campaign_id
+        for campaign in feed.campaigns
+        if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2
+    )
+    if unsupported:
+        raise ProtocolError("legacy campaign processing is retired: " + ", ".join(unsupported))
 
 
 def ensure_production_outputs_configured(settings: Settings) -> None:
@@ -150,9 +146,6 @@ class ValidatorService:
         data_publisher: DataPublisher | None = None
         brief_filter: LlmBriefFilter | None = None
         preview_store: PreviewStore | None = None
-        legacy_pricing: LegacyPricingService | None = None
-        legacy_collector: LegacyConnectionCollector | None = None
-        legacy_tweet_store: LegacyTweetStore | None = None
         ops_server: uvicorn.Server | None = None
         ops_task: asyncio.Task[None] | None = None
         health = RuntimeHealth.create()
@@ -206,12 +199,7 @@ class ValidatorService:
             preview_reconciler: CampaignReconciler | None = None
             reward_coordinator: RewardCoordinator | None = None
             preview_reward_coordinator: RewardCoordinator | None = None
-            legacy_engine: LegacyAttributionEngine | None = None
-            legacy_rewards: LegacyRewardCoordinator | None = None
-            legacy_cadence = LegacyCadence()
-            cached_legacy_weights: dict[int, float] | None = None
             result_publisher: ShadowResultPublisher | None = None
-            legacy_result_publisher: LegacyResultPublisher | None = None
             qualification_schedule: QualificationSchedule | None = None
             if (
                 self.settings.campaign_feed_url is not None
@@ -277,48 +265,6 @@ class ValidatorService:
                         max_concurrency=self.settings.validator_preview_max_concurrency,
                     ),
                 )
-                connection_path = (
-                    self.settings.legacy_connections_path
-                    or self.settings.state_dir / "connections.db"
-                )
-                snapshot_path = (
-                    self.settings.legacy_snapshots_path
-                    or self.settings.state_dir / "reward_snapshots"
-                )
-                tweet_store_path = (
-                    self.settings.legacy_tweet_store_path
-                    or self.settings.state_dir / "legacy_tweet_store"
-                )
-                legacy_connections = ConnectionStore(connection_path)
-                legacy_tweet_store = LegacyTweetStore(tweet_store_path)
-                legacy_scorer = AttributionScorer(
-                    x_provider,
-                    brief_filter=brief_filter,
-                    max_concurrency=self.settings.validator_max_concurrency,
-                    engagement_merger=legacy_tweet_store.merge_engagements,
-                )
-                legacy_engine = LegacyAttributionEngine(
-                    legacy_connections,
-                    x_provider,
-                    legacy_scorer,
-                    legacy_tweet_store,
-                    nocode_uid=self.settings.legacy_nocode_uid,
-                )
-                legacy_collector = LegacyConnectionCollector(
-                    legacy_connections,
-                    x_provider,
-                    connection_tweet_ids=tuple(
-                        item.strip()
-                        for item in self.settings.legacy_connection_tweet_ids.split(",")
-                        if item.strip()
-                    ),
-                    fasttrack_url=self.settings.legacy_fasttrack_url,
-                    tweet_merger=legacy_tweet_store.merge,
-                    timeout=self.settings.request_timeout_seconds,
-                )
-                legacy_snapshot_store = LegacySnapshotStore(snapshot_path)
-                legacy_rewards = LegacyRewardCoordinator(legacy_snapshot_store)
-                legacy_pricing = LegacyPricingService(chain)
                 if self.settings.enable_data_publish:
                     data_publisher = DataPublisher(
                         wallet,
@@ -331,13 +277,6 @@ class ValidatorService:
                             f"{self.settings.data_client_url.rstrip('/')}/api/v1/brief-tweets"
                         ),
                         preview_store=preview_store,
-                    )
-                    legacy_result_publisher = LegacyResultPublisher(
-                        legacy_connections,
-                        data_publisher,
-                        data_client_url=self.settings.data_client_url,
-                        snapshots=legacy_snapshot_store,
-                        nocode_uid=self.settings.legacy_nocode_uid,
                     )
             else:
                 LOGGER.warning(
@@ -353,13 +292,11 @@ class ValidatorService:
                     outcomes = await ingestor.reconcile_all(endpoints, block=finalized_block)
                     attributions = []
                     if campaign_client is not None and reconciler is not None:
-                        complete_feed = await campaign_client.fetch()
-                        bound_campaigns = store.bind_campaign_protocols(complete_feed.campaigns)
-                        complete_feed = complete_feed.model_copy(
-                            update={"campaigns": bound_campaigns}
-                        )
-                        legacy_active = has_legacy_campaigns(complete_feed)
-                        feed = preclaim_feed(complete_feed)
+                        feed = await campaign_client.fetch()
+                        ensure_supported_campaigns(feed)
+                        bound_campaigns = store.bind_campaign_protocols(feed.campaigns)
+                        feed = feed.model_copy(update={"campaigns": bound_campaigns})
+                        ensure_supported_campaigns(feed)
                         if qualification_schedule is None:
                             raise ProtocolError("qualification schedule is unavailable")
                         ensure_preclaim_economics_qualified(
@@ -452,7 +389,6 @@ class ValidatorService:
                                     block=finalized_block,
                                 )
                             )
-                            preclaim_weights_complete = not pending_reward_campaigns
                             if pending_reward_campaigns:
                                 LOGGER.warning(
                                     "weight update deferred; final campaign economics "
@@ -461,104 +397,11 @@ class ValidatorService:
                                 )
                             else:
                                 submission_weights = productive_weights
-                                if not legacy_active:
-                                    store.persist_shadow_weights(
-                                        finalized_block,
-                                        feed.snapshot_id,
-                                        productive_weights,
-                                    )
-                            if legacy_active:
-                                if (
-                                    legacy_engine is None
-                                    or legacy_rewards is None
-                                    or legacy_pricing is None
-                                ):
-                                    raise ProtocolError("local legacy engine is unavailable")
-                                legacy_engine.validate_state()
-                                if legacy_collector is None:
-                                    raise ProtocolError(
-                                        "legacy connection collector is unavailable"
-                                    )
-                                if legacy_cadence.fast_track_due():
-                                    changed = await legacy_collector.collect_fasttrack(
-                                        complete_feed
-                                    )
-                                    LOGGER.info("legacy fast-track intake changed=%s", changed)
-                                if legacy_cadence.scoring_due():
-                                    legacy_scoring_feed = legacy_rewards.scoring_feed(complete_feed)
-                                    skipped_frozen = len(complete_feed.campaigns) - len(
-                                        legacy_scoring_feed.campaigns
-                                    )
-                                    if skipped_frozen:
-                                        LOGGER.info(
-                                            "skipping frozen legacy campaign scoring count=%s",
-                                            skipped_frozen,
-                                        )
-                                    legacy_scored = await legacy_engine.score_feed(
-                                        legacy_scoring_feed,
-                                        block=finalized_block,
-                                        hotkey_to_uid=hotkey_to_uid,
-                                    )
-                                    pricing = await legacy_pricing.fetch(block=finalized_block)
-                                    legacy_weights, legacy_floors = legacy_rewards.calculate(
-                                        complete_feed,
-                                        legacy_scored,
-                                        block=finalized_block,
-                                        hotkey_to_uid=hotkey_to_uid,
-                                        uids=uids,
-                                        pricing=pricing,
-                                    )
-                                    legacy_connections.activate_referrals(
-                                        {
-                                            item.tweet.author
-                                            for item in legacy_scored
-                                            if any(
-                                                reward.tweet_id == item.tweet.tweet_id
-                                                for reward in legacy_floors
-                                            )
-                                        }
-                                    )
-                                    account_to_uid = legacy_connections.resolve_uids(
-                                        hotkey_to_uid,
-                                        nocode_uid=self.settings.legacy_nocode_uid,
-                                    )
-                                    cached_legacy_weights = legacy_rewards.apply_referrals(
-                                        legacy_weights,
-                                        legacy_connections.due_referrals(datetime.now(UTC).date()),
-                                        account_to_uid,
-                                        daily_usd=pricing.daily_miner_usd,
-                                    )
-                                    if legacy_result_publisher is not None:
-                                        await legacy_result_publisher.publish(
-                                            complete_feed,
-                                            legacy_scored,
-                                            legacy_floors,
-                                            block=finalized_block,
-                                            hotkey_to_uid=hotkey_to_uid,
-                                            pricing=pricing,
-                                        )
-                                combined_weights = combine_weights(
-                                    cached_legacy_weights or {0: 1.0},
-                                    productive_weights,
-                                    uids=uids,
-                                )
-                                LOGGER.info(
-                                    "combined legacy and preclaim weights "
-                                    "block=%s legacy_burn=%s productive_miners=%s",
+                                store.persist_shadow_weights(
                                     finalized_block,
-                                    (cached_legacy_weights or {0: 1.0}).get(0, 0.0),
-                                    sum(
-                                        uid != 0 and weight > 0
-                                        for uid, weight in productive_weights.items()
-                                    ),
+                                    feed.snapshot_id,
+                                    productive_weights,
                                 )
-                                if preclaim_weights_complete:
-                                    store.persist_shadow_weights(
-                                        finalized_block,
-                                        complete_feed.snapshot_id,
-                                        combined_weights,
-                                    )
-                                    submission_weights = combined_weights
                             if result_publisher is not None:
                                 await result_publisher.publish(
                                     feed,
@@ -633,11 +476,5 @@ class ValidatorService:
                 await brief_filter.close()
             if preview_store is not None:
                 preview_store.close()
-            if legacy_pricing is not None:
-                await legacy_pricing.close()
-            if legacy_collector is not None:
-                await legacy_collector.close()
-            if legacy_tweet_store is not None:
-                legacy_tweet_store.close()
             await chain.close()
             await shutdown_loki_logging()

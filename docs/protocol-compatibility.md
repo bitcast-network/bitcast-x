@@ -63,12 +63,9 @@ strings are consensus-visible contracts.
 - Miners retain `/v2/batches` as a position-free compatibility endpoint during the v3 overlap. New
   validators use `/v3/batches`; miner-reported positions are untrusted hints and must match the
   exact finalized extrinsic and on-chain envelope before a cursor advances.
-- During the legacy campaign overlap, v3 calculates `legacy_connection` locally from the frozen v2
-  connection and reward-snapshot state. Validators preserve its non-burn allocation and distribute
-  only UID 0 excess across productive `preclaim_v2` miners, or routes it to temporary legacy
-  treasury UID 155 when none are productive. State, evidence, pricing, or metagraph
-  validation failure must preserve prior authoritative output rather than substitute a partial
-  vector.
+- `legacy_connection` campaign execution is retired after its final emission window ended on
+  2026-09-01. Historical contracts remain readable, but a live legacy campaign fails the validator
+  cycle closed. Preclaim batch history and transport compatibility are unaffected.
 - Removing a version requires published notice longer than the maximum campaign plus retention
   window and evidence that no live campaign references it.
 
