@@ -1,6 +1,7 @@
 """Normalized X data boundary and async Desearch implementation."""
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
@@ -8,6 +9,12 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _RETRYABLE = {408, 429, 500, 502, 503, 504}
+
+# Desearch currently answers 500 (a retryable status) for tweets that no longer
+# exist on X. Remember exhausted failures for a TTL so dead IDs cost one probe
+# per TTL window instead of full retry storms on every encounter.
+_NEGATIVE_TTL_SECONDS = 6 * 3600
+_NEGATIVE_CACHE_MAX = 4096
 
 
 class Tweet(BaseModel):
@@ -110,6 +117,17 @@ class DesearchProvider:
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(trust_env=False)
         self._headers = {"Authorization": api_key.strip()}
+        # tweet_id -> monotonic expiry of the negative verdict.
+        self._negative: dict[str, float] = {}
+
+    @staticmethod
+    def _prune_negative(cache: dict[str, float], now: float) -> None:
+        """Drop expired entries and keep the cache bounded."""
+
+        for tweet_id in [key for key, expiry in cache.items() if expiry <= now]:
+            del cache[tweet_id]
+        while len(cache) > _NEGATIVE_CACHE_MAX:
+            cache.pop(next(iter(cache)))
 
     async def close(self) -> None:
         """Close an internally owned HTTP pool."""
@@ -119,6 +137,13 @@ class DesearchProvider:
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         """Fetch one exact post, retrying only transport and transient server failures."""
+
+        unavailable = TweetFetch(tweet=None, provider_available=False)
+        now = time.monotonic()
+        self._prune_negative(self._negative, now)
+        cached_expiry = self._negative.get(tweet_id)
+        if cached_expiry is not None:
+            return unavailable
 
         for attempt in range(self._attempts):
             try:
@@ -135,7 +160,9 @@ class DesearchProvider:
                 continue
             if response.status_code in _RETRYABLE:
                 if attempt + 1 == self._attempts:
-                    return TweetFetch(tweet=None, provider_available=False)
+                    self._negative[tweet_id] = now + _NEGATIVE_TTL_SECONDS
+                    self._prune_negative(self._negative, now)
+                    return unavailable
                 await asyncio.sleep(self._retry_delay * (2**attempt))
                 continue
             if response.status_code == 404:

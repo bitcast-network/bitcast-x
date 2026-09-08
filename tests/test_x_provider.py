@@ -1,5 +1,6 @@
 """Tests for independent normalized X evidence fetching."""
 
+import time
 from datetime import UTC, datetime
 
 import httpx
@@ -119,6 +120,70 @@ async def test_404_is_authoritative_absence_but_429_is_unavailable() -> None:
 
     assert missing.provider_available is True and missing.tweet is None
     assert unavailable.provider_available is False and unavailable.tweet is None
+
+
+@pytest.mark.asyncio
+async def test_exhausted_retryable_failure_is_cached_for_ttl() -> None:
+    requests: list[str] = []
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        requests.append("hit")
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = DesearchProvider("secret", client=client, attempts=3, retry_delay=0)
+    try:
+        first = await provider.fetch_tweet_by_id("123")
+        second = await provider.fetch_tweet_by_id("123")
+    finally:
+        await client.aclose()
+
+    assert first.provider_available is False and first.tweet is None
+    assert second == first
+    assert len(requests) == 3  # one full retry cycle, then served from cache
+
+
+@pytest.mark.asyncio
+async def test_negative_cache_expires_and_success_is_not_cached() -> None:
+    statuses = [500, 200]
+    requests: list[int] = []
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        requests.append(0)
+        return httpx.Response(statuses.pop(0)) if statuses else httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = DesearchProvider("secret", client=client, attempts=2, retry_delay=0)
+    try:
+        first = await provider.fetch_tweet_by_id("777")  # real fetch: 500, 500 -> cached
+        provider._negative["777"] = time.monotonic() + 3600  # live entry
+        second = await provider.fetch_tweet_by_id("777")  # served from cache
+        provider._negative["777"] = 0.0  # expired entry
+        third = await provider.fetch_tweet_by_id("777")  # real fetch -> success, empty dict
+    finally:
+        await client.aclose()
+
+    assert first.provider_available is False
+    assert second.provider_available is False
+    assert third.provider_available is True and third.tweet is None  # empty payload = absence
+    assert "777" not in provider._negative  # absence is not a negative-cacheable verdict
+    assert len(requests) == 3  # 2 + 0 + 1
+
+
+@pytest.mark.asyncio
+async def test_negative_cache_is_bounded() -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = DesearchProvider("secret", client=client, attempts=1)
+    try:
+        for index in range(5000):
+            await provider.fetch_tweet_by_id(str(index))
+    finally:
+        await client.aclose()
+
+    assert len(provider._negative) <= 4096
 
 
 @pytest.mark.asyncio
