@@ -1,5 +1,6 @@
 """Unit tests for the narrow Bittensor v11 chain adapter."""
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -9,8 +10,15 @@ import bittensor as bt
 import pytest
 
 from bitcast_x.chain import BittensorChain
-from bitcast_x.errors import ChainOperationError
-from bitcast_x.protocol import CommitmentEnvelope
+from bitcast_x.errors import ChainOperationError, ProtocolError
+from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
+from commitment_fixture import (
+    INCIDENT_EXTRINSIC_INDEX,
+    INCIDENT_HOTKEY,
+    INCIDENT_PAYLOAD_HEX,
+    FixtureClient,
+    load_duplicate_commitment_fixture,
+)
 
 
 class FakeClient:
@@ -281,15 +289,187 @@ def commitment_extrinsic(hotkey: str) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_same_miner_overwrite_in_one_block_is_rejected_as_ambiguous() -> None:
-    hotkey = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
-    chain = BittensorChain(
-        BlockClient([commitment_extrinsic(hotkey), commitment_extrinsic(hotkey)], registered=True),
-        netuid=93,
+async def test_identical_successful_overwrite_resolves_last_public_block_position() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    observations = await chain.commitments_in_block(fixture["block"])
+
+    matching = [item for item in observations if item.hotkey == INCIDENT_HOTKEY]
+    assert len(matching) == 1
+    assert matching[0].extrinsic_index == INCIDENT_EXTRINSIC_INDEX
+    assert matching[0].envelope.encode().hex() == INCIDENT_PAYLOAD_HEX
+    positioned = await chain.commitment_at_position(
+        INCIDENT_HOTKEY,
+        CommitmentPosition(block=fixture["block"], extrinsic_index=INCIDENT_EXTRINSIC_INDEX),
+    )
+    assert positioned == matching[0]
+    with pytest.raises(ProtocolError, match="claimed position"):
+        await chain.commitment_at_position(
+            INCIDENT_HOTKEY,
+            CommitmentPosition(block=fixture["block"], extrinsic_index=10),
+        )
+
+
+def _system_event(fixture: dict[str, Any], index: int) -> dict[str, Any]:
+    return next(
+        event
+        for event in fixture["events"]
+        if event.get("extrinsic_idx") == index
+        and event.get("module_id") == "System"
+        and event.get("event_id") in {"ExtrinsicSuccess", "ExtrinsicFailed"}
     )
 
-    with pytest.raises(ChainOperationError, match="multiple same-miner commitments"):
-        await chain.commitments_in_block(10)
+
+def _remove_system_event(fixture: dict[str, Any], index: int) -> None:
+    fixture["events"] = [
+        event
+        for event in fixture["events"]
+        if not (event.get("extrinsic_idx") == index and event.get("module_id") == "System")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_duplicate_call_is_ignored_before_payload_comparison() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    failed = _system_event(fixture, 10)
+    failed["event_id"] = "ExtrinsicFailed"
+    failed["event"]["event_id"] = "ExtrinsicFailed"
+    fixture["extrinsics"][10]["call"]["call_args"][1]["value"]["fields"] = [{"Raw1": "0xff"}]
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    observations = await chain.commitments_in_block(fixture["block"])
+
+    assert [(item.hotkey, item.extrinsic_index) for item in observations] == [
+        (INCIDENT_HOTKEY, INCIDENT_EXTRINSIC_INDEX)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_only_failed_commitment_call_is_not_observed() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    fixture["extrinsics"][10] = {"call": {"call_module": "Timestamp", "call_function": "set"}}
+    _remove_system_event(fixture, 10)
+    failed = _system_event(fixture, 11)
+    failed["event_id"] = "ExtrinsicFailed"
+    failed["event"]["event_id"] = "ExtrinsicFailed"
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    assert await chain.commitments_in_block(fixture["block"]) == []
+
+
+@pytest.mark.asyncio
+async def test_conflicting_successful_payloads_are_rejected() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    fixture["extrinsics"][10]["call"]["call_args"][1]["value"]["fields"] = [{"Raw1": "0xff"}]
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    with pytest.raises(ChainOperationError, match="successful commitments conflict"):
+        await chain.commitments_in_block(fixture["block"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_missing_or_malformed_dispatch_evidence_is_rejected(malformed: bool) -> None:
+    fixture = load_duplicate_commitment_fixture()
+    event = _system_event(fixture, 10)
+    if malformed:
+        event["extrinsic_idx"] = "not-an-index"
+    else:
+        _remove_system_event(fixture, 10)
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    with pytest.raises(ChainOperationError, match="dispatch outcome is unavailable"):
+        await chain.commitments_in_block(fixture["block"])
+
+
+@pytest.mark.asyncio
+async def test_contradictory_dispatch_evidence_is_rejected() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    fixture["extrinsics"][10] = {"call": {"call_module": "Timestamp", "call_function": "set"}}
+    _remove_system_event(fixture, 10)
+    failed = deepcopy(_system_event(fixture, 11))
+    failed["event_id"] = "ExtrinsicFailed"
+    failed["event"]["event_id"] = "ExtrinsicFailed"
+    fixture["events"].append(failed)
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    with pytest.raises(ChainOperationError, match="dispatch outcome is contradictory"):
+        await chain.commitments_in_block(fixture["block"])
+
+
+@pytest.mark.asyncio
+async def test_contradictory_flat_and_nested_event_identity_is_rejected() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    event = _system_event(fixture, 10)
+    event["event"]["event_id"] = "ExtrinsicFailed"
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    with pytest.raises(ChainOperationError, match="event identity is contradictory"):
+        await chain.commitments_in_block(fixture["block"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatch", ["block", "bytes"])
+async def test_pinned_storage_mismatch_is_rejected(mismatch: str) -> None:
+    fixture = load_duplicate_commitment_fixture()
+    stored = fixture["storage"]
+    if mismatch == "block":
+        stored["block"] = fixture["block"] - 1
+    else:
+        stored["fields"] = [{"Raw1": "0xff"}]
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    with pytest.raises(ChainOperationError, match=f"storage {mismatch} mismatch"):
+        await chain.commitments_in_block(fixture["block"])
+
+
+@pytest.mark.asyncio
+async def test_normal_single_success_is_preserved() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    fixture["extrinsics"][10] = {"call": {"call_module": "Timestamp", "call_function": "set"}}
+    _remove_system_event(fixture, 10)
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    observations = await chain.commitments_in_block(fixture["block"])
+
+    assert [(item.hotkey, item.extrinsic_index) for item in observations] == [
+        (INCIDENT_HOTKEY, INCIDENT_EXTRINSIC_INDEX)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("unrelated_hotkey", "unrelated_netuid"),
+    [
+        ("5GBjoKMB44CHcTeYhbpk2TNM9pG1G1rfs9TeSMCgxS6R9KUU", 93),
+        (INCIDENT_HOTKEY, 123),
+    ],
+)
+async def test_claimed_position_ignores_synthetic_unrelated_calls(
+    unrelated_hotkey: str, unrelated_netuid: int
+) -> None:
+    fixture = load_duplicate_commitment_fixture()
+    fixture["extrinsics"][9] = {
+        "address": unrelated_hotkey,
+        "call": {
+            "call_module": "Commitments",
+            "call_function": "set_commitment",
+            "call_args": [
+                {"name": "netuid", "value": unrelated_netuid},
+                {"name": "info", "value": {"fields": [{"Raw1": "0xff"}]}},
+            ],
+        },
+    }
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+
+    observation = await chain.commitment_at_position(
+        INCIDENT_HOTKEY,
+        CommitmentPosition(block=fixture["block"], extrinsic_index=INCIDENT_EXTRINSIC_INDEX),
+    )
+
+    assert observation.hotkey == INCIDENT_HOTKEY
+    assert observation.extrinsic_index == INCIDENT_EXTRINSIC_INDEX
 
 
 @pytest.mark.asyncio

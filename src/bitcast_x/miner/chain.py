@@ -72,18 +72,13 @@ class BittensorCommitmentSubmitter:
         )
 
     async def _find_extrinsic_index(self, block: int, stored: bytes) -> int:
-        info = await self._chain.block_info(block)
-        if info is None:
-            raise ChainOperationError(f"commitment block {block} is unavailable")
-        matches: list[int] = []
-        for index, extrinsic in enumerate(info.extrinsics):
-            if _is_own_commitment(extrinsic, self.hotkey, self._chain.netuid, stored):
-                matches.append(index)
+        matches = await self._chain.resolve_commitments_in_block(block, hotkey=self.hotkey)
+        matches = [item for item in matches if item.payload == stored]
         if len(matches) != 1:
             raise ChainOperationError(
                 f"expected one matching commitment extrinsic at block {block}, found {len(matches)}"
             )
-        return matches[0]
+        return matches[0].extrinsic_index
 
 
 def _raw_commitment_bytes(fields: list[Any]) -> bytes:
@@ -100,32 +95,3 @@ def _raw_commitment_bytes(fields: list[Any]) -> bytes:
     if not raw:
         raise ChainOperationError("commitment does not contain raw protocol bytes")
     return bytes(raw)
-
-
-def _is_own_commitment(
-    extrinsic: Any,
-    hotkey: str,
-    netuid: int,
-    stored: bytes,
-) -> bool:
-    if not isinstance(extrinsic, Mapping) or str(extrinsic.get("address")) != hotkey:
-        return False
-    call = extrinsic.get("call")
-    if not isinstance(call, Mapping):
-        return False
-    if call.get("call_module") != "Commitments" or call.get("call_function") != "set_commitment":
-        return False
-    arguments = call.get("call_args")
-    if not isinstance(arguments, list):
-        return False
-    by_name = {
-        str(argument.get("name")): argument.get("value")
-        for argument in arguments
-        if isinstance(argument, Mapping)
-    }
-    raw_netuid = by_name.get("netuid")
-    if not isinstance(raw_netuid, (int, str)) or int(raw_netuid) != netuid:
-        return False
-    info = by_name.get("info")
-    fields = info.get("fields") if isinstance(info, Mapping) else None
-    return isinstance(fields, list) and _raw_commitment_bytes(fields) == stored

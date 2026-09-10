@@ -8,6 +8,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from bitcast_x.campaigns import CampaignRecord
+from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner import BatchPolicy, FinalizedCommitment, MinerEngine, MinerSdk, MinerStore
 from bitcast_x.miner.api import create_control_app
 from bitcast_x.miner.control import MinerControlService
@@ -44,6 +45,11 @@ class SlowSubmitter(Submitter):
     async def submit(self, envelope: CommitmentEnvelope) -> FinalizedCommitment:
         await asyncio.sleep(1)
         return await super().submit(envelope)
+
+
+class FailingSubmitter(Submitter):
+    async def submit(self, _envelope: CommitmentEnvelope) -> FinalizedCommitment:
+        raise ChainOperationError("finalized commitment outcome is unavailable")
 
 
 class LateSubmitter(Submitter):
@@ -687,6 +693,52 @@ def test_claim_timeout_returns_durable_pending_resource(tmp_path: Path) -> None:
     assert claim["commitment"]["status"] == "queued"
     assert claim["usability"]["status"] == "pending"
     assert claim["usability"]["safe_to_post"] is False
+
+
+def test_chain_failure_after_claim_persistence_is_retryable_and_deduplicated(
+    tmp_path: Path,
+) -> None:
+    web = build_client(tmp_path, submitter=FailingSubmitter())
+    request = {
+        "campaign_id": "campaign",
+        "creator_x_id": "123",
+        "draft": "Exact draft",
+        "external_id": "creator-claim-chain-failure",
+    }
+
+    first = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-chain-failure"},
+        json=request,
+    )
+
+    assert first.status_code == 503
+    assert first.json() == {
+        "error": {
+            "code": "chain_operation_unavailable",
+            "message": "Chain operation outcome is unavailable.",
+            "retryable": True,
+        }
+    }
+    persisted = web.get(
+        "/api/v1/claims?campaign_id=campaign&creator_x_id=123"
+        "&external_id=creator-claim-chain-failure"
+    ).json()["items"]
+    assert len(persisted) == 1
+    claim_id = persisted[0]["claim_id"]
+
+    replay = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-chain-failure"},
+        json=request,
+    )
+
+    assert replay.status_code == 503
+    after_replay = web.get(
+        "/api/v1/claims?campaign_id=campaign&creator_x_id=123"
+        "&external_id=creator-claim-chain-failure"
+    ).json()["items"]
+    assert [item["claim_id"] for item in after_replay] == [claim_id]
 
 
 def test_unqualified_miner_cannot_create_operations(tmp_path: Path) -> None:
