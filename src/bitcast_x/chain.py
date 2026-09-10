@@ -37,6 +37,17 @@ class ChainCommitment:
     envelope: OnChainEnvelope
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedCommitment:
+    """One successful direct commitment reconciled with finalized storage."""
+
+    hotkey: str
+    block: int
+    extrinsic_index: int
+    timestamp: datetime
+    payload: bytes
+
+
 class BittensorChain:
     """Own all generated Bittensor reads and calls used by the application."""
 
@@ -104,42 +115,116 @@ class BittensorChain:
     async def commitments_in_block(self, block: int) -> list[ChainCommitment]:
         """Read protocol commitments from one finalized block and verify storage bytes."""
 
-        info = await self.block_info(block)
-        if info is None:
-            raise ChainOperationError(f"finalized block {block} is unavailable")
-        candidates: dict[str, list[int]] = defaultdict(list)
-        for index, extrinsic in enumerate(info.extrinsics):
-            hotkey = _commitment_signer(extrinsic, self.netuid)
-            if hotkey is not None:
-                candidates[hotkey].append(index)
-        ambiguous = sorted(hotkey for hotkey, indexes in candidates.items() if len(indexes) > 1)
-        if ambiguous:
-            raise ChainOperationError(
-                f"multiple same-miner commitments in block {block}: {', '.join(ambiguous)}"
+        return [
+            ChainCommitment(
+                hotkey=item.hotkey,
+                block=item.block,
+                extrinsic_index=item.extrinsic_index,
+                timestamp=item.timestamp,
+                envelope=decode_envelope(item.payload),
             )
+            for item in await self.resolve_commitments_in_block(block, require_registered=True)
+        ]
+
+    async def resolve_commitments_in_block(
+        self,
+        block: int,
+        *,
+        hotkey: str | None = None,
+        require_registered: bool = False,
+    ) -> list[ResolvedCommitment]:
+        """Resolve successful direct calls against events and storage at one block."""
+
+        info = await self.block_info(block)
+        extrinsics = getattr(info, "extrinsics", None)
+        timestamp = getattr(info, "timestamp", None)
+        if info is None or not isinstance(extrinsics, list) or not isinstance(timestamp, datetime):
+            raise ChainOperationError(f"finalized block {block} is unavailable")
+
+        candidates: dict[str, list[tuple[int, Any]]] = defaultdict(list)
+        for index, extrinsic in enumerate(extrinsics):
+            candidate = _commitment_call_fields(extrinsic, self.netuid)
+            if candidate is None:
+                continue
+            signer, fields = candidate
+            if hotkey is None or signer == hotkey:
+                candidates[signer].append((index, fields))
         if not candidates:
             return []
-        graph = await self.metagraph(block=block)
-        observations: list[ChainCommitment] = []
-        for hotkey, indexes in candidates.items():
-            if graph is None or graph.by_hotkey(hotkey) is None:
+
+        client = await self._client.at(block)
+        if require_registered:
+            graph = await client.subnets.metagraph(netuid=self.netuid)
+            if graph is None:
+                raise ChainOperationError(f"finalized metagraph {block} is unavailable")
+            candidates = {
+                signer: calls
+                for signer, calls in candidates.items()
+                if graph.by_hotkey(signer) is not None
+            }
+            if not candidates:
+                return []
+
+        relevant_indexes = {index for calls in candidates.values() for index, _fields in calls}
+        events = await client.query(bt.storage.System.Events)
+        outcomes = _dispatch_outcomes(events, relevant_indexes)
+        resolved: list[ResolvedCommitment] = []
+        for signer, calls in candidates.items():
+            successful: list[tuple[int, bytes]] = []
+            for index, fields in calls:
+                outcome = outcomes.get(index, set())
+                if not outcome:
+                    raise ChainOperationError(
+                        f"commitment dispatch outcome is unavailable at block {block} index {index}"
+                    )
+                if len(outcome) != 1:
+                    raise ChainOperationError(
+                        "commitment dispatch outcome is contradictory "
+                        f"at block {block} index {index}"
+                    )
+                if "success" in outcome:
+                    successful.append((index, _raw_fields(fields)))
+            if not successful:
                 continue
-            stored = await self.commitment(hotkey, block=block)
+
+            payloads = {payload for _index, payload in successful}
+            if len(payloads) != 1:
+                raise ChainOperationError(
+                    f"successful commitments conflict for {signer} at block {block}"
+                )
+            stored = await client.identity.commitment(
+                netuid=self.netuid,
+                hotkey_ss58=signer,
+            )
             if stored is None:
                 raise ChainOperationError(
-                    f"commitment storage missing for {hotkey} at block {block}"
+                    f"commitment storage missing for {signer} at block {block}"
                 )
-            raw = _raw_fields(stored.fields)
-            observations.append(
-                ChainCommitment(
-                    hotkey=hotkey,
+            try:
+                stored_block = int(stored.block)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ChainOperationError(
+                    f"commitment storage block mismatch for {signer} at block {block}"
+                ) from exc
+            if stored_block != block:
+                raise ChainOperationError(
+                    f"commitment storage block mismatch for {signer} at block {block}"
+                )
+            payload = payloads.pop()
+            if _raw_fields(getattr(stored, "fields", None)) != payload:
+                raise ChainOperationError(
+                    f"commitment storage bytes mismatch for {signer} at block {block}"
+                )
+            resolved.append(
+                ResolvedCommitment(
+                    hotkey=signer,
                     block=block,
-                    extrinsic_index=indexes[0],
-                    timestamp=info.timestamp,
-                    envelope=decode_envelope(raw),
+                    extrinsic_index=successful[-1][0],
+                    timestamp=timestamp,
+                    payload=payload,
                 )
             )
-        return observations
+        return resolved
 
     async def commitment_at_position(
         self,
@@ -148,17 +233,24 @@ class BittensorChain:
     ) -> ChainCommitment:
         """Verify and return one miner commitment at its claimed finalized position."""
 
-        observations = await self.commitments_in_block(position.block)
-        matches = [
-            item
-            for item in observations
-            if item.hotkey == hotkey and item.extrinsic_index == position.extrinsic_index
-        ]
+        resolved = await self.resolve_commitments_in_block(
+            position.block,
+            hotkey=hotkey,
+            require_registered=True,
+        )
+        matches = [item for item in resolved if item.extrinsic_index == position.extrinsic_index]
         if len(matches) != 1:
             raise ProtocolError(
                 "claimed position does not contain exactly one matching miner commitment"
             )
-        return matches[0]
+        item = matches[0]
+        return ChainCommitment(
+            hotkey=item.hotkey,
+            block=item.block,
+            extrinsic_index=item.extrinsic_index,
+            timestamp=item.timestamp,
+            envelope=decode_envelope(item.payload),
+        )
 
     async def latest_commitment_envelope(
         self,
@@ -331,7 +423,7 @@ def _is_stale_nonce_failure(result: Any) -> bool:
     )
 
 
-def _commitment_signer(extrinsic: Any, netuid: int) -> str | None:
+def _commitment_call_fields(extrinsic: Any, netuid: int) -> tuple[str, Any] | None:
     if not isinstance(extrinsic, Mapping):
         return None
     call = extrinsic.get("call")
@@ -348,13 +440,60 @@ def _commitment_signer(extrinsic: Any, netuid: int) -> str | None:
         if isinstance(argument, Mapping)
     }
     raw_netuid = by_name.get("netuid")
-    if not isinstance(raw_netuid, (int, str)) or int(raw_netuid) != netuid:
+    if not isinstance(raw_netuid, (int, str)):
+        return None
+    try:
+        if int(raw_netuid) != netuid:
+            return None
+    except ValueError:
         return None
     address = extrinsic.get("address")
-    return str(address) if address else None
+    if not address:
+        return None
+    info = by_name.get("info")
+    fields = info.get("fields") if isinstance(info, Mapping) else None
+    return str(address), fields
 
 
-def _raw_fields(fields: list[Any]) -> bytes:
+def _dispatch_outcomes(events: Any, relevant_indexes: set[int]) -> dict[int, set[str]]:
+    if not isinstance(events, (list, tuple)):
+        raise ChainOperationError("finalized block events are unavailable")
+    outcomes: dict[int, set[str]] = defaultdict(set)
+    for record in events:
+        if not isinstance(record, Mapping) or record.get("phase") != "ApplyExtrinsic":
+            continue
+        raw_index = record.get("extrinsic_idx")
+        if not isinstance(raw_index, (int, str)):
+            continue
+        try:
+            index = int(raw_index)
+        except ValueError:
+            continue
+        if index not in relevant_indexes:
+            continue
+
+        event = record.get("event")
+        if not isinstance(event, Mapping):
+            continue
+        flat_identity = (record.get("module_id"), record.get("event_id"))
+        nested_identity = (event.get("module_id"), event.get("event_id"))
+        if flat_identity != nested_identity:
+            raise ChainOperationError(
+                f"commitment event identity is contradictory at extrinsic index {index}"
+            )
+        module_id, event_id = flat_identity
+        if module_id != "System":
+            continue
+        if event_id == "ExtrinsicSuccess":
+            outcomes[index].add("success")
+        elif event_id == "ExtrinsicFailed":
+            outcomes[index].add("failure")
+    return outcomes
+
+
+def _raw_fields(fields: Any) -> bytes:
+    if not isinstance(fields, list):
+        raise ChainOperationError("commitment does not contain raw protocol bytes")
     raw = bytearray()
     for field in fields:
         if not isinstance(field, Mapping):

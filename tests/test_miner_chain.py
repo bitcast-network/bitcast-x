@@ -1,13 +1,22 @@
 """Unit tests for the Bittensor v11 miner commitment adapter."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from bitcast_x.chain import BittensorChain
 from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner import BittensorCommitmentSubmitter
-from bitcast_x.protocol import CommitmentEnvelope
+from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
+from commitment_fixture import (
+    INCIDENT_EXTRINSIC_INDEX,
+    INCIDENT_HOTKEY,
+    INCIDENT_PAYLOAD_HEX,
+    FixtureClient,
+    load_duplicate_commitment_fixture,
+)
 
 HOTKEY = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
 
@@ -78,6 +87,16 @@ class FakeChain:
             ]
         )
 
+    async def resolve_commitments_in_block(
+        self,
+        block: int,
+        *,
+        hotkey: str | None = None,
+    ) -> list[Any]:
+        assert block == 42
+        assert hotkey == HOTKEY
+        return [SimpleNamespace(payload=self.envelope.encode(), extrinsic_index=2)]
+
 
 def commitment_extrinsic(envelope: CommitmentEnvelope) -> dict[str, Any]:
     return {
@@ -130,6 +149,25 @@ async def test_recovers_exact_commitment_position_from_finalized_block() -> None
 
 
 @pytest.mark.asyncio
+async def test_latest_uses_shared_duplicate_commitment_resolution() -> None:
+    fixture = load_duplicate_commitment_fixture()
+    chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
+    submitter = BittensorCommitmentSubmitter(
+        chain,
+        FakeWallet(hotkey=FakeHotkey(ss58_address=INCIDENT_HOTKEY)),
+    )
+
+    latest = await submitter.latest()
+
+    assert latest is not None
+    assert latest.position == CommitmentPosition(
+        block=fixture["block"],
+        extrinsic_index=INCIDENT_EXTRINSIC_INDEX,
+    )
+    assert latest.stored_envelope.hex() == INCIDENT_PAYLOAD_HEX
+
+
+@pytest.mark.asyncio
 async def test_submit_rereads_finalized_storage() -> None:
     submitter, _chain, envelope = make_submitter()
 
@@ -147,7 +185,12 @@ async def test_recovery_rejects_missing_matching_extrinsic() -> None:
     async def empty_block(_block: int) -> FakeBlock:
         return FakeBlock(extrinsics=[])
 
+    async def empty_resolution(_block: int, *, hotkey: str | None = None) -> list[Any]:
+        assert hotkey == HOTKEY
+        return []
+
     chain.block_info = empty_block  # type: ignore[method-assign]
+    chain.resolve_commitments_in_block = empty_resolution  # type: ignore[method-assign]
 
     with pytest.raises(ChainOperationError, match="found 0"):
         await submitter.latest()

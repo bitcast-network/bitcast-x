@@ -10,7 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from bitcast_x.errors import BitcastXError
+from bitcast_x.errors import BitcastXError, ChainOperationError
 from bitcast_x.miner.control import MinerControlService
 
 EcosystemFilter = Annotated[list[str] | None, Query()]
@@ -100,6 +100,15 @@ def create_control_app(
 
     @app.exception_handler(BitcastXError)
     async def protocol_error(_request: Request, error: BitcastXError) -> JSONResponse:
+        if isinstance(error, ChainOperationError):
+            return JSONResponse(
+                status_code=503,
+                content=_error(
+                    "chain_operation_unavailable",
+                    "Chain operation outcome is unavailable.",
+                    retryable=True,
+                ),
+            )
         message = str(error)
         code = "invalid_request"
         retryable = False
