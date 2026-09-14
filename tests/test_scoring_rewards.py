@@ -143,6 +143,76 @@ def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
     assert weights[0] == 0.0
 
 
+def test_tail_discount_below_one_shifts_emission_to_leader_and_normalizes() -> None:
+    campaigns = fixture_campaigns()
+
+    discounted, _ = calculate_rewards(
+        campaigns,
+        {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7},
+        [0, 3, 4, 5, 7, 9],
+        tail_discount=0.5,
+    )
+    baseline, _ = calculate_rewards(
+        campaigns,
+        {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7},
+        [0, 3, 4, 5, 7, 9],
+    )
+
+    assert np.isclose(discounted.sum(), 1.0)
+    assert discounted[0] == 0.0
+    # The leader (largest raw floor) strictly gains; every tail miner shrinks.
+    leader = int(np.argmax(baseline))
+    assert discounted[leader] > baseline[leader]
+    for index in range(len(baseline)):
+        if index != leader and baseline[index] > 0:
+            assert discounted[index] < baseline[index]
+
+
+def test_tail_discount_leader_is_largest_floor_regardless_of_uid_order() -> None:
+    campaigns = fixture_campaigns()
+    uids = [0, 3, 4, 5, 7, 9]
+    # miner-a holds the largest floor; remap it from uid 3 to uid 7 so the
+    # leader sits at a different position — the discount must still hit only
+    # the tail, proving selection is floor-based, not position-based.
+    mapping = {"miner-a": 7, "miner-b": 5, "miner-c": 4, "miner-d": 3}
+    flipped, _ = calculate_rewards(campaigns, mapping, uids, tail_discount=0.5)
+    baseline, _ = calculate_rewards(campaigns, mapping, uids)
+    leader_position = uids.index(7)
+    assert flipped[leader_position] > baseline[leader_position]
+    for index in range(len(baseline)):
+        if index != leader_position and baseline[index] > 0:
+            assert flipped[index] < baseline[index]
+
+
+def test_tail_discount_one_is_bit_identical_to_floor_proportions() -> None:
+    campaigns = fixture_campaigns()
+    default_weights, _ = calculate_rewards(
+        campaigns,
+        {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7},
+        [0, 3, 4, 5, 7, 9],
+    )
+    explicit_weights, _ = calculate_rewards(
+        campaigns,
+        {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7},
+        [0, 3, 4, 5, 7, 9],
+        tail_discount=1.0,
+    )
+    assert np.array_equal(default_weights, explicit_weights)
+
+
+def test_tail_discount_single_productive_miner_is_unchanged() -> None:
+    campaigns = fixture_campaigns()
+    uids = [0, 3]
+    weights, _ = calculate_rewards(
+        campaigns,
+        {"miner-a": 3},
+        uids,
+        tail_discount=0.5,
+    )
+    assert np.isclose(weights[uids.index(3)], 1.0)
+    assert weights[uids.index(0)] == 0.0
+
+
 def test_no_productive_content_preserves_all_to_burn_fallback() -> None:
     weights, floors = calculate_rewards([], {}, [0, 1, 2])
 

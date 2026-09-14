@@ -372,8 +372,18 @@ def aggregate_productive_weights(
     tweet_rewards: list[TweetReward],
     hotkey_to_uid: dict[str, int],
     uids: list[int],
+    *,
+    tail_discount: float = 1.0,
 ) -> NDArray[np.float64]:
-    """Allocate all emissions across productive miners in floor proportions."""
+    """Allocate all emissions across productive miners in floor proportions.
+
+    When ``tail_discount`` is below 1.0, every non-leading miner's floor share is
+    multiplied by the discount before renormalization. This deliberately deviates
+    from strict proportionality to shift emission toward the leading operator. The
+    leader is the miner with the largest raw floor sum, so the discount applies to
+    the same operators regardless of uid ordering. ``1.0`` (the default) preserves
+    exact floor-proportional allocation.
+    """
 
     uid_to_index = {uid: index for index, uid in enumerate(uids)}
     floors = np.zeros(len(uids), dtype=np.float64)
@@ -385,7 +395,17 @@ def aggregate_productive_weights(
     productive_total = floors.sum()
     if productive_total <= 0:
         return _burn(uids)
-    return cast(NDArray[np.float64], floors / productive_total)
+    shares = floors / productive_total
+    if tail_discount != 1.0:
+        leader = int(np.argmax(floors))
+        for index in range(len(shares)):
+            if index != leader:
+                shares[index] *= tail_discount
+        discounted_total = shares.sum()
+        if discounted_total <= 0:
+            return _burn(uids)
+        shares = shares / discounted_total
+    return cast(NDArray[np.float64], shares)
 
 
 def _burn(uids: list[int]) -> NDArray[np.float64]:
@@ -400,9 +420,13 @@ def calculate_rewards(
     uids: list[int],
     *,
     committed_tweet_ids: set[str] | None = None,
+    tail_discount: float = 1.0,
 ) -> tuple[NDArray[np.float64], list[TweetReward]]:
     """Run assignment, floor calculation, and approved unlimited multiplier."""
 
     assignments = assign_tweets(campaigns, committed_tweet_ids=committed_tweet_ids)
     floors = calculate_tweet_floors(campaigns, assignments)
-    return aggregate_productive_weights(floors, hotkey_to_uid, uids), floors
+    return (
+        aggregate_productive_weights(floors, hotkey_to_uid, uids, tail_discount=tail_discount),
+        floors,
+    )

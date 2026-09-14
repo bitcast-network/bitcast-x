@@ -75,6 +75,7 @@ class Settings(BaseSettings):
     enable_weight_submission: bool = True
     weight_epoch_blocks: int = Field(default=100, ge=1)
     weight_version_key: int = Field(default=0, ge=0)
+    weight_tail_discount: float = Field(default=1.0, gt=0, le=1)
     data_client_url: str = "https://ingestion.bitcast.network:443"
     ops_host: str = "0.0.0.0"  # noqa: S104 - container health endpoint
     ops_port: int = Field(default=8096, ge=1, le=65535)

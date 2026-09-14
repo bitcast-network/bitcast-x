@@ -256,7 +256,9 @@ class ValidatorService:
                     brief_filter=brief_filter,
                     max_concurrency=self.settings.validator_max_concurrency,
                 )
-                reward_coordinator = RewardCoordinator(store, scorer)
+                reward_coordinator = RewardCoordinator(
+                    store, scorer, tail_discount=self.settings.weight_tail_discount
+                )
                 preview_reward_coordinator = RewardCoordinator(
                     store,
                     AttributionScorer(
@@ -264,6 +266,7 @@ class ValidatorService:
                         brief_filter=brief_filter,
                         max_concurrency=self.settings.validator_preview_max_concurrency,
                     ),
+                    tail_discount=self.settings.weight_tail_discount,
                 )
                 if self.settings.enable_data_publish:
                     data_publisher = DataPublisher(

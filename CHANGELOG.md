@@ -6,6 +6,14 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [3.0.0] - Unreleased
 
+### Added
+
+- Configurable `weight_tail_discount` validator setting (default `1.0` = exact floor-proportional
+  allocation, unchanged). Values below `1.0` multiply every non-leading operator's floor share by
+  the discount before renormalizing, deliberately shifting emission toward the leading operator.
+  The discount applies only to the mechanism-1 weight vector; creator reward floors and payouts
+  are untouched.
+
 ### Breaking changes
 
 - Retire `legacy_connection` campaign execution, connection collection, legacy reward and referral
