@@ -111,10 +111,12 @@ class RewardCoordinator:
         store: ValidatorStore,
         scorer: AttributionScorer,
         *,
+        score_blend: float = 0.0,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self._scorer = scorer
+        self._score_blend = score_blend
         self._now = now or (lambda: datetime.now(UTC))
         self._completed_campaign_ids: frozenset[str] | None = None
         self._featured_evidence_pending_campaign_ids: frozenset[str] = frozenset()
@@ -280,7 +282,12 @@ class RewardCoordinator:
                 "unavailable campaigns=%s",
                 ",".join(sorted(missing_featured_evidence)),
             )
-            vector = aggregate_productive_weights(frozen_floors, hotkey_to_uid, uids)
+            vector = aggregate_productive_weights(
+                frozen_floors,
+                hotkey_to_uid,
+                uids,
+                score_blend=self._score_blend,
+            )
             weights = {uid: float(vector[index]) for index, uid in enumerate(uids)}
             if persist:
                 self.store.persist_shadow_weights(block, feed.snapshot_id, weights)
@@ -326,7 +333,9 @@ class RewardCoordinator:
                 decisions=[item for item in decisions if item.campaign_id == campaign_id],
             )
         floors = frozen_floors + new_floors
-        vector = aggregate_productive_weights(floors, hotkey_to_uid, uids)
+        vector = aggregate_productive_weights(
+            floors, hotkey_to_uid, uids, score_blend=self._score_blend
+        )
         weights = {uid: float(vector[index]) for index, uid in enumerate(uids)}
         if persist:
             self.store.persist_shadow_weights(block, feed.snapshot_id, weights)

@@ -372,20 +372,62 @@ def aggregate_productive_weights(
     tweet_rewards: list[TweetReward],
     hotkey_to_uid: dict[str, int],
     uids: list[int],
+    *,
+    score_blend: float = 0.0,
 ) -> NDArray[np.float64]:
-    """Allocate all emissions across productive miners in floor proportions."""
+    """Allocate emissions across productive miners by floor and score shares.
+
+    Weights are the convex blend of the floor-proportional vector and the
+    deduplicated tweet-score vector: ``1 - score_blend`` weight on floors plus
+    ``score_blend`` weight on unique per-tweet scores. ``0.0`` (the default)
+    preserves exact floor-proportional allocation; ``1.0`` allocates purely on
+    content value, independent of the campaign budget each miner carries. When
+    no positive scores exist the floor vector stands alone, so blended modes
+    never burn productive miners over missing score signal.
+    """
+
+    if not 0.0 <= score_blend <= 1.0:
+        raise ValueError("score_blend must be within [0, 1]")
 
     uid_to_index = {uid: index for index, uid in enumerate(uids)}
     floors = np.zeros(len(uids), dtype=np.float64)
+    scores = np.zeros(len(uids), dtype=np.float64)
+    seen: set[tuple[str, str]] = set()
     for reward in tweet_rewards:
+        # Attribution storage re-rows one (campaign, tweet) match per validator
+        # run; weights must count each match once regardless of scan frequency.
+        key = (reward.campaign_id, reward.tweet_id)
+        if key in seen:
+            continue
+        seen.add(key)
         uid = hotkey_to_uid.get(reward.miner_hotkey)
         index = uid_to_index.get(uid) if uid is not None else None
         if index is not None:
             floors[index] += reward.daily_usd_floor
-    productive_total = floors.sum()
-    if productive_total <= 0:
+            scores[index] += max(reward.score, 0.0)
+    floor_shares = _normalized_shares(floors)
+    score_shares = _normalized_shares(scores)
+    if floor_shares is None and score_shares is None:
         return _burn(uids)
-    return cast(NDArray[np.float64], floors / productive_total)
+    if score_blend <= 0.0 or score_shares is None:
+        if floor_shares is not None:
+            return floor_shares
+        return _burn(uids)
+    floor_component = floor_shares if floor_shares is not None else np.zeros_like(score_shares)
+    blended = (1.0 - score_blend) * floor_component + score_blend * score_shares
+    blended_total = blended.sum()
+    if blended_total <= 0:
+        return _burn(uids)
+    return cast(NDArray[np.float64], blended / blended_total)
+
+
+def _normalized_shares(values: NDArray[np.float64]) -> NDArray[np.float64] | None:
+    """Return values normalized to unit sum, or None when there is no signal."""
+
+    total = values.sum()
+    if total <= 0:
+        return None
+    return cast(NDArray[np.float64], values / total)
 
 
 def _burn(uids: list[int]) -> NDArray[np.float64]:
