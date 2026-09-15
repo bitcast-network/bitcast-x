@@ -6,6 +6,13 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [3.0.0] - Unreleased
 
+### Added
+
+- Configurable `weight_score_blend` validator setting (default `0.0` = exact floor-proportional
+  allocation, unchanged). Higher values shift the mechanism-1 weight vector toward miners'
+  deduplicated tweet-score shares and away from carried campaign floors; `1.0` allocates purely
+  on content value. Creator reward floors, payouts, and the burn fallback are untouched.
+
 ### Breaking changes
 
 - Retire `legacy_connection` campaign execution, connection collection, legacy reward and referral
