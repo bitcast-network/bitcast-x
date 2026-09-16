@@ -8,10 +8,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Added
 
-- Configurable `weight_score_blend` validator setting (default `0.0` = exact floor-proportional
-  allocation, unchanged). Higher values shift the mechanism-1 weight vector toward miners'
-  deduplicated tweet-score shares and away from carried campaign floors; `1.0` allocates purely
-  on content value. Creator reward floors, payouts, and the burn fallback are untouched.
+- Configurable `weight_score_blend` validator setting, allocating the mechanism-1 weight vector
+  between campaign floors and miners' deduplicated tweet-score shares. **The default is `1.0`:
+  allocation is purely on content value**, independent of carried campaign floors. Operators may
+  set a lower value to blend floors back in; creator reward floors, payouts, and the burn fallback
+  are untouched.
 
 ### Breaking changes
 
