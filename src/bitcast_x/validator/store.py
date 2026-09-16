@@ -4,7 +4,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +30,44 @@ if TYPE_CHECKING:
     from bitcast_x.campaigns import CampaignRecord
     from bitcast_x.rewards import RewardDecision, TweetReward
     from bitcast_x.validator.scoring import ScoredAttribution
+
+
+_CAMPAIGN_IDENTITY_FIELDS = ("access",)
+
+
+def _default_finalized_block_provider() -> int:
+    """Fallback chain cursor when no provider is wired: assume scoring is over.
+
+    Bind-time adoption of a pinned campaign is only safe while the campaign's
+    scoring window is still open; a store constructed without a chain cursor
+    (tooling, tests) must therefore keep the conservative post-close behavior.
+    """
+
+    return 2**63 - 1
+
+
+def _campaign_field_diffs(
+    campaign: "CampaignRecord",
+    frozen_campaign: "CampaignRecord",
+) -> list[str]:
+    """Return the field names where one campaign record differs from another."""
+
+    changed_fields: list[str] = []
+    for field in type(campaign).model_fields:
+        observed = getattr(campaign, field)
+        frozen = getattr(frozen_campaign, field)
+        if observed == frozen:
+            continue
+        if field in _CAMPAIGN_IDENTITY_FIELDS:
+            changed_fields.extend(
+                f"access.{access_field}"
+                for access_field in type(campaign.access).model_fields
+                if getattr(campaign.access, access_field)
+                != getattr(frozen_campaign.access, access_field)
+            )
+        else:
+            changed_fields.append(field)
+    return changed_fields
 
 
 def _same_campaign_contract(first: str, second: str) -> bool:
@@ -198,12 +236,21 @@ def _featured_tweet_selection(
 class ValidatorStore:
     """Persist observed chain anchors before atomically advancing verified cursors."""
 
-    def __init__(self, path: Path, *, start_block: int = 0) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        start_block: int = 0,
+        finalized_block_provider: Callable[[], int] | None = None,
+    ) -> None:
         if start_block < 0:
             raise ValueError("start_block cannot be negative")
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._initial_scanned_block = start_block - 1
+        self._finalized_block_provider = (
+            finalized_block_provider or _default_finalized_block_provider
+        )
         self._lock = threading.RLock()
         try:
             self._initialize()
@@ -507,43 +554,65 @@ class ValidatorStore:
                     "SELECT 1 FROM featured_tweet_selections WHERE campaign_id = ?",
                     (campaign_id,),
                 ).fetchone()
-                if (
+                frozen_campaign = _load_frozen_campaign(stored_json, campaign_id)
+                durable_state = (
                     _campaign_has_frozen_results(connection, campaign_id)
                     or featured_selection_exists is not None
-                ):
-                    # A changed feed record must never replace the contract that
-                    # produced durable results. It also must not deny service to
-                    # every unrelated campaign in the feed. Keep using the
-                    # frozen contract for this campaign and make the rejected
-                    # mutation operationally visible.
-                    frozen_campaign = _load_frozen_campaign(stored_json, campaign_id)
+                )
+                if durable_state:
                     if frozen_campaign is None:
                         LOGGER.critical(
                             "quarantined campaign with unreadable frozen contract campaign=%s",
                             campaign_id,
                         )
                         continue
-
-                    changed_fields: list[str] = []
-                    for field in type(campaign).model_fields:
-                        observed = getattr(campaign, field)
-                        frozen = getattr(frozen_campaign, field)
-                        if observed == frozen:
-                            continue
-                        if field == "access":
-                            changed_fields.extend(
-                                f"access.{access_field}"
-                                for access_field in type(campaign.access).model_fields
-                                if getattr(campaign.access, access_field)
-                                != getattr(frozen_campaign.access, access_field)
-                            )
-                        else:
-                            changed_fields.append(field)
+                    finalized_block_now = self._finalized_block_provider()
+                    pre_close_pin = featured_selection_exists is not None and not (
+                        _campaign_has_frozen_results(connection, campaign_id)
+                        or finalized_block_now >= campaign.access.scoring_close_block
+                    )
+                    if pre_close_pin:
+                        # The featured-tweet pin is created before the brief ends,
+                        # and creators legitimately edit their briefs while the
+                        # campaign is still open. Adopt the edited feed contract
+                        # and refresh the pinned selection's stored contract so
+                        # replay stays consistent; the pinned tweet itself is
+                        # untouched (it remains in its original selection pool).
+                        connection.execute(
+                            """
+                            UPDATE featured_tweet_selections
+                            SET campaign_json = ?
+                            WHERE campaign_id = ?
+                            """,
+                            (campaign_json, campaign_id),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE campaign_protocols
+                            SET mining_protocol = ?, exclusive_miner_hotkey = ?,
+                                campaign_contract_json = ?
+                            WHERE campaign_id = ?
+                            """,
+                            (protocol, exclusive_hotkey, campaign_json, campaign_id),
+                        )
+                        LOGGER.warning(
+                            "adopted pre-close campaign edit with pinned featured "
+                            "tweet campaign=%s changed_fields=%s",
+                            campaign_id,
+                            ",".join(_campaign_field_diffs(campaign, frozen_campaign)) or "unknown",
+                        )
+                        bound_campaigns.append(campaign)
+                        continue
+                    # A changed feed record must never replace the contract that
+                    # produced durable results. It also must not deny service to
+                    # every unrelated campaign in the feed. Keep using the
+                    # frozen contract for this campaign and make the rejected
+                    # mutation operationally visible.
                     LOGGER.error(
                         "rejected campaign mutation after durable state froze; "
                         "using frozen contract campaign=%s changed_fields=%s",
                         campaign_id,
-                        ",".join(changed_fields) or "unknown",
+                        ",".join(_campaign_field_diffs(campaign, frozen_campaign)) or "unknown",
                     )
                     bound_campaigns.append(frozen_campaign)
                     continue

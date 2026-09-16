@@ -130,6 +130,7 @@ class ValidatorService:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._last_finalized_block = 0
 
     async def run(self) -> None:
         """Run finalized ingestion with independently activated production outputs."""
@@ -169,6 +170,7 @@ class ValidatorService:
             )
             store = ValidatorStore(
                 self.settings.state_dir / "validator.sqlite3",
+                finalized_block_provider=lambda: self._last_finalized_block,
             )
             ops_server = uvicorn.Server(
                 uvicorn.Config(
@@ -291,6 +293,7 @@ class ValidatorService:
                 try:
                     submission_weights: dict[int, float] | None = None
                     finalized_block = await chain.current_block()
+                    self._last_finalized_block = finalized_block
                     endpoints = await ingestor.discover(block=finalized_block)
                     outcomes = await ingestor.reconcile_all(endpoints, block=finalized_block)
                     attributions = []
