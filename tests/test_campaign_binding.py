@@ -236,6 +236,130 @@ def test_complete_campaign_contract_uses_frozen_version_after_results_freeze(
     assert "using frozen contract campaign=same" in caplog.text
 
 
+def test_pre_close_featured_pin_adopts_edited_contract(tmp_path) -> None:
+    """A brief edited while its campaign is open must be adopted, not rejected.
+
+    Reproduces the 112_ares incident: the featured tweet is pinned near close,
+    the brand then raises max_members while the brief is still live, and the
+    validator must serve the edited contract instead of logging a rejected
+    mutation every cycle until emissions end.
+    """
+
+    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 350})
+    changed = original.model_copy(update={"max_members": 750})
+    scoring_close = original.access.scoring_close_block
+    store = ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        finalized_block_provider=lambda: scoring_close - 1,
+    )
+    store.bind_campaign_protocols((original,))
+    store.pin_featured_tweet_selection(
+        campaign_id="same",
+        campaign_json=original.model_dump_json(),
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=5,
+        selected_at=NOW,
+    )
+
+    assert store.bind_campaign_protocols((changed,)) == (changed,)
+
+    # The pin's stored contract must follow the adopted edit so replay agrees.
+    selection = store.featured_tweet_selection("same", changed.model_dump_json())
+    assert selection is not None and selection.tweet_id == "1"
+    assert ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        finalized_block_provider=lambda: scoring_close - 1,
+    ).bind_campaign_protocols((changed,)) == (changed,)
+
+
+def test_post_close_featured_pin_still_rejects_edits(tmp_path) -> None:
+    """Once scoring closes, a pinned campaign's contract stays frozen."""
+
+    scoring_close = 20
+    store = ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        finalized_block_provider=lambda: scoring_close + 1,
+    )
+    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 350})
+    changed = original.model_copy(update={"max_members": 750})
+    store.bind_campaign_protocols((original,))
+    store.pin_featured_tweet_selection(
+        campaign_id="same",
+        campaign_json=original.model_dump_json(),
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=5,
+        selected_at=NOW,
+    )
+
+    assert store.bind_campaign_protocols((changed,)) == (original,)
+    assert ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        finalized_block_provider=lambda: scoring_close + 1,
+    ).bind_campaign_protocols((changed,)) == (original,)
+
+
+def test_frozen_rewards_reject_edits_even_before_scoring_close(tmp_path) -> None:
+    """Settled economics freeze the contract regardless of the scoring window."""
+
+    scoring_close = 20
+    store = ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        finalized_block_provider=lambda: scoring_close - 1,
+    )
+    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 350})
+    store.bind_campaign_protocols((original,))
+    store.pin_featured_tweet_selection(
+        campaign_id="same",
+        campaign_json=original.model_dump_json(),
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=5,
+        selected_at=NOW,
+    )
+    # An edit lands while the campaign is still open and is adopted.
+    edited = original.model_copy(update={"max_members": 999})
+    assert store.bind_campaign_protocols((edited,)) == (edited,)
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
+        stored_json = connection.execute(
+            "SELECT campaign_contract_json FROM campaign_protocols WHERE campaign_id = 'same'"
+        ).fetchone()[0]
+    assert edited.model_dump_json() == stored_json
+    # Settled economics then freeze the ADOPTED contract in place.
+    freeze_positive_campaign(store, edited)
+
+    # Any further edit is rejected in favor of the frozen adopted contract.
+    assert store.bind_campaign_protocols((edited.model_copy(update={"max_members": 1000}),)) == (
+        edited,
+    )
+
+
+def test_featured_pin_replay_still_rejects_after_pre_close_adoption(tmp_path) -> None:
+    """Adoption refreshes the pin; a DIFFERENT contract must still be refused."""
+
+    scoring_close = 20
+    store = ValidatorStore(
+        tmp_path / "validator.sqlite3",
+        finalized_block_provider=lambda: scoring_close - 1,
+    )
+    original = campaign("same", MiningProtocol.PRECLAIM_V2)
+    changed = original.model_copy(update={"brief": "edited brief"})
+    store.bind_campaign_protocols((original,))
+    store.pin_featured_tweet_selection(
+        campaign_id="same",
+        campaign_json=original.model_dump_json(),
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=5,
+        selected_at=NOW,
+    )
+    assert store.bind_campaign_protocols((changed,)) == (changed,)
+
+    with pytest.raises(ProtocolError, match="changed after featured tweet selection"):
+        store.featured_tweet_selection("same", original.model_dump_json())
+
+
 def test_frozen_campaign_mutation_does_not_stall_unrelated_campaigns(tmp_path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
