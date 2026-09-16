@@ -76,13 +76,14 @@ class Settings(BaseSettings):
     weight_epoch_blocks: int = Field(default=100, ge=1)
     weight_version_key: int = Field(default=0, ge=0)
     weight_score_blend: float = Field(
-        default=0.0,
+        default=1.0,
         ge=0,
         le=1,
         description=(
             "Share of mechanism-1 emission weight allocated by deduplicated tweet "
-            "scores instead of campaign floors. 0.0 preserves floor-proportional "
-            "allocation; 1.0 allocates purely on content value."
+            "scores instead of campaign floors. 1.0 (the default) allocates purely "
+            "on content value; operators may lower it to reintroduce a "
+            "floor-proportional component."
         ),
     )
     data_client_url: str = "https://ingestion.bitcast.network:443"
