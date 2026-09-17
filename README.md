@@ -21,6 +21,10 @@ from influential accounts within curated social networks.
   weights.
 - **Bittensor SN93** distributes on-chain emissions according to the resulting mechanism-1 weights.
 
+This repository implements **mechanism 1** of SN93 (~98% of subnet emission). The
+**mechanism 0** YouTube creator-economy mechanism (~2% of emission) is implemented in
+[bitcast-network/bitcast](https://github.com/bitcast-network/bitcast).
+
 This repository contains the Bittensor v11 miner and validator implementation. It is the complete
 public reference for released behavior: the [protocol](docs/protocol.md) defines the flow,
 attribution, scoring, rewards, and trust boundaries; the
@@ -53,6 +57,12 @@ configured wallet directory and are never created or copied by the Python applic
 state directory must survive process restarts. The
 [operator runbook](docs/operator-runbook.md#pm2-source-install) contains checked PM2 commands and
 upgrade/rollback steps.
+
+## 🔎 Verifying subnet liveness
+
+SN93 uses commit-reveal validators, so raw on-chain `last_update` does not reflect miner
+activity. See [AGENTS.md](./AGENTS.md) for read-only commands to verify miner commitment
+cadence, validator, and emission activity directly against chain state.
 
 Start the signed endpoint and advertise it through the registered miner hotkey:
 
