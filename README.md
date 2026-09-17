@@ -54,6 +54,12 @@ state directory must survive process restarts. The
 [operator runbook](docs/operator-runbook.md#pm2-source-install) contains checked PM2 commands and
 upgrade/rollback steps.
 
+## 🔎 Verifying subnet liveness
+
+SN93 uses commit-reveal validators, so raw on-chain `last_update` does not reflect miner
+activity. See [AGENTS.md](./AGENTS.md) for read-only commands to verify miner commitment
+cadence, validator, and emission activity directly against chain state.
+
 Start the signed endpoint and advertise it through the registered miner hotkey:
 
 ```bash
