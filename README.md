@@ -21,6 +21,10 @@ from influential accounts within curated social networks.
   weights.
 - **Bittensor SN93** distributes on-chain emissions according to the resulting mechanism-1 weights.
 
+This repository implements **mechanism 1** of SN93 (~98% of subnet emission). The
+**mechanism 0** YouTube creator-economy mechanism (~2% of emission) is implemented in
+[bitcast-network/bitcast](https://github.com/bitcast-network/bitcast).
+
 This repository contains the Bittensor v11 miner and validator implementation. It is the complete
 public reference for released behavior: the [protocol](docs/protocol.md) defines the flow,
 attribution, scoring, rewards, and trust boundaries; the
