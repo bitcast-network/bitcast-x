@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bitcast-x-miner.fullname" . }}
+  labels:
+    {{- include "bitcast-x-miner.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- with .Values.service.clusterIP }}
+  clusterIP: {{ . }}
+  {{- end }}
+  {{- if and (eq .Values.service.type "LoadBalancer") .Values.service.loadBalancerIP }}
+  loadBalancerIP: {{ .Values.service.loadBalancerIP }}
+  {{- end }}
+  {{- if has .Values.service.type (list "LoadBalancer" "NodePort") }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "bitcast-x-miner.selectorLabels" . | nindent 4 }}
+  ports:
+    # The advertised port, unchanged end to end: port, targetPort and (for NodePort) nodePort
+    # are all `port`, because validators dial the value the miner put on chain.
+    - name: miner
+      port: {{ .Values.port }}
+      targetPort: miner
+      protocol: TCP
+      {{- if eq .Values.service.type "NodePort" }}
+      nodePort: {{ .Values.port }}
+      {{- end }}

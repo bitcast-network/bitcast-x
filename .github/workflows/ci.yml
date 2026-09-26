@@ -46,3 +46,35 @@ jobs:
         env:
           SOURCE_REVISION: ${{ github.sha }}
         run: test "$(docker inspect bitcast-x:test --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" = "${SOURCE_REVISION}"
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      # Helm is preinstalled on GitHub's ubuntu-latest runners.
+      - name: Lint and render the miner chart
+        working-directory: charts/bitcast-x-miner
+        run: |
+          set -eu
+          required="--set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey"
+          helm lint . $required
+          helm template t . $required > /dev/null
+          helm template t . $required --set mode=run-miner-api --set minerApi.existingSecret=api > /dev/null
+          helm template t . $required --set service.type=NodePort --set port=30095 \
+            | grep -q "nodePort: 30095"
+      - name: Refuse configurations that cannot work
+        working-directory: charts/bitcast-x-miner
+        run: |
+          set -u
+          refuse() {
+            if helm template t . "$@" > /dev/null 2>&1; then
+              echo "rendered but should have been refused: $*"; exit 1
+            fi
+          }
+          refuse --set wallet.existingSecret=hotkey
+          refuse --set publicIP=203.0.113.10
+          refuse --set publicIP=127.0.0.1 --set wallet.existingSecret=hotkey
+          refuse --set publicIP=0.0.0.0 --set wallet.existingSecret=hotkey
+          refuse --set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set mode=run-miner-api
+          refuse --set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set service.type=NodePort
+          refuse --set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set mode=run-validator

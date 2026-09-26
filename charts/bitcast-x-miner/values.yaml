@@ -1,0 +1,124 @@
+# One miner per release. A hotkey advertises exactly one endpoint on chain and the miner keeps
+# SQLite state, so this chart always runs a single replica and never overlaps two pods.
+
+# `run-miner` for the reference miner. `run-miner-api` for a platform: the same signed miner plus
+# the authenticated `/api/v1` application API (docs/application-api.md). They are alternatives,
+# not two workloads: both advertise the same hotkey's endpoint, so run one per hotkey.
+mode: run-miner
+
+image:
+  # No default registry. Build from this repository's Dockerfile and push it wherever your
+  # cluster pulls from; pin a tag or digest produced from a reviewed commit (operator runbook).
+  repository: bitcast-x
+  tag: ""  # defaults to the chart's appVersion
+  digest: ""  # takes precedence over tag when set, e.g. sha256:...
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+network:
+  # A Bittensor network name (`finney`) or a websocket endpoint (`ws://subtensor:9944`).
+  name: finney
+  netuid: 93
+  mechanismId: 1
+
+# The address validators use to reach this miner. REQUIRED.
+#
+# Validators read it from the on-chain axon record and dial `http://<publicIP>:<port>` directly:
+# a bare IP and port, plain HTTP (requests are authenticated by signature, not TLS). There is no
+# hostname, so an Ingress cannot carry this traffic. Something must make the pod reachable at
+# exactly this IP *and* `port` — see `service` below.
+publicIP: ""
+
+# Container port, and the port advertised on chain. They are the same value by construction:
+# the miner advertises the port it binds. Whatever exposes it must keep the port unchanged.
+port: 8095
+
+service:
+  # LoadBalancer: publicIP should be the load balancer's address (set `loadBalancerIP` or your
+  #   provider's annotation to pin it) — the service port equals `port`.
+  # NodePort: publicIP is a node's address; `port` must then lie in the cluster's NodePort range
+  #   and is used as the nodePort, so the advertised port is the one that answers.
+  # ClusterIP: only for clusters where something else routes publicIP:port to this Service.
+  type: LoadBalancer
+  loadBalancerIP: ""
+  clusterIP: ""
+  # Cluster (the Kubernetes default). Preserving the client address with Local buys nothing
+  # here — the miner authenticates and rate-limits validators by signing hotkey, not by IP —
+  # and Local drops traffic from clients inside the same cluster on some networks.
+  externalTrafficPolicy: Cluster
+  annotations: {}
+
+wallet:
+  # REQUIRED. An existing Secret holding the hotkey keyfile (the JSON file from
+  # `~/.bittensor/wallets/<name>/hotkeys/<hotkey>`). This chart never creates it from values:
+  # a key in values.yaml would be stored in the Helm release record.
+  existingSecret: ""
+  hotkeyKey: hotkey
+  # Optional: a key in the same Secret holding coldkeypub.txt contents.
+  coldkeypubKey: ""
+  # Wallet and hotkey names, as the miner resolves them under the wallet path.
+  name: default
+  hotkey: default
+  # Recommended: the hotkey's SS58 address. The container refuses to start if the mounted
+  # keyfile is for any other key (entrypoint.sh, BITCAST_X_EXPECTED_HOTKEY).
+  expectedHotkey: ""
+
+# run-miner-api only: the bearer token for /api/v1, at least 256 bits of entropy.
+minerApi:
+  existingSecret: ""
+  tokenKey: token
+
+persistence:
+  # SQLite databases, WAL files and the campaign cache. Losing this loses commitment history
+  # (operator runbook, "Recovering a miner that lost commitment history").
+  enabled: true
+  existingClaim: ""
+  storageClass: ""  # "" = cluster default; "-" = no storage class
+  accessMode: ReadWriteOnce
+  size: 5Gi
+  annotations: {}
+
+# Extra BITCAST_X_* settings (see config/miner.env.example and .env.example).
+env: {}
+# Extra env entries in full Kubernetes form, e.g. from other Secrets.
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+probes:
+  # /health answers whenever the process serves HTTP. A miner that is merely idle, or whose
+  # chain RPC is briefly unreachable, stays healthy: validators retry unavailable miners and
+  # they heal on a later poll, so restarting would only interrupt in-flight commitments.
+  liveness:
+    initialDelaySeconds: 10
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 6
+  # /ready becomes 200 only after the endpoint advertisement is finalized on chain, which takes
+  # at least a few blocks. The startup probe gives it that long before liveness applies.
+  startup:
+    periodSeconds: 10
+    failureThreshold: 60
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# The miner commits queued events on a timer; give it time to finish before SIGKILL.
+terminationGracePeriodSeconds: 60
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}

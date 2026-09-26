@@ -1,0 +1,167 @@
+{{- include "bitcast-x-miner.validate" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bitcast-x-miner.fullname" . }}
+  labels:
+    {{- include "bitcast-x-miner.labels" . | nindent 4 }}
+spec:
+  # Exactly one: a hotkey advertises one endpoint, and SQLite state has one writer.
+  replicas: 1
+  # Recreate, never RollingUpdate: two pods would share the state volume and race to advertise.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "bitcast-x-miner.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "bitcast-x-miner.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "bitcast-x-miner.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        # The image's user (Dockerfile). fsGroup makes the state volume and the mounted
+        # keyfile readable by it.
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: miner
+          image: {{ include "bitcast-x-miner.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [{{ .Values.mode | quote }}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: miner
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          env:
+            - name: BITCAST_X_NETWORK
+              value: {{ .Values.network.name | quote }}
+            - name: BITCAST_X_NETUID
+              value: {{ .Values.network.netuid | quote }}
+            - name: BITCAST_X_MECHANISM_ID
+              value: {{ .Values.network.mechanismId | quote }}
+            - name: BITCAST_X_PUBLIC_IP
+              value: {{ .Values.publicIP | quote }}
+            - name: BITCAST_X_PORT
+              value: {{ .Values.port | quote }}
+            - name: BITCAST_X_STATE_DIR
+              value: /var/lib/bitcast-x
+            - name: BITCAST_X_WALLET_PATH
+              value: /var/lib/bitcast-wallets
+            - name: BITCAST_X_WALLET_NAME
+              value: {{ .Values.wallet.name | quote }}
+            - name: BITCAST_X_WALLET_HOTKEY
+              value: {{ .Values.wallet.hotkey | quote }}
+            {{- with .Values.wallet.expectedHotkey }}
+            - name: BITCAST_X_EXPECTED_HOTKEY
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if eq .Values.mode "run-miner-api" }}
+            - name: BITCAST_X_MINER_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.minerApi.existingSecret }}
+                  key: {{ .Values.minerApi.tokenKey }}
+            {{- end }}
+            {{- range $name, $value := .Values.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: miner
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: miner
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: miner
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/bitcast-x
+            # The wallet directory, read-only, holding only what the Secret provides. The
+            # entrypoint then finds the keyfile already in place and writes nothing.
+            - name: wallet
+              mountPath: /var/lib/bitcast-wallets/{{ .Values.wallet.name }}
+              readOnly: true
+            - name: home
+              mountPath: /home/bitcast
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: state
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "bitcast-x-miner.claimName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: wallet
+          secret:
+            secretName: {{ .Values.wallet.existingSecret }}
+            # Group-readable for fsGroup 10001; nobody else.
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.wallet.hotkeyKey }}
+                path: hotkeys/{{ .Values.wallet.hotkey }}
+              {{- with .Values.wallet.coldkeypubKey }}
+              - key: {{ . }}
+                path: coldkeypub.txt
+              {{- end }}
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
