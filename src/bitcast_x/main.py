@@ -100,7 +100,7 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
             settings.campaign_feed_url,
             cache_path=settings.state_dir / "campaign-feed.json",
             timeout=settings.request_timeout_seconds,
-            max_response_bytes=settings.max_response_bytes,
+            max_response_bytes=settings.campaign_feed_max_response_bytes,
         )
         try:
             feed = await client.fetch()
