@@ -67,6 +67,18 @@ wallet:
 minerApi:
   existingSecret: ""
   tokenKey: token
+  # Serve /api/v1 on its own port (BITCAST_X_MINER_API_PORT) instead of the public validator
+  # port, so the bearer token never crosses the listener validators dial over plain HTTP.
+  # Requires a bitcast-x build with that setting. The port gets its own ClusterIP Service and
+  # is never added to the miner Service above, whatever its type.
+  port: null
+  ingress:
+    # TLS in front of the API port. Leave disabled to reach it only from inside the cluster.
+    enabled: false
+    className: traefik
+    host: ""
+    annotations: {}
+    tlsSecretName: ""
 
 persistence:
   # SQLite databases, WAL files and the campaign cache. Losing this loses commitment history

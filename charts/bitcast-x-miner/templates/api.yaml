@@ -1,0 +1,52 @@
+{{- if .Values.minerApi.port }}
+# The application API port. ClusterIP only: it carries a bearer token and must never share the
+# public validator Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "bitcast-x-miner.fullname" . }}-api
+  labels:
+    {{- include "bitcast-x-miner.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "bitcast-x-miner.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.minerApi.port }}
+      targetPort: api
+      protocol: TCP
+{{- if .Values.minerApi.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "bitcast-x-miner.fullname" . }}-api
+  labels:
+    {{- include "bitcast-x-miner.labels" . | nindent 4 }}
+  {{- with .Values.minerApi.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.minerApi.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.minerApi.ingress.host | quote }}
+      http:
+        paths:
+          # /api/v1 only: the protocol routes are not on this port, and nothing else should be.
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "bitcast-x-miner.fullname" . }}-api
+                port:
+                  name: api
+  tls:
+    - hosts:
+        - {{ .Values.minerApi.ingress.host | quote }}
+      secretName: {{ .Values.minerApi.ingress.tlsSecretName | default (printf "%s-api-tls" (include "bitcast-x-miner.fullname" .)) }}
+{{- end }}
+{{- end }}

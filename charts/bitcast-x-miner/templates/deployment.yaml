@@ -57,6 +57,11 @@ spec:
             - name: miner
               containerPort: {{ .Values.port }}
               protocol: TCP
+            {{- with .Values.minerApi.port }}
+            - name: api
+              containerPort: {{ . }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: BITCAST_X_NETWORK
               value: {{ .Values.network.name | quote }}
@@ -86,6 +91,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.minerApi.existingSecret }}
                   key: {{ .Values.minerApi.tokenKey }}
+            {{- with .Values.minerApi.port }}
+            - name: BITCAST_X_MINER_API_PORT
+              value: {{ . | quote }}
+            # Inside the pod only; the api Service is ClusterIP.
+            - name: BITCAST_X_MINER_API_HOST
+              value: "0.0.0.0"
+            {{- end }}
             {{- end }}
             {{- range $name, $value := .Values.env }}
             - name: {{ $name }}

@@ -89,9 +89,22 @@ helm install miner charts/bitcast-x-miner ... \
   --set minerApi.existingSecret=bitcast-miner-api
 ```
 
-`/api/v1` is served on the **same port** as the public miner protocol. Call it in-cluster through
-the Service, or through your own TLS-terminating proxy. Never send the bearer token to the public
-address, which is plain HTTP.
+By default `/api/v1` is served on the **same port** as the public miner protocol. Call it
+in-cluster through the Service, or through your own TLS-terminating proxy. Never send the bearer
+token to the public address, which is plain HTTP.
+
+With a bitcast-x build that supports `BITCAST_X_MINER_API_PORT`, set `minerApi.port` to give the
+API its own listener instead. The public port then carries only the validator protocol. The API
+port gets a separate ClusterIP Service (`<release>-api`) and is never added to the miner Service,
+whatever its type. To reach it from outside the cluster, enable the TLS Ingress, which routes only
+`/api/v1`:
+
+```bash
+  --set minerApi.port=8096 \
+  --set minerApi.ingress.enabled=true \
+  --set minerApi.ingress.host=miner-api.example.com \
+  --set minerApi.ingress.annotations."cert-manager\.io/cluster-issuer"=letsencrypt-prod
+```
 
 ## State, backup and upgrades
 
@@ -127,6 +140,8 @@ Then copy the backup off the volume (`kubectl cp`). Upgrade by changing `image.t
 | `wallet.name` / `hotkey` | `default` / `default` | names the miner resolves |
 | `wallet.expectedHotkey` | — | strongly recommended |
 | `minerApi.existingSecret` / `tokenKey` | — / `token` | `run-miner-api` only |
+| `minerApi.port` | — | `run-miner-api` only; separate API listener |
+| `minerApi.ingress.enabled` / `host` / `className` / `annotations` / `tlsSecretName` | `false` / — / `traefik` / `{}` / `<release>-api-tls` | needs `minerApi.port` |
 | `persistence.enabled` / `size` / `storageClass` / `existingClaim` | `true` / `5Gi` / cluster default / — | |
 | `env` | `{}` | extra `BITCAST_X_*` settings |
 | `extraEnv` | `[]` | full env entries, e.g. from other Secrets |

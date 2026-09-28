@@ -59,6 +59,18 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and (eq .Values.mode "run-miner-api") (not .Values.minerApi.existingSecret) -}}
 {{- fail "run-miner-api needs minerApi.existingSecret holding BITCAST_X_MINER_API_TOKEN" -}}
 {{- end -}}
+{{- if and .Values.minerApi.port (ne .Values.mode "run-miner-api") -}}
+{{- fail "minerApi.port applies only to mode=run-miner-api" -}}
+{{- end -}}
+{{- if and .Values.minerApi.port (eq (int .Values.minerApi.port) (int .Values.port)) -}}
+{{- fail "minerApi.port must differ from port" -}}
+{{- end -}}
+{{- if and .Values.minerApi.ingress.enabled (not .Values.minerApi.port) -}}
+{{- fail "minerApi.ingress needs minerApi.port: without it /api/v1 shares the public validator port" -}}
+{{- end -}}
+{{- if and .Values.minerApi.ingress.enabled (not .Values.minerApi.ingress.host) -}}
+{{- fail "minerApi.ingress.host is required" -}}
+{{- end -}}
 {{- if and (eq .Values.service.type "NodePort") (or (lt (int .Values.port) 30000) (gt (int .Values.port) 32767)) -}}
 {{- fail "service.type=NodePort advertises `port` as the nodePort, so port must be in 30000-32767" -}}
 {{- end -}}
