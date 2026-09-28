@@ -130,4 +130,5 @@ Then copy the backup off the volume (`kubectl cp`). Upgrade by changing `image.t
 | `persistence.enabled` / `size` / `storageClass` / `existingClaim` | `true` / `5Gi` / cluster default / — | |
 | `env` | `{}` | extra `BITCAST_X_*` settings |
 | `extraEnv` | `[]` | full env entries, e.g. from other Secrets |
+| `extraVolumes` / `extraVolumeMounts` | `[]` | e.g. a ConfigMap mounted into the miner |
 | `probes.*` | see `values.yaml` | |

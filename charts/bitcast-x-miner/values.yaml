@@ -82,6 +82,9 @@ persistence:
 env: {}
 # Extra env entries in full Kubernetes form, e.g. from other Secrets.
 extraEnv: []
+# Extra volumes and mounts for the miner container, e.g. a ConfigMap.
+extraVolumes: []
+extraVolumeMounts: []
 
 resources:
   requests:
