@@ -269,6 +269,7 @@ def build_client(
     enabled_ecosystems: tuple[str, ...] = ("tao", "hyperliquid"),
     qualified: bool = True,
     results_client: Results | None = None,
+    split_protocol: bool = False,
 ) -> TestClient:
     engine = MinerEngine(
         miner_hotkey=MINER,
@@ -296,7 +297,7 @@ def build_client(
         authorize_validator=lambda _hotkey: _authorized(),
     )
     return TestClient(
-        create_control_app(lambda: service, protocol, INTERNAL_TOKEN),
+        create_control_app(lambda: service, None if split_protocol else protocol, INTERNAL_TOKEN),
         headers=AUTH_HEADERS,
     )
 
@@ -330,6 +331,23 @@ def test_application_api_requires_internal_bearer_token(tmp_path: Path) -> None:
     assert response.json()["error"]["code"] == "invalid_authentication"
     assert response.headers["www-authenticate"] == "Bearer"
     assert web.get("/health").status_code == 200
+
+
+def test_split_listeners_keep_the_token_api_off_the_protocol_port(tmp_path: Path) -> None:
+    api = build_client(tmp_path, split_protocol=True)
+    protocol = TestClient(
+        create_miner_app(
+            miner_hotkey=MINER,
+            provider=lambda _request, _caller: None,  # type: ignore[arg-type,return-value]
+            authorize_validator=lambda _hotkey: _authorized(),
+        ),
+        headers=AUTH_HEADERS,
+    )
+
+    assert api.get("/api/v1/campaigns").status_code == 200
+    assert api.get("/health").status_code == 404
+    assert protocol.get("/health").status_code == 200
+    assert protocol.get("/api/v1/campaigns").status_code == 404
 
 
 def test_openapi_pins_the_public_v1_route_and_auth_contract(tmp_path: Path) -> None:

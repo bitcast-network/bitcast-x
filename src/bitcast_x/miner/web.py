@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass
 from typing import Any
 
 import uvicorn
@@ -21,7 +22,20 @@ from bitcast_x.transport import create_miner_app
 LOGGER = logging.getLogger(__name__)
 
 
-def build_miner_api(settings: Settings) -> FastAPI:
+@dataclass(frozen=True)
+class MinerApps:
+    """What run-miner-api serves.
+
+    ``protocol`` is None when both share ``settings.port``: ``api`` then carries
+    the validator protocol as well. Otherwise ``protocol`` alone is served on
+    ``settings.port`` and ``api`` on ``settings.miner_api_port``.
+    """
+
+    api: FastAPI
+    protocol: FastAPI | None
+
+
+def build_miner_api(settings: Settings) -> MinerApps:
     """Build a chain-backed API with a managed single-writer lifecycle."""
 
     campaign_feed_url = settings.campaign_feed_url
@@ -32,6 +46,9 @@ def build_miner_api(settings: Settings) -> FastAPI:
         raise ValueError("BITCAST_X_PUBLIC_IP is required")
     if settings.miner_api_token is None:
         raise ValueError("BITCAST_X_MINER_API_TOKEN is required")
+    split = settings.miner_api_port is not None
+    if settings.miner_api_port == settings.port:
+        raise ValueError("BITCAST_X_MINER_API_PORT must differ from BITCAST_X_PORT")
 
     wallet = load_wallet(settings)
     runtime: dict[str, Any] = {"ready": False}
@@ -132,17 +149,41 @@ def build_miner_api(settings: Settings) -> FastAPI:
 
     app = create_control_app(
         get_service,
-        protocol_app,
+        None if split else protocol_app,
         settings.miner_api_token.get_secret_value(),
     )
+    # The lifecycle lives on the API app in both layouts; when split, the
+    # protocol listener reports not-ready until it has run.
     app.router.lifespan_context = lifespan
-    return app
+    return MinerApps(api=app, protocol=protocol_app if split else None)
 
 
 async def run_miner_api(settings: Settings) -> None:
     """Run the generic miner API until interrupted."""
 
-    server = uvicorn.Server(
-        uvicorn.Config(build_miner_api(settings), host=settings.host, port=settings.port)
-    )
-    await server.serve()
+    apps = build_miner_api(settings)
+    if apps.protocol is None or settings.miner_api_port is None:
+        await uvicorn.Server(
+            uvicorn.Config(apps.api, host=settings.host, port=settings.port)
+        ).serve()
+        return
+
+    servers = [
+        uvicorn.Server(
+            uvicorn.Config(apps.api, host=settings.miner_api_host, port=settings.miner_api_port)
+        ),
+        uvicorn.Server(uvicorn.Config(apps.protocol, host=settings.host, port=settings.port)),
+    ]
+    tasks = [asyncio.create_task(server.serve()) for server in servers]
+    try:
+        # One listener stopping (signal, bind failure, crash) stops the other:
+        # a miner serving validators without its lifecycle, or the reverse, is
+        # never a state worth keeping.
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for server in servers:
+            server.should_exit = True
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result

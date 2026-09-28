@@ -52,10 +52,15 @@ def _error(code: str, message: str, *, retryable: bool = False) -> dict[str, obj
 
 def create_control_app(
     service_provider: Callable[[], MinerControlService],
-    protocol_app: FastAPI,
+    protocol_app: FastAPI | None,
     internal_api_token: str,
 ) -> FastAPI:
-    """Create the generic application API without changing validator btauth routes."""
+    """Create the generic application API without changing validator btauth routes.
+
+    With ``protocol_app`` the validator protocol is mounted at ``/`` beside ``/api/v1`` on
+    the same listener. Pass ``None`` when the protocol is served on its own port,
+    so this app answers only the application API.
+    """
 
     if len(internal_api_token) < 64:
         raise ValueError("miner API token must contain at least 256 bits of entropy")
@@ -395,5 +400,6 @@ def create_control_app(
 
     app.openapi = application_openapi  # type: ignore[method-assign]
 
-    app.mount("/", protocol_app)
+    if protocol_app is not None:
+        app.mount("/", protocol_app)
     return app
