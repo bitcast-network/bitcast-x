@@ -62,6 +62,23 @@ jobs:
           helm template t . $required --set mode=run-miner-api --set minerApi.existingSecret=api > /dev/null
           helm template t . $required --set service.type=NodePort --set port=30095 \
             | grep -q "nodePort: 30095"
+          # extraVolumes/extraVolumeMounts reach the pod spec verbatim.
+          helm template t . $required \
+            --set-json 'extraVolumes=[{"name":"cfg","configMap":{"name":"c"}}]' \
+            --set-json 'extraVolumeMounts=[{"name":"cfg","mountPath":"/etc/cfg"}]' \
+            -s templates/deployment.yaml | grep -q "mountPath: /etc/cfg"
+          # A separate API port: the setting reaches the container, gets its own ClusterIP
+          # Service, and never joins the public validator Service, whatever its type.
+          api="$required --set mode=run-miner-api --set minerApi.existingSecret=api --set minerApi.port=8092"
+          helm template t . $api -s templates/deployment.yaml | grep -q "name: BITCAST_X_MINER_API_PORT"
+          helm template t . $api -s templates/api.yaml | grep -q "type: ClusterIP"
+          if helm template t . $api --set service.type=NodePort --set port=30095 \
+              -s templates/service.yaml | grep -q 8092; then
+            echo "the API port leaked into the public Service"; exit 1
+          fi
+          helm template t . $api --set minerApi.ingress.enabled=true \
+            --set minerApi.ingress.host=api.example.test -s templates/api.yaml \
+            | grep -q "path: /api/v1"
       - name: Refuse configurations that cannot work
         working-directory: charts/bitcast-x-miner
         run: |
@@ -78,3 +95,8 @@ jobs:
           refuse --set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set mode=run-miner-api
           refuse --set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set service.type=NodePort
           refuse --set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set mode=run-validator
+          api="--set publicIP=203.0.113.10 --set wallet.existingSecret=hotkey --set minerApi.existingSecret=api"
+          refuse $api --set minerApi.port=8092
+          refuse $api --set mode=run-miner-api --set minerApi.port=8095
+          refuse $api --set mode=run-miner-api --set minerApi.ingress.enabled=true --set minerApi.ingress.host=h
+          refuse $api --set mode=run-miner-api --set minerApi.port=8092 --set minerApi.ingress.enabled=true

@@ -93,7 +93,7 @@ By default `/api/v1` is served on the **same port** as the public miner protocol
 in-cluster through the Service, or through your own TLS-terminating proxy. Never send the bearer
 token to the public address, which is plain HTTP.
 
-With a bitcast-x build that supports `BITCAST_X_MINER_API_PORT`, set `minerApi.port` to give the
+With a bitcast-x build that supports `BITCAST_X_MINER_API_PORT` (added by #138), set `minerApi.port` to give the
 API its own listener instead. The public port then carries only the validator protocol. The API
 port gets a separate ClusterIP Service (`<release>-api`) and is never added to the miner Service,
 whatever its type. To reach it from outside the cluster, enable the TLS Ingress, which routes only
