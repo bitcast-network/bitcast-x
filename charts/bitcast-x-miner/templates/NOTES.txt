@@ -1,0 +1,18 @@
+Bitcast X miner ({{ .Values.mode }}) for netuid {{ .Values.network.netuid }} on {{ .Values.network.name }}.
+
+It advertises http://{{ .Values.publicIP }}:{{ .Values.port }} on chain; validators dial exactly that.
+The pod turns Ready only after that advertisement is finalized:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "bitcast-x-miner.fullname" . }}
+
+Before any restart or upgrade, take a consistent backup (operator runbook):
+
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "bitcast-x-miner.fullname" . }} -- bitcast-x state-info
+  kubectl -n {{ .Release.Namespace }} exec deploy/{{ include "bitcast-x-miner.fullname" . }} -- \
+    bitcast-x backup-state --output /var/lib/bitcast-x/backups/<timestamp>
+{{- if eq .Values.mode "run-miner-api" }}
+
+/api/v1 is served on the same port as the public miner protocol. Reach it in-cluster at
+http://{{ include "bitcast-x-miner.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.port }}, or through your own TLS
+proxy — never send the bearer token to the public address, which is plain HTTP.
+{{- end }}

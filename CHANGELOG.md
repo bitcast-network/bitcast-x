@@ -8,6 +8,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Added
 
+- Helm chart for running one miner on Kubernetes (`charts/bitcast-x-miner`): `run-miner` or
+  `run-miner-api`, state on a PersistentVolumeClaim, the hotkey mounted read-only from an existing
+  Secret, and the advertised `publicIP:port` kept identical end to end. Optional: `/api/v1` on
+  its own port (`minerApi.port`, needs `BITCAST_X_MINER_API_PORT` support in the image) behind a
+  ClusterIP Service and a TLS Ingress, and `extraVolumes`/`extraVolumeMounts`. CI lints and
+  renders it and asserts each refusal.
 - Configurable `weight_score_blend` validator setting, allocating the mechanism-1 weight vector
   between campaign floors and miners' deduplicated tweet-score shares. **The default is `1.0`:
   allocation is purely on content value**, independent of carried campaign floors. Operators may
