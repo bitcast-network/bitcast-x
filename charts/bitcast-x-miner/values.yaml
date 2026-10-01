@@ -16,7 +16,7 @@ image:
 imagePullSecrets: []
 
 network:
-  # A Bittensor network name (`finney`) or a websocket endpoint (`ws://subtensor:9944`).
+  # A Bittensor network name (`finney`) or a websocket endpoint URL (host:port, e.g. `subtensor:9944`).
   name: finney
   netuid: 93
   mechanismId: 1
