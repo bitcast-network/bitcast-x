@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     max_batches_per_page: int = Field(default=50, ge=1, le=50)
     campaign_feed_url: str | None = CAMPAIGN_FEED_URL
     miner_api_token: SecretStr | None = Field(default=None, repr=False)
+    # When set, run-miner-api serves /api/v1 on this port instead of on `port`,
+    # so the bearer token never shares the public validator listener.
+    miner_api_port: int | None = Field(default=None, ge=1, le=65535)
+    miner_api_host: str = "127.0.0.1"
     miner_api_commit_timeout_seconds: float = Field(default=90.0, gt=0, le=300)
     miner_results_api_url: str = "https://bitcast-api.bitcast.network"
     miner_results_poll_seconds: float = Field(default=30.0, ge=5.0, le=300.0)

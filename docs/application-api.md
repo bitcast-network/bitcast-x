@@ -11,6 +11,14 @@ Both require `Authorization: Bearer <BITCAST_X_MINER_API_TOKEN>`, like every
 other `/api/v1` route. Use a unique token containing at least 256 bits of
 entropy and terminate TLS before exposing a node beyond localhost.
 
+By default `/api/v1` shares `BITCAST_X_PORT` with the validator protocol, which
+must be publicly reachable. Set `BITCAST_X_MINER_API_PORT` to serve the
+application API on its own listener instead: the validator port then carries
+only the protocol, and `/api/v1` binds to `BITCAST_X_MINER_API_HOST`
+(default `127.0.0.1`). Use `0.0.0.0` only when something in front of it (a
+container network or a TLS-terminating proxy) keeps it private. The two
+listeners share one process and lifecycle; if either stops, both stop.
+
 ## Resources
 
 | Method | Path | Purpose |
