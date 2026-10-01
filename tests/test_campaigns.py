@@ -528,3 +528,40 @@ def test_rejects_ambiguous_consensus_feed_values(mutation: object, message: str)
 
     with pytest.raises(ValidationError, match=message):
         CampaignFeed.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_campaigns_command_reads_maps_larger_than_the_protocol_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Published ecosystem maps reach several MB, well past the protocol page
+    # limit (max_response_bytes); the CLI must bound them by the feed limit.
+    import argparse
+    import functools
+
+    from bitcast_x import main
+    from bitcast_x.config import Settings
+
+    manifest = _manifest()
+    ecosystem_map = FEED["ecosystem_maps"][0]  # type: ignore[index]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("campaign-manifest"):
+            return httpx.Response(200, json=manifest)
+        return httpx.Response(200, json=ecosystem_map)
+
+    monkeypatch.setattr(
+        main,
+        "CampaignFeedClient",
+        functools.partial(CampaignFeedClient, transport=httpx.MockTransport(handler)),
+    )
+    settings = Settings(
+        state_dir=tmp_path,
+        campaign_feed_url="https://feed.example/api/v2/public/x/campaign-manifest",
+        max_response_bytes=len(json.dumps(ecosystem_map)) - 1,
+    )
+
+    feed = await main.run_command(argparse.Namespace(command="campaigns"), settings)
+
+    assert feed is not None
+    assert [c["access"]["campaign_id"] for c in feed["campaigns"]] == ["campaign-1"]
