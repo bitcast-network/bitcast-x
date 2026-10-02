@@ -192,6 +192,87 @@ class RewardCoordinator:
         self._completed_campaign_ids = frozenset(completed_campaign_ids)
         return output
 
+    def release_ineligible_featured_selections(self, feed: CampaignFeed) -> None:
+        """Release featured pins that the active contract excludes retroactively.
+
+        The featured identity is pinned from live campaign data inside the
+        final day before scoring closes, so a lawful pin is always created at
+        or before the contract's ``closes_at``. If an operator edit moves the
+        scoring window backwards after the pin exists, the pin's creation
+        time ends up after the edited close: proof that the pin was created
+        under a contract that has since been replaced. Reconciliation then
+        rejects the pinned tweet on every later cycle, and the fail-closed
+        settlement gate would defer the campaign's economics — and with them
+        all weight submissions — for the rest of the emission window.
+
+        This releases such pins so settlement proceeds without a featured
+        bonus, or a replacement is selected from the tweets that qualify
+        under the contract now in force. The decision is recorded in the
+        store audit log. Pins whose tweet is merely missing from the current
+        scored set (for example during a transient evidence outage) keep the
+        conservative deferral.
+        """
+
+        checked: set[str] = set()
+        for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
+            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
+                continue
+            campaign_id = campaign.access.campaign_id
+            if campaign_id in checked:
+                continue
+            checked.add(campaign_id)
+            if self.store.campaign_finalized(campaign_id):
+                # Positive economics already froze: settlement no longer reads
+                # the pin, and the stored selection stays for audit/replay.
+                continue
+            campaign_json = campaign.model_dump_json()
+            selection = self.store.featured_tweet_selection(campaign_id, campaign_json)
+            if selection is None:
+                continue
+            tweet = self.store.persisted_scored_tweet(campaign_id, selection.tweet_id)
+            outside_window = (
+                tweet is not None
+                and not campaign.opens_at <= tweet.created_at <= campaign.closes_at
+            )
+            pin_outside_lead_window = not (
+                campaign.opens_at <= selection.selected_at <= campaign.closes_at
+            )
+            if not outside_window and not pin_outside_lead_window:
+                continue
+            released = self.store.release_featured_tweet_selection(
+                campaign_id=campaign_id,
+                campaign_json=campaign_json,
+                tweet_id=selection.tweet_id,
+                released_at=self._now(),
+            )
+            if released:
+                if tweet is not None:
+                    LOGGER.warning(
+                        (
+                            "released featured tweet selection outside the campaign "
+                            "scoring window campaign=%s tweet=%s published=%s "
+                            "window=%s..%s"
+                        ),
+                        campaign_id,
+                        selection.tweet_id,
+                        tweet.created_at.isoformat(),
+                        campaign.opens_at.isoformat(),
+                        campaign.closes_at.isoformat(),
+                    )
+                else:
+                    LOGGER.warning(
+                        (
+                            "released featured tweet selection inconsistent with the "
+                            "campaign scoring window campaign=%s tweet=%s "
+                            "selected_at=%s window=%s..%s"
+                        ),
+                        campaign_id,
+                        selection.tweet_id,
+                        selection.selected_at.isoformat(),
+                        campaign.opens_at.isoformat(),
+                        campaign.closes_at.isoformat(),
+                    )
+
     def shadow_weights(
         self,
         feed: CampaignFeed,

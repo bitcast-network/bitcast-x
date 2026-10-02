@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from bitcast_x.campaigns import CampaignRecord
     from bitcast_x.rewards import RewardDecision, TweetReward
     from bitcast_x.validator.scoring import ScoredAttribution
+    from bitcast_x.x_provider import Tweet
 
 
 _CAMPAIGN_IDENTITY_FIELDS = ("access",)
@@ -500,6 +501,18 @@ class ValidatorStore:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS store_audit_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_kind TEXT NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    tweet_id TEXT,
+                    event_json TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 INSERT OR IGNORE INTO scan_state(singleton, last_finalized_block)
                 VALUES (1, ?)
                 """,
@@ -760,6 +773,90 @@ class ValidatorStore:
                     f"campaign {campaign_id} changed after featured tweet selection"
                 )
             return _featured_tweet_selection(row, campaign_id)
+
+    def release_featured_tweet_selection(
+        self,
+        *,
+        campaign_id: str,
+        campaign_json: str,
+        tweet_id: str,
+        released_at: datetime,
+    ) -> bool:
+        """Drop a featured selection that the active campaign contract excludes.
+
+        The pinned featured identity is durable creator-visible state, but it
+        is only meaningful while its tweet qualifies under the campaign
+        contract in force. When that contract is adopted from an operator
+        edit (for example a scoring window that no longer contains the
+        pinned tweet's publication time), the exclusion is permanent for
+        this campaign, and retaining the pin would defer the campaign's
+        final economics for the rest of its emission window. This removes
+        the pin so a replacement can be selected from the tweets that do
+        qualify, and records the decision in the store audit log. Returns
+        True when a matching selection was released.
+        """
+
+        if released_at.tzinfo is None or released_at.utcoffset() is None:
+            raise ValueError("released_at must be timezone-aware")
+        released_at_utc = released_at.astimezone(UTC)
+        with self._transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT tweet_id FROM featured_tweet_selections
+                WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            ).fetchone()
+            if row is None or str(row["tweet_id"]) != tweet_id:
+                return False
+            connection.execute(
+                """
+                INSERT INTO store_audit_events(
+                    event_kind, campaign_id, tweet_id, event_json, recorded_at
+                )
+                VALUES ('featured_selection_released', ?, ?, ?, ?)
+                """,
+                (
+                    campaign_id,
+                    tweet_id,
+                    json.dumps(
+                        {
+                            "campaign_json": campaign_json,
+                            "released_at": released_at_utc.isoformat(),
+                        },
+                        separators=(",", ":"),
+                    ),
+                    released_at_utc.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                DELETE FROM featured_tweet_selections WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            )
+        return True
+
+    def featured_selection_release_events(self, campaign_id: str) -> list[dict[str, str]]:
+        """Return audit events recorded when featured selections were released."""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT tweet_id, event_json, recorded_at FROM store_audit_events
+                WHERE event_kind = 'featured_selection_released' AND campaign_id = ?
+                ORDER BY event_id
+                """,
+                (campaign_id,),
+            ).fetchall()
+        return [
+            {
+                "tweet_id": str(row["tweet_id"]),
+                "event": str(row["event_json"]),
+                "recorded_at": str(row["recorded_at"]),
+            }
+            for row in rows
+        ]
 
     def scanned_block(self) -> int:
         """Return the last fully persisted finalized block."""
@@ -1310,6 +1407,36 @@ class ValidatorStore:
                 """,
                 (frozen_snapshot_id, campaign_id, payload),
             )
+
+    def persisted_scored_tweet(self, campaign_id: str, tweet_id: str) -> "Tweet | None":
+        """Return the stored tweet snapshot for one scored tweet, if any.
+
+        Scores are persisted per campaign before economics freeze, so the
+        stored snapshot survives the scoring close even when reconciliation
+        would now reject the tweet under an edited contract. This is the
+        authoritative record of what the pinned tweet looked like when it
+        was scored.
+        """
+
+        from bitcast_x.validator.scoring import ScoredAttribution
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT scored_json FROM scored_reconciliations
+                WHERE campaign_id = ?
+                """,
+                (campaign_id,),
+            ).fetchall()
+        for row in rows:
+            try:
+                scored = TypeAdapter(list[ScoredAttribution]).validate_json(str(row["scored_json"]))
+            except ValueError:
+                continue
+            for item in scored:
+                if item.attribution.tweet_id == tweet_id:
+                    return item.tweet
+        return None
 
     def persist_shadow_weights(
         self, block: int, snapshot_id: str, weights: dict[int, float]

@@ -322,6 +322,7 @@ class ValidatorService:
                                 attributions,
                                 reconciled_campaign_ids=reconciler.completed_campaign_ids,
                             )
+                            reward_coordinator.release_ineligible_featured_selections(feed)
                             graph = await chain.metagraph(block=finalized_block)
                             if graph is None:
                                 raise ChainOperationError("finalized metagraph is unavailable")
