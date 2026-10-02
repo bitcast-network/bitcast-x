@@ -296,7 +296,12 @@ reward cycle creates it. Temporary provider or ingestion failures preserve the l
 preview and retry; missing selected-tweet evidence at finalization defers the complete coupled
 assignment and weight submission rather than silently dropping or changing the bonus. If the
 campaign feed temporarily omits a pinned, unsettled campaign, validators retain its stored contract
-and continue recovery from that authoritative record.
+and continue recovery from that authoritative record. A pinned selection is released only when the
+campaign contract in force provably excludes it — determinable from the stored pin and its scored
+tweet snapshot alone, such as a scoring-window edit adopted after the pin was created. Release
+drops the pin, records an audit event, and lets settlement proceed without the featured bonus; a
+replacement is selected from the tweets that qualify under the current contract. Exclusions that
+cannot be proven from durable state keep the conservative deferral.
 
 ## Legacy campaign retirement
 

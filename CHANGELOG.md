@@ -46,6 +46,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Release featured-tweet selections that an adopted campaign edit excludes — for example a moved
+  scoring window that no longer contains the pinned tweet — instead of deferring the campaign's
+  final economics (and weight submission) for the rest of the emission window. The decision is
+  recorded in a new validator store audit table.
 - Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
   period only when the creator was historically eligible and the submission is committed no later
   than the campaign's scoring-close block.
