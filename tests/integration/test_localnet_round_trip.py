@@ -30,7 +30,6 @@ from bitcast_x.miner import (
 )
 from bitcast_x.protocol import CampaignAccess, CommitmentEnvelope, MiningProtocol
 from bitcast_x.qualification import (
-    HistoricalQualificationChecker,
     QualificationConfig,
     QualificationReader,
 )
@@ -300,7 +299,6 @@ async def test_real_creator_journey_survives_restart_and_reaches_attribution(
 
         validator_store = ValidatorStore(
             tmp_path / "validator.sqlite3",
-            start_block=page.batches[0].position.block,
         )
         ingestion = await ValidatorIngestor(
             chain,
@@ -359,15 +357,13 @@ async def test_real_creator_journey_survives_restart_and_reaches_attribution(
                 )
             },
         )
-        qualification = HistoricalQualificationChecker(
-            QualificationReader(
-                chain,
-                QualificationConfig(
-                    owner_hotkey=validator_wallet.hotkey.ss58_address,
-                    minimum_conviction_alpha=Decimal("0"),
-                    effective_block=0,
-                ),
-            )
+        qualification = QualificationReader(
+            chain,
+            QualificationConfig(
+                owner_hotkey=validator_wallet.hotkey.ss58_address,
+                minimum_conviction_alpha=Decimal("0"),
+                effective_block=0,
+            ),
         )
         attributions = await CampaignReconciler(
             validator_store,

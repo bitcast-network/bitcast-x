@@ -26,7 +26,6 @@ from bitcast_x.miner.service import load_wallet
 from bitcast_x.ops import RuntimeHealth, create_ops_app
 from bitcast_x.publishing import DataPublisher
 from bitcast_x.qualification import (
-    HistoricalQualificationChecker,
     QualificationReader,
     QualificationSchedule,
 )
@@ -207,11 +206,12 @@ class ValidatorService:
                     raise ValueError("qualification policy is required")
                 qualification_reader = QualificationReader(chain, qualification_policy)
                 qualification_schedule = qualification_reader.schedule
-                qualification = HistoricalQualificationChecker(qualification_reader)
-                reconciler = CampaignReconciler(store, x_provider, qualification)
+                reconciler = CampaignReconciler(store, x_provider, qualification_reader)
                 preview_store = PreviewStore(self.settings.state_dir / "preview-cache")
                 preview_provider = PreviewXProvider(x_provider, preview_store)
-                preview_reconciler = CampaignReconciler(store, preview_provider, qualification)
+                preview_reconciler = CampaignReconciler(
+                    store, preview_provider, qualification_reader
+                )
                 if self.settings.llm_provider == "chutes":
                     llm_url = "https://llm.chutes.ai/v1/chat/completions"
                     llm_model = "Qwen/Qwen3-32B"

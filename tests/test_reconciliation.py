@@ -22,6 +22,7 @@ from bitcast_x.protocol import (
 )
 from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
+from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
@@ -130,9 +131,9 @@ def campaign(
             scoring_close_block=scoring_close_block,
             exclusive_miner_hotkey=exclusive,
         ),
-        title="Campaign",
+        display="Campaign",
         brief="Talk about the wallet in your own words",
-        ecosystem_id="ecosystem",
+        pools=("ecosystem",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="1000.00",
@@ -196,7 +197,6 @@ def persist_batch(
             history_id=(bytes.fromhex(batch.history_id) if batch.history_id else None),
         ),
     )
-    store.persist_block(block, [anchor])
     store.persist_verified(batch, anchor)
 
 
@@ -207,7 +207,7 @@ def open_history(
     draft: str | None = None,
     revealed_draft: str | None = None,
 ) -> ValidatorStore:
-    store = ValidatorStore(path, start_block=10)
+    store = ValidatorStore(path)
     claim_reveal = DraftReveal(
         claim_id="01" * 16,
         draft=draft
@@ -359,7 +359,7 @@ async def test_open_campaign_attributes_independently_fetched_ordinary_edit(tmp_
 async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
     tmp_path: Path,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     reveal = DraftReveal(claim_id="01" * 16, draft=tweet().text, nonce="02" * 32)
     claim_batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -566,7 +566,7 @@ async def test_changed_reveal_is_rejected_against_the_committed_open_claim(tmp_p
 
 @pytest.mark.asyncio
 async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     submission = SubmissionEvent(
         submission_id="03" * 16,
         campaign_id="campaign",
@@ -641,7 +641,7 @@ async def test_tweet_published_after_campaign_close_is_rejected(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     submission = SubmissionEvent(
         submission_id="03" * 16,
         campaign_id="campaign",
@@ -675,7 +675,7 @@ async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path
 
 @pytest.mark.asyncio
 async def test_late_submission_is_audited_without_fetching_x(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=21)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     submission = SubmissionEvent(
         submission_id="03" * 16,
         campaign_id="campaign",
@@ -722,7 +722,7 @@ async def test_campaign_freezes_only_after_its_reconciliation_window(tmp_path: P
 
 @pytest.mark.asyncio
 async def test_exclusive_campaign_skips_claim_and_matcher(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     submission = SubmissionEvent(
         submission_id="03" * 16,
         campaign_id="campaign",
@@ -762,7 +762,6 @@ async def test_exclusive_campaign_rejects_missing_or_wrong_submitter_identity_at
 ) -> None:
     store = ValidatorStore(
         tmp_path / "validator.sqlite3",
-        start_block=CREATOR_BINDING_ACTIVATION_BLOCK,
     )
     submission = SubmissionEvent(
         version=2 if submitted_creator_x_id is None else 3,
@@ -811,7 +810,6 @@ async def test_exclusive_campaign_accepts_legacy_submission_before_activation(
 ) -> None:
     store = ValidatorStore(
         tmp_path / "validator.sqlite3",
-        start_block=CREATOR_BINDING_ACTIVATION_BLOCK - 1,
     )
     submission = SubmissionEvent(
         version=2,
@@ -857,7 +855,7 @@ async def test_exclusive_campaign_accepts_legacy_submission_before_activation(
 
 @pytest.mark.asyncio
 async def test_exclusive_campaign_rejects_a_different_miner(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     submission = SubmissionEvent(
         submission_id="03" * 16,
         campaign_id="campaign",
@@ -890,7 +888,7 @@ async def test_exclusive_campaign_rejects_a_different_miner(tmp_path: Path) -> N
 async def test_exclusive_submission_unqualified_at_commitment_cannot_be_rescued(
     tmp_path: Path,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     submission = SubmissionEvent(
         submission_id="03" * 16,
         campaign_id="campaign",
@@ -937,7 +935,7 @@ async def test_claim_ids_are_namespaced_by_miner_across_order_and_retry(
     victim_blocks: tuple[int, int, int],
     attacker_blocks: tuple[int, int],
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     claim_id = "01" * 16
     history = miner_claim_history(
         hotkey=MINER,
@@ -980,7 +978,7 @@ async def test_claim_ids_are_namespaced_by_miner_across_order_and_retry(
 async def test_consuming_claim_id_for_one_miner_does_not_consume_another_miners_claim(
     tmp_path: Path,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     claim_id = "01" * 16
     history = miner_claim_history(
         hotkey=MINER,
@@ -1138,7 +1136,7 @@ def _exclusive_final_campaign(campaign_id: str) -> CampaignRecord:
 def _two_campaign_finalization(
     tmp_path: Path,
 ) -> tuple[ValidatorStore, CampaignFeed, CampaignRecord, CampaignRecord]:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     campaign_a = _exclusive_final_campaign("campaign-a")
     campaign_b = _exclusive_final_campaign("campaign-b")
     batch = CommittedBatch.create(
@@ -1184,7 +1182,7 @@ def _two_campaign_finalization(
 
 @pytest.mark.asyncio
 async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     record = _exclusive_final_campaign("campaign")
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -1283,6 +1281,7 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
         store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
     ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
 
     assert [item.campaign_id for item in attributions] == ["campaign-a", "campaign-b"]
@@ -1353,8 +1352,8 @@ async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> No
     )
 
     assert [item.attribution.campaign_id for item in scored] == ["campaign-b"]
-    assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-a") == []
-    assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-b") is not None
+    assert store.scored_reconciliation("campaign-a") == []
+    assert store.scored_reconciliation("campaign-b") is not None
     assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
     assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
@@ -1362,7 +1361,7 @@ async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_preview_defers_only_the_tweet_with_unavailable_evidence(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     batch = CommittedBatch.create(
         miner_hotkey=MINER,
         sequence=1,
@@ -1644,6 +1643,7 @@ async def test_verified_history_reaches_frozen_weights_and_shadow_publication(
         store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
     ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
 
     assert attributions[0].accepted is True
@@ -1657,7 +1657,7 @@ async def test_verified_history_reaches_frozen_weights_and_shadow_publication(
     assert decisions[0]["reward_status"] == "rewarded"
     assert decisions[0]["reward_reason"] == "accepted"
     assert decisions[0]["daily_usd_floor"] == floors[0].daily_usd_floor
-    assert store.publication_succeeded("snapshot", "campaign") is True
+    assert store.publication_succeeded("campaign") is True
 
 
 @pytest.mark.asyncio
@@ -1669,7 +1669,7 @@ async def test_independent_restarted_validators_produce_identical_full_shadow_re
         state_dir = tmp_path / operator
         path = state_dir / "validator.sqlite3"
         open_history(path)
-        store = ValidatorStore(path, start_block=999)
+        store = ValidatorStore(path)
         record = campaign().model_copy(
             update={"emission_start_block": 30, "emission_end_block": 40}
         )

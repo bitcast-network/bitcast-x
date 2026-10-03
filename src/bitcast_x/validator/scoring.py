@@ -63,22 +63,13 @@ class AttributionScorer:
         feed: CampaignFeed,
         attributions: list[AttributionResult],
         *,
-        cached_evidence: dict[str, tuple[TweetFetch, EngagementFetch]] | None = None,
         defer_unavailable_tweets: bool = False,
     ) -> list[ScoredAttribution]:
         """Score accepted results, optionally deferring unavailable tweet evidence."""
 
         accepted = [result for result in attributions if result.accepted]
         tweet_ids = sorted({item.tweet_id for item in accepted})
-        evidence_values = await asyncio.gather(
-            *(
-                self._evidence_for_score(
-                    item,
-                    cached=(cached_evidence or {}).get(item),
-                )
-                for item in tweet_ids
-            )
-        )
+        evidence_values = await asyncio.gather(*(self._fetch_evidence(item) for item in tweet_ids))
         evidence = dict(zip(tweet_ids, evidence_values, strict=True))
         scored: list[ScoredAttribution] = []
         for item in accepted:
@@ -125,16 +116,6 @@ class AttributionScorer:
                 item.attribution.miner_hotkey or "",
             ),
         )
-
-    async def _evidence_for_score(
-        self,
-        tweet_id: str,
-        *,
-        cached: tuple[TweetFetch, EngagementFetch] | None,
-    ) -> tuple[TweetFetch, EngagementFetch]:
-        if cached is not None:
-            return cached
-        return await self._fetch_evidence(tweet_id)
 
     async def _evaluate_with_deferral(
         self,

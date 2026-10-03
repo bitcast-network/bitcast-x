@@ -152,7 +152,7 @@ class RewardCoordinator:
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
             campaign_id = campaign.access.campaign_id
             existing = (
-                self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                self.store.scored_reconciliation(campaign_id)
                 if self.store.campaign_finalized(campaign_id)
                 else None
             )
@@ -181,7 +181,7 @@ class RewardCoordinator:
                     exc,
                 )
                 continue
-            self.store.persist_scores(feed.snapshot_id, campaign_id, scored)
+            self.store.persist_scores(campaign_id, scored)
             output.extend(scored)
             completed_campaign_ids.add(campaign_id)
         self._completed_campaign_ids = frozenset(completed_campaign_ids)
@@ -223,7 +223,7 @@ class RewardCoordinator:
                 continue
             if campaign_id not in by_campaign:
                 stored_scores = (
-                    self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                    self.store.scored_reconciliation(campaign_id)
                     if self.store.campaign_finalized(campaign_id)
                     else None
                 )

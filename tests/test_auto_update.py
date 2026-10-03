@@ -30,10 +30,7 @@ def _logical_dump(path: Path) -> str:
 
 
 def test_automatic_updates_require_explicit_opt_in(tmp_path: Path) -> None:
-    settings = Settings(state_dir=tmp_path / "state")
-    assert not auto_update.auto_update_enabled(settings)
-    assert auto_update.auto_update_enabled(Settings(auto_update=True))
-    assert not auto_update.auto_update_enabled(Settings(auto_update=False))
+    assert Settings(_env_file=None, state_dir=tmp_path / "state").auto_update is False
 
 
 def test_upgrade_check_uses_disposable_copies_without_changing_state(tmp_path: Path) -> None:

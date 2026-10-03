@@ -25,12 +25,12 @@ from bitcast_x.protocol import (
     MiningProtocol,
 )
 from bitcast_x.qualification import (
-    HistoricalQualificationChecker,
     QualificationConfig,
     QualificationReader,
 )
 from bitcast_x.transport import SignedMinerClient, create_miner_app
 from bitcast_x.validator.ingestion import MinerEndpoint, ValidatorIngestor
+from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
@@ -359,7 +359,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         )
         assert status_response.json()["status"] == "verification_pending"
 
-    validator_store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    validator_store = ValidatorStore(tmp_path / "validator.sqlite3")
 
     def client_factory(endpoint: MinerEndpoint) -> SignedMinerClient:
         return SignedMinerClient(
@@ -400,15 +400,13 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
             TWEET_ID: EngagementFetch(engagements={}, provider_available=True),
         },
     )
-    qualification = HistoricalQualificationChecker(
-        QualificationReader(
-            chain,
-            QualificationConfig(
-                owner_hotkey=validator_hotkey,
-                minimum_conviction_alpha=Decimal("0"),
-                effective_block=0,
-            ),
-        )
+    qualification = QualificationReader(
+        chain,
+        QualificationConfig(
+            owner_hotkey=validator_hotkey,
+            minimum_conviction_alpha=Decimal("0"),
+            effective_block=0,
+        ),
     )
     attributions = await CampaignReconciler(
         validator_store,
@@ -432,6 +430,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         validator_store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
     ).publish(feed, scored, rewards, block=35, hotkey_to_uid={miner_hotkey: 7})
 
     assert len(attributions) == 1

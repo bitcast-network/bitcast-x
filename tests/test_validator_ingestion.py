@@ -171,7 +171,7 @@ async def test_reconciles_pages_and_recovers_cursor_after_restart(
 ) -> None:
     first, second = batches()
     path = tmp_path / "validator.sqlite3"
-    store = ValidatorStore(path, start_block=10)
+    store = ValidatorStore(path)
     client = FakeClient([first, second])
     chain = FakeChain(
         {10: [observation(first, 10)], 11: [observation(second, 11)]},
@@ -182,11 +182,11 @@ async def test_reconciles_pages_and_recovers_cursor_after_restart(
         result = await ingestor(store, client, chain).reconcile(
             MinerEndpoint(MINER, "http://miner")
         )
-    restarted = ValidatorStore(path, start_block=999)
+    restarted = ValidatorStore(path)
 
     assert result.quarantined is False
     assert result.batches_verified == 2
-    assert restarted.cursor(MINER) == (2, second.batch_hash)
+    assert restarted.history_cursor(MINER)[1:] == (2, second.batch_hash)
     assert chain.read_blocks == [10, 11]
     assert client.closed is True
     assert (
@@ -198,7 +198,7 @@ async def test_reconciles_pages_and_recovers_cursor_after_restart(
 @pytest.mark.asyncio
 async def test_manifest_gap_quarantines_run_after_last_valid_batch(tmp_path: Path) -> None:
     first, second = batches()
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     gap_observation = observation(second, 11)
     gap_observation = ChainCommitment(
         hotkey=MINER,
@@ -222,13 +222,13 @@ async def test_manifest_gap_quarantines_run_after_last_valid_batch(tmp_path: Pat
 
     assert result.quarantined is True
     assert "manifest gap" in str(result.error)
-    assert store.cursor(MINER) == (1, first.batch_hash)
+    assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
 @pytest.mark.asyncio
 async def test_latest_recommitment_cannot_hide_changed_history(tmp_path: Path) -> None:
     first, _second = batches()
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     latest = ChainCommitment(
         hotkey=MINER,
         block=11,
@@ -251,7 +251,7 @@ async def test_latest_recommitment_cannot_hide_changed_history(tmp_path: Path) -
 
     assert result.quarantined is True
     assert result.batches_verified == 1
-    assert store.cursor(MINER) == (1, first.batch_hash)
+    assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
 @pytest.mark.asyncio
@@ -259,7 +259,7 @@ async def test_first_history_batch_atomically_preserves_old_batches_and_starts_f
     tmp_path: Path,
 ) -> None:
     first, second = batches()
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     store.persist_verified(first, observation(first, 10))
     store.persist_verified(second, observation(second, 11))
     history_id = "72" * 32
@@ -298,8 +298,8 @@ async def test_history_boundary_converges_validators_with_different_old_prefixes
     tmp_path: Path,
 ) -> None:
     first, second = batches()
-    ahead = ValidatorStore(tmp_path / "ahead.sqlite3", start_block=10)
-    behind = ValidatorStore(tmp_path / "behind.sqlite3", start_block=10)
+    ahead = ValidatorStore(tmp_path / "ahead.sqlite3")
+    behind = ValidatorStore(tmp_path / "behind.sqlite3")
     ahead.persist_verified(first, observation(first, 10))
     ahead.persist_verified(second, observation(second, 11))
     behind.persist_verified(first, observation(first, 10))
@@ -326,7 +326,7 @@ async def test_history_boundary_converges_validators_with_different_old_prefixes
 
 
 def test_closed_history_cannot_be_reactivated(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     legacy, _ = batches()
     first_history = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -357,7 +357,7 @@ def test_closed_history_cannot_be_reactivated(tmp_path: Path) -> None:
 
 
 def test_observed_unverified_history_id_cannot_be_reused(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     legacy, _ = batches()
     observed = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -380,7 +380,7 @@ def test_observed_unverified_history_id_cannot_be_reused(tmp_path: Path) -> None
         history_id="71" * 32,
         events=(legacy.events[0].model_copy(update={"claim_id": "07" * 16}),),
     )
-    store.persist_block(10, [observation(observed, 10)])
+    store.persist_verified(observed, observation(observed, 10))
     store.persist_verified(active, observation(active, 11))
 
     with pytest.raises(ProtocolError, match="history ID was already used"):
@@ -389,7 +389,7 @@ def test_observed_unverified_history_id_cannot_be_reused(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_new_history_rejects_boundary_before_verified_history(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     old, _ = batches()
     store.persist_verified(old, observation(old, 20))
     resumed = CommittedBatch.create(
@@ -417,7 +417,7 @@ async def test_recommitted_sequence_without_exact_batch_proof_is_quarantined(
     tmp_path: Path,
 ) -> None:
     first, _second = batches()
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     mismatched = observation(first, 10)
     mismatched = ChainCommitment(
         hotkey=mismatched.hotkey,
@@ -442,7 +442,7 @@ async def test_recommitted_sequence_without_exact_batch_proof_is_quarantined(
     assert result.quarantined is True
     assert result.batches_verified == 0
     assert result.error == "on-chain hash does not match complete batch"
-    assert store.cursor(MINER) == (0, None)
+    assert store.history_cursor(MINER)[1:] == (0, None)
 
 
 @pytest.mark.asyncio
@@ -450,7 +450,7 @@ async def test_unreachable_miner_is_availability_failure_without_cursor_change(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     first, _second = batches()
     chain = FakeChain(latest=observation(first, 10).envelope)
 
@@ -460,7 +460,7 @@ async def test_unreachable_miner_is_availability_failure_without_cursor_change(
 
     assert result.available is False
     assert result.quarantined is False
-    assert store.cursor(MINER) == (0, None)
+    assert store.history_cursor(MINER)[1:] == (0, None)
     assert any(
         f"miner reconciliation unavailable hotkey={MINER} endpoint=http://miner" in message
         and "error=offline" in message
@@ -470,7 +470,7 @@ async def test_unreachable_miner_is_availability_failure_without_cursor_change(
 
 @pytest.mark.asyncio
 async def test_slow_miner_is_isolated_as_availability_failure(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     first, _second = batches()
     chain = FakeChain(latest=observation(first, 10).envelope)
 
@@ -490,7 +490,7 @@ async def test_sparse_reconciliation_reads_only_reported_commitment_blocks(tmp_p
         {10: [observation(first, 10)], 11: [observation(second, 11)]},
         latest=observation(second, 11).envelope,
     )
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
 
     result = await ingestor(store, FakeClient([first, second]), chain).reconcile(
         MinerEndpoint(MINER, "http://miner")
@@ -508,7 +508,7 @@ def test_verified_positions_must_increase_with_batch_sequence(tmp_path: Path) ->
     with pytest.raises(ProtocolError, match="positions must increase"):
         store.persist_verified(second, observation(second, 9))
 
-    assert store.cursor(MINER) == (1, first.batch_hash)
+    assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
 @pytest.mark.asyncio
@@ -521,22 +521,22 @@ async def test_temporarily_offline_miner_heals_on_later_poll(
         {10: [observation(first, 10)], 11: [observation(second, 11)]},
         latest=observation(second, 11).envelope,
     )
-    store = ValidatorStore(path, start_block=10)
+    store = ValidatorStore(path)
 
     unavailable = await ingestor(store, FakeClient([], fail=True), chain).reconcile(
         MinerEndpoint(MINER, "http://miner")
     )
     assert unavailable.available is False
-    assert store.cursor(MINER) == (0, None)
+    assert store.history_cursor(MINER)[1:] == (0, None)
 
-    restarted = ValidatorStore(path, start_block=999)
+    restarted = ValidatorStore(path)
     recovered = await ingestor(restarted, FakeClient([first, second]), chain).reconcile(
         MinerEndpoint(MINER, "http://miner")
     )
 
     assert recovered.available is True
     assert recovered.batches_verified == 2
-    assert restarted.cursor(MINER) == (2, second.batch_hash)
+    assert restarted.history_cursor(MINER)[1:] == (2, second.batch_hash)
 
 
 @pytest.mark.asyncio

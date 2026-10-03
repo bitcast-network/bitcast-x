@@ -19,7 +19,6 @@ from bitcast_x.miner.store import MinerStore
 from bitcast_x.ops import RuntimeHealth, create_ops_app
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.release import source_revision
-from bitcast_x.rewards import TweetReward
 from bitcast_x.sqlite import apply_migrations
 from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.store import ValidatorStore
@@ -96,19 +95,19 @@ def test_migration_runner_rejects_state_from_newer_binary(tmp_path: Path) -> Non
 
 def test_unversioned_existing_store_is_adopted_without_losing_state(tmp_path: Path) -> None:
     path = tmp_path / "legacy-validator.sqlite3"
-    original = ValidatorStore(path, start_block=10)
-    original.persist_block(10, [])
+    original = ValidatorStore(path)
+    original.persist_shadow_weights(10, "snapshot", {0: 1.0})
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA user_version = 0")
     finally:
         connection.close()
 
-    reopened = ValidatorStore(path, start_block=999)
+    ValidatorStore(path)
 
-    assert reopened.scanned_block() == 10
     connection = sqlite3.connect(path)
     try:
+        assert connection.execute("SELECT block FROM shadow_weights").fetchall() == [(10,)]
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
     finally:
         connection.close()
@@ -135,72 +134,6 @@ def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path)
         connection.close()
 
 
-def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: Path) -> None:
-    path = tmp_path / "validator.sqlite3"
-    store = ValidatorStore(path)
-    now = datetime(2026, 8, 13, tzinfo=UTC)
-    original = CampaignRecord(
-        access=CampaignAccess(
-            campaign_id="frozen",
-            mechanism_id=1,
-            mining_protocol=MiningProtocol.PRECLAIM_V2,
-            scoring_close_block=20,
-        ),
-        title="Frozen campaign",
-        brief="original brief",
-        ecosystem_id="eco",
-        opens_at=now,
-        closes_at=now + timedelta(days=1),
-        reward_pool_usd="700",
-        emission_start_block=30,
-        emission_end_block=40,
-    )
-    store.bind_campaign_protocols((original,))
-    store.persist_reconciliation(
-        snapshot_id="snapshot",
-        campaign_id="frozen",
-        campaign_json=original.model_dump_json(),
-        results=[],
-    )
-    store.persist_campaign_rewards(
-        snapshot_id="snapshot",
-        campaign_id="frozen",
-        campaign_json=original.model_dump_json(),
-        rewards=[
-            TweetReward(
-                campaign_id="frozen",
-                tweet_id="1",
-                creator_x_id="creator",
-                miner_hotkey="miner",
-                score=1.0,
-                daily_usd_floor=1.0,
-            )
-        ],
-        decisions=[],
-    )
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("ALTER TABLE campaign_protocols DROP COLUMN campaign_contract_json")
-        connection.execute("PRAGMA user_version = 4")
-    finally:
-        connection.close()
-
-    reopened = ValidatorStore(path)
-    connection = sqlite3.connect(path)
-    try:
-        row = connection.execute(
-            "SELECT campaign_contract_json FROM campaign_protocols WHERE campaign_id = 'frozen'"
-        ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert row is not None and row[0] == original.model_dump_json()
-    finally:
-        connection.close()
-
-    assert reopened.bind_campaign_protocols(
-        (original.model_copy(update={"brief": "mutated brief"}),)
-    ) == (original,)
-
-
 def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Path) -> None:
     path = tmp_path / "validator.sqlite3"
     store = ValidatorStore(path)
@@ -212,9 +145,9 @@ def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Pat
             mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=20,
         ),
-        title="Featured campaign",
+        display="Featured campaign",
         brief="original brief",
-        ecosystem_id="eco",
+        pools=("eco",),
         opens_at=now,
         closes_at=now + timedelta(days=1),
         reward_pool_usd="700",
@@ -277,9 +210,9 @@ def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -
     wal.write_bytes(b"preserved wal")
     shm.write_bytes(b"preserved shm")
 
-    store = ValidatorStore(path, start_block=321)
+    store = ValidatorStore(path)
 
-    assert store.scanned_block() == 320
+    assert store.verified_batches() == []
     assert path.read_bytes().startswith(b"SQLite format 3\x00")
     quarantined = sorted(tmp_path.glob("validator.sqlite3*.corrupt-*"))
     assert len(quarantined) == 3

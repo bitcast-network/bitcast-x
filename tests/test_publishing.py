@@ -21,6 +21,7 @@ from bitcast_x.protocol import (
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
 from bitcast_x.rewards import RewardDecision, TweetReward
 from bitcast_x.scoring import EngagementContribution
+from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.publishing import ShadowResultPublisher, create_brief_tweets_payload
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
@@ -40,9 +41,9 @@ def campaign() -> CampaignRecord:
             mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=100,
         ),
-        title="Campaign",
+        display="Campaign",
         brief="Write about the campaign",
-        ecosystem_id="tao",
+        pools=("tao",),
         opens_at=datetime(2026, 8, 1, tzinfo=UTC),
         closes_at=datetime(2026, 8, 5, tzinfo=UTC),
         reward_pool_usd="700",
@@ -312,6 +313,7 @@ async def test_preview_omits_accepted_tweet_when_its_scoring_evidence_is_unavail
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
         now=lambda: BEFORE_FEATURED_SELECTION,
     )
 
@@ -346,6 +348,7 @@ async def test_preview_publishes_performance_breakdown_without_payment_targets(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
         now=lambda: BEFORE_FEATURED_SELECTION,
     )
 
@@ -390,6 +393,7 @@ async def test_preview_is_not_republished_until_its_semantic_payload_changes(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
         now=lambda: BEFORE_FEATURED_SELECTION,
     )
 
@@ -444,6 +448,7 @@ async def test_preview_pins_featured_tweet_and_never_replaces_it(
         first_store,
         first_data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
         now=lambda: selected_at,
     )
 
@@ -477,6 +482,7 @@ async def test_preview_pins_featured_tweet_and_never_replaces_it(
         restarted_store,
         restarted_data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
         now=lambda: selected_at + timedelta(minutes=5),
     )
     rejected = AttributionResult(
@@ -525,6 +531,7 @@ async def test_failed_preview_publication_retries_same_payload_after_one_minute(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
         now=lambda: clock[0],
     )
 
@@ -671,7 +678,7 @@ def test_zero_value_publication_is_replaceable(tmp_path: Path) -> None:
         succeeded=True,
     )
 
-    assert store.publication_succeeded("snapshot", "campaign") is False
+    assert store.publication_succeeded("campaign") is False
 
 
 def test_positive_publication_success_is_durable_and_changed_replay_fails(
@@ -690,7 +697,7 @@ def test_positive_publication_success_is_durable_and_changed_replay_fails(
             succeeded=True,
         )
 
-    assert store.publication_succeeded("snapshot", "campaign") is True
+    assert store.publication_succeeded("campaign") is True
     store.record_publication("snapshot", "campaign", run_id="run", payload=payload, succeeded=True)
 
 

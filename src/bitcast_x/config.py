@@ -15,8 +15,6 @@ from bitcast_x.qualification import (
     resolve_qualification_policy,
 )
 
-QUALIFICATION_OWNER_HOTKEY = PUBLIC_QUALIFICATION_OWNER_HOTKEY
-
 
 class Settings(BaseSettings):
     """Environment-driven settings shared by miner and validator processes."""
@@ -56,7 +54,7 @@ class Settings(BaseSettings):
     miner_results_api_url: str = "https://bitcast-api.bitcast.network"
     miner_results_poll_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     miner_enabled_ecosystem_ids: tuple[str, ...] = ()
-    qualification_owner_hotkey: str | None = QUALIFICATION_OWNER_HOTKEY
+    qualification_owner_hotkey: str | None = PUBLIC_QUALIFICATION_OWNER_HOTKEY
     qualification_minimum_alpha: str = "15000"
     qualification_minimum_self_stake_alpha: str | None = None
     qualification_effective_block: int = Field(default=0, ge=0)

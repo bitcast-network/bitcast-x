@@ -43,16 +43,9 @@ def shadow_report(state_dir: Path) -> dict[str, Any]:
             FROM scored_reconciliations ORDER BY campaign_id
             """
         ).fetchall()
-        llm_table = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'llm_evaluations'"
-        ).fetchone()
-        evaluation_rows = (
-            connection.execute(
-                "SELECT prompt_hash, result_json FROM llm_evaluations ORDER BY prompt_hash"
-            ).fetchall()
-            if llm_table is not None
-            else []
-        )
+        evaluation_rows = connection.execute(
+            "SELECT prompt_hash, result_json FROM llm_evaluations ORDER BY prompt_hash"
+        ).fetchall()
     finally:
         connection.close()
     weights = [(int(row["block"]), json.loads(row["weights_json"])) for row in weight_rows]

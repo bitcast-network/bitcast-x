@@ -13,7 +13,6 @@ from urllib.parse import urljoin, urlsplit
 
 import httpx
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -105,16 +104,9 @@ class CampaignRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     access: CampaignAccess
-    display: str = Field(
-        min_length=1,
-        max_length=512,
-        validation_alias=AliasChoices("display", "title"),
-    )
+    display: str = Field(min_length=1, max_length=512)
     brief: str = Field(min_length=1, max_length=20_000)
-    pools: tuple[str, ...] = Field(
-        min_length=1,
-        validation_alias=AliasChoices("pools", "ecosystem_id"),
-    )
+    pools: tuple[str, ...] = Field(min_length=1)
     opens_at: datetime
     closes_at: datetime
     reward_pool_usd: str
@@ -145,8 +137,6 @@ class CampaignRecord(BaseModel):
     @field_validator("pools", mode="before")
     @classmethod
     def validate_pools(cls, value: object) -> tuple[str, ...]:
-        if isinstance(value, str):
-            value = (value,)
         if not isinstance(value, (list, tuple)):
             raise ValueError("campaign pools must be a list")
         normalized = tuple(pool.strip() for pool in value)
@@ -218,11 +208,10 @@ class CampaignRecord(BaseModel):
 
 
 class CampaignFeed(BaseModel):
-    """Immutable versioned snapshot shared by all miner platforms."""
+    """Immutable campaign snapshot with its ecosystem maps resolved."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    protocol_version: int = Field(default=2, frozen=True)
     snapshot_id: str = Field(min_length=1, max_length=256)
     published_at: datetime
     campaigns: tuple[CampaignRecord, ...]
@@ -462,7 +451,6 @@ class CampaignFeedClient:
         maps = await asyncio.gather(*(self._resolve_map(item) for item in document.ecosystem_maps))
         self._record_map_bindings(document.ecosystem_maps)
         return CampaignFeed(
-            protocol_version=2,
             snapshot_id=document.snapshot_id,
             published_at=document.published_at,
             campaigns=document.campaigns,

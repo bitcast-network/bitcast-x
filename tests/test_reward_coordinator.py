@@ -52,9 +52,9 @@ def record(campaign_id: str, *, exclusive: str | None = None) -> CampaignRecord:
             scoring_close_block=20,
             exclusive_miner_hotkey=exclusive,
         ),
-        title=campaign_id,
+        display=campaign_id,
         brief="brief",
-        ecosystem_id="eco",
+        pools=("eco",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="700",
@@ -295,7 +295,7 @@ async def test_freeze_scores_skips_campaigns_before_scoring_close(tmp_path: Path
 
     assert result == []
     assert scorer.campaign_ids == ["closed"]
-    assert store.scored_reconciliation(feed.snapshot_id, "future") is None
+    assert store.scored_reconciliation("future") is None
 
 
 async def test_only_current_cycle_completion_releases_zero_value_campaign(

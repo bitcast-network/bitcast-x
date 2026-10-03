@@ -48,9 +48,9 @@ def campaign(
             scoring_close_block=20,
             exclusive_miner_hotkey=exclusive_miner_hotkey,
         ),
-        title=campaign_id,
+        display=campaign_id,
         brief="brief",
-        ecosystem_id="eco",
+        pools=("eco",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="700",
@@ -151,7 +151,7 @@ def test_zero_value_v3_campaign_reopens_after_contract_edit(tmp_path) -> None:
         campaign_json=original.model_dump_json(),
         results=[],
     )
-    store.persist_scores("old-snapshot", original.access.campaign_id, [])
+    store.persist_scores(original.access.campaign_id, [])
     store.persist_campaign_rewards(
         snapshot_id="old-snapshot",
         campaign_id=original.access.campaign_id,
@@ -168,7 +168,7 @@ def test_zero_value_v3_campaign_reopens_after_contract_edit(tmp_path) -> None:
     )
 
     assert store.campaign_finalized(original.access.campaign_id) is False
-    assert store.publication_succeeded("old-snapshot", original.access.campaign_id) is False
+    assert store.publication_succeeded(original.access.campaign_id) is False
     assert store.bind_campaign_protocols((changed,)) == (changed,)
 
     store.persist_reconciliation(
@@ -186,7 +186,7 @@ def test_zero_value_v3_campaign_reopens_after_contract_edit(tmp_path) -> None:
         )
         == []
     )
-    assert store.scored_reconciliation("new-snapshot", changed.access.campaign_id) is None
+    assert store.scored_reconciliation(changed.access.campaign_id) is None
     assert store.campaign_rewards(changed.access.campaign_id, changed.model_dump_json()) is None
 
 

@@ -23,7 +23,6 @@ from bitcast_x.campaigns import (
 from bitcast_x.errors import ProtocolError
 
 FEED = {
-    "protocol_version": 2,
     "snapshot_id": "snapshot-1",
     "published_at": "2026-08-05T12:00:00Z",
     "campaigns": [

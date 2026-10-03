@@ -114,19 +114,6 @@ def estimate_payouts(
     return [daily_budget * (value / total) for value in smoothed]
 
 
-def assign_tweets(
-    campaigns: list[RewardCampaign],
-    *,
-    committed_tweet_ids: set[str] | None = None,
-) -> dict[str, set[str]]:
-    """Preserve v2 greedy max-payout assignment, caps, and deterministic tie-breaks."""
-
-    return assign_tweets_with_reasons(
-        campaigns,
-        committed_tweet_ids=committed_tweet_ids,
-    ).assigned
-
-
 def assign_tweets_with_reasons(
     campaigns: list[RewardCampaign],
     *,
@@ -222,36 +209,6 @@ def calculate_tweet_floors(
                 )
             )
     return output
-
-
-def apply_v2_bonuses(
-    campaign: RewardCampaign,
-    assigned_tweet_ids: set[str],
-    *,
-    max_bonus_per_metric: float = 0.05,
-    featured_multiplier: float = 1.05,
-    featured_top_n: int = 5,
-) -> RewardCampaign:
-    """Apply v2 performance then featured bonuses to the final assigned subset."""
-
-    performance_adjusted = apply_v2_performance_bonus(
-        campaign,
-        assigned_tweet_ids,
-        max_bonus_per_metric=max_bonus_per_metric,
-    )
-    selection = select_v2_featured_tweet(
-        performance_adjusted,
-        assigned_tweet_ids,
-        featured_top_n=featured_top_n,
-    )
-    if selection is None:
-        return performance_adjusted
-    return apply_v2_featured_bonus(
-        performance_adjusted,
-        assigned_tweet_ids,
-        selection.tweet_id,
-        featured_multiplier=featured_multiplier,
-    )
 
 
 def select_v2_featured_tweet(
@@ -434,17 +391,3 @@ def _burn(uids: list[int]) -> NDArray[np.float64]:
     """Preserve the availability/no-content fallback: only UID 0 receives weight."""
 
     return np.array([1.0 if uid == 0 else 0.0 for uid in uids], dtype=np.float64)
-
-
-def calculate_rewards(
-    campaigns: list[RewardCampaign],
-    hotkey_to_uid: dict[str, int],
-    uids: list[int],
-    *,
-    committed_tweet_ids: set[str] | None = None,
-) -> tuple[NDArray[np.float64], list[TweetReward]]:
-    """Run assignment, floor calculation, and approved unlimited multiplier."""
-
-    assignments = assign_tweets(campaigns, committed_tweet_ids=committed_tweet_ids)
-    floors = calculate_tweet_floors(campaigns, assignments)
-    return aggregate_productive_weights(floors, hotkey_to_uid, uids), floors

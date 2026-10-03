@@ -73,7 +73,7 @@ class DataPublisher:
         now = timestamp or datetime.now(UTC)
         wire_time = now.astimezone(UTC).replace(tzinfo=None).isoformat()
         native = json_native(data)
-        signable = native.get("payload", native.get("account_data", {}))
+        signable = native["payload"]
         message = f"{signer}:{wire_time}:{json.dumps(signable, sort_keys=True)}"
         signature = self.wallet.hotkey.sign(message)
         return {
@@ -91,7 +91,6 @@ class DataPublisher:
         payload_type: str,
         run_id: str,
         payload: Any,
-        miner_uid: int | None = None,
     ) -> bool:
         """Sign, optionally gzip, and POST; return true only for an accepted 202."""
 
@@ -100,8 +99,6 @@ class DataPublisher:
             "run_id": run_id,
             "payload": payload,
         }
-        if miner_uid is not None:
-            envelope["miner_uid"] = miner_uid
         body = json.dumps(self.signed_payload(envelope)).encode()
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
         if len(body) > 1_000_000:

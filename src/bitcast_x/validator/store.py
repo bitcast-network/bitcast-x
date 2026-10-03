@@ -16,7 +16,6 @@ from pydantic import TypeAdapter
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
-    CommitmentEnvelope,
     CommitmentPosition,
     CommittedBatch,
 )
@@ -60,17 +59,14 @@ def _campaign_field_diffs(
 
 
 def _same_campaign_contract(first: str, second: str) -> bool:
-    """Compare campaign records after removing backward-compatible null placeholders."""
+    """Compare two stored campaign contracts as parsed records."""
 
     from bitcast_x.campaigns import CampaignRecord
 
     try:
-        first_record = CampaignRecord.model_validate_json(first)
-        second_record = CampaignRecord.model_validate_json(second)
-        if (first_record.max_members is None) != (second_record.max_members is None):
-            first_record = first_record.model_copy(update={"max_members": None})
-            second_record = second_record.model_copy(update={"max_members": None})
-        return first_record == second_record
+        return CampaignRecord.model_validate_json(first) == CampaignRecord.model_validate_json(
+            second
+        )
     except ValueError:
         return False
 
@@ -225,17 +221,9 @@ def _featured_tweet_selection(
 class ValidatorStore:
     """Persist observed chain anchors before atomically advancing verified cursors."""
 
-    def __init__(
-        self,
-        path: Path,
-        *,
-        start_block: int = 0,
-    ) -> None:
-        if start_block < 0:
-            raise ValueError("start_block cannot be negative")
+    def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._initial_scanned_block = start_block - 1
         self._lock = threading.RLock()
         try:
             self._initialize()
@@ -398,21 +386,6 @@ class ValidatorStore:
                 connection.execute(
                     "ALTER TABLE campaign_protocols ADD COLUMN campaign_contract_json TEXT"
                 )
-            connection.execute(
-                """
-                UPDATE campaign_protocols
-                SET campaign_contract_json = (
-                    SELECT reconciliations.campaign_json
-                    FROM reconciliations
-                    WHERE reconciliations.campaign_id = campaign_protocols.campaign_id
-                )
-                WHERE campaign_contract_json IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM reconciliations
-                    WHERE reconciliations.campaign_id = campaign_protocols.campaign_id
-                  )
-                """
-            )
             # Version four records the guarded additive column. The no-op SQL
             # keeps re-adoption safe when an otherwise-current DB has its
             # user_version cleared by an operator or older tooling.
@@ -482,13 +455,6 @@ class ValidatorStore:
                     selected_at TEXT NOT NULL
                 )
                 """
-            )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO scan_state(singleton, last_finalized_block)
-                VALUES (1, ?)
-                """,
-                (self._initial_scanned_block,),
             )
 
     def bind_campaign_protocols(
@@ -672,64 +638,6 @@ class ValidatorStore:
                 )
             return _featured_tweet_selection(row, campaign_id)
 
-    def scanned_block(self) -> int:
-        """Return the last fully persisted finalized block."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT last_finalized_block FROM scan_state WHERE singleton = 1"
-            ).fetchone()
-        return int(row["last_finalized_block"])
-
-    def persist_block(self, block: int, observations: list[ChainCommitment]) -> None:
-        """Atomically journal all observations and advance the global block scan cursor."""
-
-        with self._transaction() as connection:
-            current = int(
-                connection.execute(
-                    "SELECT last_finalized_block FROM scan_state WHERE singleton = 1"
-                ).fetchone()["last_finalized_block"]
-            )
-            if block <= current:
-                return
-            if block != current + 1:
-                raise ProtocolError(f"expected finalized block {current + 1}")
-            for observation in observations:
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO commitments(
-                        hotkey, block, extrinsic_index, block_timestamp,
-                        history_id, sequence, event_count, batch_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        observation.hotkey,
-                        observation.block,
-                        observation.extrinsic_index,
-                        observation.timestamp.isoformat(),
-                        observation.envelope.history_id.hex()
-                        if observation.envelope.history_id is not None
-                        else "",
-                        observation.envelope.sequence,
-                        observation.envelope.event_count,
-                        observation.envelope.batch_hash.hex(),
-                    ),
-                )
-            connection.execute(
-                "UPDATE scan_state SET last_finalized_block = ? WHERE singleton = 1",
-                (block,),
-            )
-
-    def cursor(self, hotkey: str) -> tuple[int, str | None]:
-        """Return the last atomically verified sequence and hash for a miner."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT last_sequence, last_batch_hash FROM miner_cursors WHERE hotkey = ?",
-                (hotkey,),
-            ).fetchone()
-        return (int(row["last_sequence"]), row["last_batch_hash"]) if row else (0, None)
-
     def history_cursor(self, hotkey: str) -> tuple[str | None, int, str | None]:
         """Return the active history ID and its independently scoped batch cursor."""
 
@@ -745,68 +653,6 @@ class ValidatorStore:
             return None, 0, None
         history_id = str(row["history_id"])
         return (history_id or None, int(row["last_sequence"]), row["last_batch_hash"])
-
-    def commitment_for_sequence(
-        self,
-        hotkey: str,
-        sequence: int,
-        *,
-        event_count: int | None = None,
-        batch_hash: str | None = None,
-    ) -> ChainCommitment | None:
-        """Return the finalized anchor proving the exact batch served by a miner."""
-
-        if (event_count is None) != (batch_hash is None):
-            raise ValueError("event_count and batch_hash must be supplied together")
-
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT block, extrinsic_index, block_timestamp, history_id,
-                       event_count, batch_hash
-                FROM commitments
-                WHERE hotkey = ? AND sequence = ? ORDER BY block, extrinsic_index
-                """,
-                (hotkey, sequence),
-            ).fetchall()
-        if not rows:
-            return None
-        if batch_hash is not None and event_count is not None:
-            rows = [
-                row
-                for row in rows
-                if int(row["event_count"]) == event_count and row["batch_hash"] == batch_hash
-            ]
-            if not rows:
-                raise ProtocolError(f"no finalized commitment matches batch sequence {sequence}")
-        elif len(rows) != 1:
-            raise ProtocolError(f"multiple commitments claim sequence {sequence}")
-        row = rows[0]
-        return ChainCommitment(
-            hotkey=hotkey,
-            block=int(row["block"]),
-            extrinsic_index=int(row["extrinsic_index"]),
-            timestamp=datetime.fromisoformat(row["block_timestamp"]),
-            envelope=CommitmentEnvelope(
-                sequence=sequence,
-                event_count=int(row["event_count"]),
-                batch_hash=bytes.fromhex(row["batch_hash"]),
-                history_id=(bytes.fromhex(str(row["history_id"])) if row["history_id"] else None),
-            ),
-        )
-
-    def next_commitment_sequence(self, hotkey: str, after_sequence: int) -> int | None:
-        """Return the lowest observed sequence beyond a miner's verified cursor."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT MIN(sequence) AS sequence FROM commitments
-                WHERE hotkey = ? AND sequence > ?
-                """,
-                (hotkey, after_sequence),
-            ).fetchone()
-        return int(row["sequence"]) if row and row["sequence"] is not None else None
 
     def persist_verified(self, batch: CommittedBatch, observation: ChainCommitment) -> None:
         """Atomically journal a targeted chain proof and advance one miner cursor."""
@@ -975,21 +821,6 @@ class ValidatorStore:
                     last_error = NULL
                 """,
                 (batch.miner_hotkey, batch_history_id, batch.sequence, batch.batch_hash),
-            )
-
-    def record_error(self, hotkey: str, error: str) -> None:
-        """Record an explanatory reconciliation error without advancing state."""
-
-        with self._transaction() as connection:
-            history_id, sequence, batch_hash = self.history_cursor(hotkey)
-            connection.execute(
-                """
-                INSERT INTO miner_cursors(
-                    hotkey, history_id, last_sequence, last_batch_hash, last_error
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(hotkey) DO UPDATE SET last_error = excluded.last_error
-                """,
-                (hotkey, history_id or "", sequence, batch_hash, error),
             )
 
     def verified_batches(self, *, through_block: int | None = None) -> list[VerifiedBatchRecord]:
@@ -1166,9 +997,7 @@ class ValidatorStore:
             campaigns.append(campaign)
         return campaigns
 
-    def scored_reconciliation(
-        self, snapshot_id: str, campaign_id: str
-    ) -> list["ScoredAttribution"] | None:
+    def scored_reconciliation(self, campaign_id: str) -> list["ScoredAttribution"] | None:
         """Return a previously frozen score set without refetching mutable engagements."""
 
         from bitcast_x.validator.scoring import ScoredAttribution
@@ -1187,7 +1016,6 @@ class ValidatorStore:
 
     def persist_scores(
         self,
-        snapshot_id: str,
         campaign_id: str,
         scored: list["ScoredAttribution"],
     ) -> None:
@@ -1285,7 +1113,7 @@ class ValidatorStore:
             )
         return result
 
-    def publication_succeeded(self, snapshot_id: str, campaign_id: str) -> bool:
+    def publication_succeeded(self, campaign_id: str) -> bool:
         """Return whether ingestion accepted a positive final allocation already."""
 
         with self._connect() as connection:

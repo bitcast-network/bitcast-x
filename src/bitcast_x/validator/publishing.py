@@ -36,11 +36,11 @@ class ShadowResultPublisher:
         publisher: DataPublisher,
         *,
         endpoint: str,
-        preview_store: PreviewStore | None = None,
+        preview_store: PreviewStore,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
-        self._preview_store = preview_store or PreviewStore(store.path.parent / "preview-cache")
+        self._preview_store = preview_store
         self._publisher = publisher
         self._endpoint = endpoint
         self._now = now or (lambda: datetime.now(UTC))
@@ -165,7 +165,7 @@ class ShadowResultPublisher:
             campaign_id = campaign.access.campaign_id
             if start is None or end is None or not start <= block <= end:
                 continue
-            if self.store.publication_succeeded(feed.snapshot_id, campaign_id):
+            if self.store.publication_succeeded(campaign_id):
                 continue
             campaign_rewards = rewards_by_campaign.get(campaign_id, [])
             frozen_economics = self.store.campaign_rewards(
@@ -206,7 +206,7 @@ class ShadowResultPublisher:
             frozen_rewards, reward_decisions = frozen_economics
             if campaign_rewards != frozen_rewards:
                 raise ProtocolError(f"campaign {campaign_id} rewards changed before publication")
-            stored_scores = self.store.scored_reconciliation(feed.snapshot_id, campaign_id) or []
+            stored_scores = self.store.scored_reconciliation(campaign_id) or []
             for item in stored_scores:
                 scored_by_key.setdefault(
                     (item.attribution.campaign_id, item.attribution.tweet_id), item

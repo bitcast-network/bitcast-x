@@ -8,10 +8,11 @@ from bitcast_x.rewards import (
     RewardTweet,
     TweetReward,
     aggregate_productive_weights,
-    apply_v2_bonuses,
-    assign_tweets,
-    calculate_rewards,
+    apply_v2_featured_bonus,
+    apply_v2_performance_bonus,
+    assign_tweets_with_reasons,
     calculate_tweet_floors,
+    select_v2_featured_tweet,
 )
 from bitcast_x.scoring import calculate_tweet_score
 
@@ -94,7 +95,7 @@ def fixture_campaigns() -> list[RewardCampaign]:
 def test_v2_assignment_and_floor_fixture_remain_exact() -> None:
     campaigns = fixture_campaigns()
 
-    assignments = assign_tweets(campaigns, committed_tweet_ids={"t9"})
+    assignments = assign_tweets_with_reasons(campaigns, committed_tweet_ids={"t9"}).assigned
     floors = calculate_tweet_floors(campaigns, assignments)
 
     assert {key: sorted(value) for key, value in assignments.items()} == {
@@ -119,13 +120,10 @@ def test_v2_assignment_and_floor_fixture_remain_exact() -> None:
 def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
     campaigns = fixture_campaigns()
 
-    weights, floors = calculate_rewards(
-        campaigns,
-        {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7},
-        [0, 3, 4, 5, 7, 9],
-    )
-    totals: dict[int, float] = {3: 0.0, 4: 0.0, 5: 0.0, 7: 0.0}
     hotkey_uid = {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7}
+    floors = calculate_tweet_floors(campaigns, assign_tweets_with_reasons(campaigns).assigned)
+    weights = aggregate_productive_weights(floors, hotkey_uid, [0, 3, 4, 5, 7, 9])
+    totals: dict[int, float] = {3: 0.0, 4: 0.0, 5: 0.0, 7: 0.0}
     for reward in floors:
         totals[hotkey_uid[reward.miner_hotkey]] += reward.daily_usd_floor
     expected_floors = np.array(
@@ -147,9 +145,8 @@ def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
 
 
 def test_no_productive_content_preserves_all_to_burn_fallback() -> None:
-    weights, floors = calculate_rewards([], {}, [0, 1, 2])
+    weights = aggregate_productive_weights([], {}, [0, 1, 2])
 
-    assert floors == []
     assert np.array_equal(weights, np.array([1.0, 0.0, 0.0], dtype=np.float64))
 
 
@@ -185,7 +182,12 @@ def test_v2_performance_then_featured_bonus_fixture_is_exact() -> None:
         ),
     )
 
-    adjusted = apply_v2_bonuses(campaign, {"t1", "t2"})
+    assigned = {"t1", "t2"}
+    selection = select_v2_featured_tweet(campaign, assigned)
+    assert selection is not None
+    adjusted = apply_v2_featured_bonus(
+        apply_v2_performance_bonus(campaign, assigned), assigned, selection.tweet_id
+    )
 
     first, second = adjusted.tweets
     assert first.performance_bonus_pct == 20.0

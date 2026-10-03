@@ -106,7 +106,7 @@ def feed() -> CampaignFeed:
                     mining_protocol=MiningProtocol.PRECLAIM_V2,
                     scoring_close_block=20,
                 ),
-                title="Campaign",
+                display="Campaign",
                 brief="Brief",
                 pools=("unrelated", "eco"),
                 opens_at=NOW,

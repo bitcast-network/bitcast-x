@@ -29,6 +29,16 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
   These incompatible operator and package changes require a software major release. See the
   [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
+- Remove unused validator and protocol APIs: the block-scan store methods (`persist_block`,
+  `scanned_block`, `commitment_for_sequence`, `next_commitment_sequence`) and the `start_block`
+  store argument, `ValidatorStore.cursor`/`record_error` (which wrote a column nothing read),
+  `ClaimLedger`/`ClaimRecord`, the test-only reward wrappers (`assign_tweets`, `apply_v2_bonuses`,
+  `calculate_rewards`), `HistoricalQualificationChecker` (use `QualificationReader.eligible`),
+  `auto_update_enabled`, `AttributionScorer.score(cached_evidence=...)`, the publisher's unused
+  `miner_uid` argument, ignored `snapshot_id` store arguments, the `title`/`ecosystem_id` campaign
+  field aliases and `CampaignFeed.protocol_version`. `ShadowResultPublisher` now requires its
+  `preview_store`. Startup no longer re-runs a contract backfill that every schema-6 database has
+  already applied.
 - Remove the remaining legacy compatibility code: `MiningProtocol.LEGACY_CONNECTION` and its
   retirement guard, the v3 manifest fallback, v2 full-feed parsing, `CampaignFeedClient.cached()`,
   and the unused `max_referral_amount` map field. Clients read only the v4 manifest; the retired v3

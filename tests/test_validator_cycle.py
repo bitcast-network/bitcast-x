@@ -28,9 +28,9 @@ def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
             mining_protocol=protocol,
             scoring_close_block=BLOCK - 10,
         ),
-        title=campaign_id,
+        display=campaign_id,
         brief="brief",
-        ecosystem_id="eco",
+        pools=("eco",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="700",
@@ -61,7 +61,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
             campaign_json=frozen.model_dump_json(),
             results=[],
         )
-        store.persist_scores("old", "preclaim", [])
+        store.persist_scores("preclaim", [])
         store.persist_campaign_rewards(
             snapshot_id="old",
             campaign_id="preclaim",
