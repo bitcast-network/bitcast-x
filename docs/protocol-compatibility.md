@@ -47,7 +47,9 @@ strings are consensus-visible contracts.
   makes the complete campaign result immutable across restarts and feed snapshots.
 - A pinned featured tweet fixes only which tweet is announced; it never freezes the campaign
   contract or delays settlement. Final rewards apply the bonus to the pinned tweet when it still
-  qualifies and otherwise settle without one, never substituting a different tweet.
+  qualifies and otherwise settle without one, never substituting a different tweet. Validators keep
+  the pin's recorded contract current and clear an unused pin when rewards freeze, so earlier
+  releases that validate the pin remain safe rollback targets.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version and golden vectors. The coordinated `DX3` rollout is
   the explicit exception to an extended overlap because every current miner and validator is

@@ -259,6 +259,12 @@ def test_featured_pin_does_not_freeze_campaign_contract(tmp_path) -> None:
     assert store.bind_campaign_protocols((changed,)) == (changed,)
     selection = store.featured_tweet_selection("same")
     assert selection is not None and selection.tweet_id == "1"
+    # The pin records the adopted contract so older releases accept it on rollback.
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
+        pin_contract = connection.execute(
+            "SELECT campaign_json FROM featured_tweet_selections WHERE campaign_id = 'same'"
+        ).fetchone()[0]
+    assert pin_contract == changed.model_dump_json()
 
 
 def test_settled_rewards_freeze_contract_adopted_after_featured_pin(tmp_path) -> None:

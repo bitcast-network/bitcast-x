@@ -297,17 +297,18 @@ class RewardCoordinator:
     ) -> str | None:
         """Return the featured tweet to reward at settlement.
 
-        The tweet pinned before close is honored when it still qualifies. A pin
-        that no longer qualifies (for example after a campaign edit) is dropped
-        rather than replaced, so the announced feature never changes to a
-        different tweet. Without a pin, the selection is made from final data.
+        The tweet pinned before close is honored while it remains an eligible
+        tweet of the campaign. A pin that no longer qualifies (for example after
+        a campaign edit) is dropped rather than replaced, so the announced
+        feature never changes to a different tweet. Without a pin, the
+        selection is made from final data.
         """
 
         selection = self.store.featured_tweet_selection(campaign.campaign_id)
         if selection is None:
             candidate = select_v2_featured_tweet(campaign, assigned_tweet_ids)
             return candidate.tweet_id if candidate is not None else None
-        if selection.tweet_id in assigned_tweet_ids:
+        if any(tweet.tweet_id == selection.tweet_id for tweet in campaign.tweets):
             return selection.tweet_id
         LOGGER.warning(
             "pinned featured tweet no longer qualifies; settling without featured bonus "

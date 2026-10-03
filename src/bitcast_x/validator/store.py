@@ -569,6 +569,13 @@ class ValidatorStore:
                     """,
                     (protocol, exclusive_hotkey, campaign_json, campaign_id),
                 )
+                # Releases up to 3.0 (#119-#140) reject a pin whose recorded
+                # contract differs from the bound one; keep it current so a
+                # rollback to them stays safe.
+                connection.execute(
+                    "UPDATE featured_tweet_selections SET campaign_json = ? WHERE campaign_id = ?",
+                    (campaign_json, campaign_id),
+                )
                 if reopening_provisional:
                     LOGGER.warning(
                         "reopened zero-value campaign with latest contract campaign=%s",
@@ -612,8 +619,8 @@ class ValidatorStore:
         """Atomically pin the first valid selection and return it thereafter.
 
         The pin fixes which tweet is announced as featured; it does not freeze
-        the campaign contract. ``campaign_json`` records the contract the
-        selection was made under for audit.
+        the campaign contract. ``campaign_json`` is kept current for older
+        releases that still validate it.
         """
 
         if not campaign_id or not tweet_id:
@@ -1427,3 +1434,15 @@ class ValidatorStore:
                     )
                 except sqlite3.IntegrityError as exc:
                     raise ProtocolError(f"tweet {decision.tweet_id} was already rewarded") from exc
+            if _rewards_have_positive_allocation(rewards_json):
+                # These rewards are now frozen. Drop a pin they did not use so
+                # releases up to 3.0 (#119-#140), which publish the stored pin,
+                # agree with the frozen rewards after a rollback.
+                featured_tweet_id = next(
+                    (item.featured_tweet_id for item in rewards if item.featured_tweet_id), None
+                )
+                connection.execute(
+                    "DELETE FROM featured_tweet_selections "
+                    "WHERE campaign_id = ? AND tweet_id IS NOT ?",
+                    (campaign_id, featured_tweet_id),
+                )

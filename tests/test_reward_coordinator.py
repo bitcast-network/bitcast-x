@@ -475,6 +475,57 @@ def test_ineligible_featured_pin_settles_without_bonus_or_replacement(tmp_path: 
     assert all(item.featured_tweet_id is None for item in excluded_floors)
     assert store.campaign_rewards("excluded", excluded.model_dump_json()) is not None
     assert coordinator.pending_reward_campaign_ids(feed, block=35) == ()
+    # The unused pin is cleared once rewards freeze so older releases agree on rollback.
+    assert store.featured_tweet_selection("excluded") is None
+
+
+def test_eligible_pin_keeps_bonus_when_capped_out_of_assignment(tmp_path: Path) -> None:
+    """A pinned tweet still qualifies while eligible, even if not itself assigned."""
+
+    campaign = record("campaign").model_copy(update={"max_tweets_per_creator": 1})
+    pinned = scored("campaign", "1", MINER_A).model_copy(
+        update={
+            "tweet": scored("campaign", "1", MINER_A).tweet.model_copy(
+                update={"author_x_id": "creator", "author": "alice"}
+            )
+        }
+    )
+    stronger = scored("campaign", "2", MINER_A).model_copy(
+        update={
+            "tweet": scored("campaign", "2", MINER_A).tweet.model_copy(
+                update={"author_x_id": "creator", "author": "alice"}
+            ),
+            "score": 20.0,
+        }
+    )
+    feed = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign,),
+        ecosystem_maps=(),
+    )
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    store.pin_featured_tweet_selection(
+        campaign_id="campaign",
+        campaign_json=campaign.model_dump_json(),
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=19,
+        selected_at=NOW,
+    )
+    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+
+    _weights, floors = coordinator.shadow_weights(
+        feed,
+        [pinned, stronger],
+        block=35,
+        hotkey_to_uid={MINER_A: 1},
+        uids=[0, 1],
+    )
+
+    assert [item.tweet_id for item in floors] == ["2"]
+    assert floors[0].featured_tweet_id == "1"
+    assert floors[0].featured_tweet_bonus is True
 
 
 def test_featured_tweet_is_selected_at_settlement_without_a_pin(tmp_path: Path) -> None:
@@ -498,3 +549,40 @@ def test_featured_tweet_is_selected_at_settlement_without_a_pin(tmp_path: Path) 
 
     assert {item.featured_tweet_id for item in floors} == {"1"}
     assert store.featured_tweet_selection("campaign") is None
+
+
+def test_featured_tweet_does_not_change_after_rewards_freeze(tmp_path: Path) -> None:
+    campaign = record("campaign")
+    feed = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(campaign,),
+        ecosystem_maps=(),
+    )
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    _weights, settled = coordinator.shadow_weights(
+        feed,
+        [scored("campaign", "1", MINER_A)],
+        block=35,
+        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
+        uids=[0, 1, 2],
+    )
+    more_viewed = scored("campaign", "2", MINER_B).model_copy(
+        update={
+            "tweet": scored("campaign", "2", MINER_B).tweet.model_copy(
+                update={"views_count": 1_000_000}
+            )
+        }
+    )
+
+    _weights, later = coordinator.shadow_weights(
+        feed,
+        [scored("campaign", "1", MINER_A), more_viewed],
+        block=36,
+        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
+        uids=[0, 1, 2],
+    )
+
+    assert {item.featured_tweet_id for item in settled} == {"1"}
+    assert later == settled
