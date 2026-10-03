@@ -19,23 +19,19 @@ from bitcast_x.scoring import calculate_tweet_score
 
 def test_v2_engagement_score_fixture_is_exact() -> None:
     considered = {"alice": 10.0, "bob": 5.5, "carol": 2.0, "dave": 1.25}
-    usernames = ["alice", "bob", "carol", "dave"]
-    relationships = np.array(
-        [
-            [0.0, 7.0, 0.0, 0.0],
-            [9.0, 0.0, 0.0, 0.0],
-            [4.0, 0.0, 0.0, 0.0],
-            [0.0, 0.5, 0.0, 0.0],
-        ]
-    )
+    relationships = {
+        ("alice", "bob"): 7.0,
+        ("bob", "alice"): 9.0,
+        ("carol", "alice"): 4.0,
+        ("dave", "bob"): 0.5,
+    }
 
     score, details = calculate_tweet_score(
         {"bob": "retweet", "carol": "quote"},
         author_influence=10.0,
         author="alice",
         considered_accounts=considered,
-        relationship_scores=relationships,
-        username_to_index={username: index for index, username in enumerate(usernames)},
+        relationships=relationships,
     )
 
     assert score == 23.05

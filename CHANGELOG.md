@@ -62,6 +62,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Final and preview reconciliation load the verified batch history once per pass, grouped by
   campaign, instead of reloading and re-hashing the whole history for every campaign. The
   reconciler's qualification memo is bounded so long-running previews no longer grow it per cycle.
+- Engagement scoring looks up relationship edges in a sparse map built once per campaign pool,
+  instead of allocating a dense N×N matrix for every tweet (about 376 MB per tweet on the live
+  indie_hacker map). Scores are bit-identical; scoring 400 tweets on that map drops from 7.8 s to
+  0.4 s and peak memory from 523 MB to 143 MB.
 - Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
   token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
 
