@@ -135,13 +135,18 @@ async def test_configure_and_shutdown_attach_to_root_logger() -> None:
 
 @pytest.mark.asyncio
 async def test_run_miner_does_not_enable_loki() -> None:
+    settings = Settings(
+        _env_file=None,
+        loki_url="https://example.test",
+        loki_username="tenant",
+        loki_token="write-token",  # noqa: S106 - inert test credential
+    )
     miner = AsyncMock()
     with (
         patch("bitcast_x.main.build_sdk", new=AsyncMock(return_value=(object(), object()))),
         patch("bitcast_x.main.ReferenceMiner", return_value=miner),
-        patch("bitcast_x.validator.service.configure_loki_logging") as configure_loki,
     ):
-        await run_command(Namespace(command="run-miner"), Settings())
+        await run_command(Namespace(command="run-miner"), settings)
 
     miner.run.assert_awaited_once()
-    configure_loki.assert_not_called()
+    assert logging_module._loki_handler is None

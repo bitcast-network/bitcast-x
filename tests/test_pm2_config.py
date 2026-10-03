@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -66,8 +67,8 @@ def test_pm2_validator_helpers_use_private_local_environment_and_one_role() -> N
 
     assert "config/validator.env.example" in setup
     assert "config/providers.env.example" in setup
-    assert 'if [[ -e "${env_file}" ]]' in setup
+    assert re.search(r"-[ef]\s+[\"']?\$\{?env_file\b", setup)  # never overwrite secrets
     assert 'chmod 0600 "${env_file}"' in setup
-    assert '--only "${app_name}"' in start
-    assert 'app_name="bitcast-x-validator"' in start
+    assert re.search(r"^app_name=[\"']?bitcast-x-validator[\"']?$", start, re.MULTILINE)
+    assert re.search(r"--only\s+[\"']?\$\{?app_name\b", start)
     assert "pm2 save" in start

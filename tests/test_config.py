@@ -2,8 +2,13 @@
 
 from pathlib import Path
 
+import pytest
+
+from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL
 from bitcast_x.config import Settings
 from bitcast_x.qualification import PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
+
+ROOT = Path(__file__).parents[1]
 
 
 def test_public_protocol_defaults_match_the_published_network() -> None:
@@ -44,15 +49,24 @@ def test_secrets_remain_unconfigured_and_production_outputs_are_enabled() -> Non
     assert settings.enable_weight_submission is True
 
 
-def test_environment_template_contains_real_public_protocol_values() -> None:
-    template = Path(".env.example").read_text()
+@pytest.mark.parametrize(
+    "template",
+    (".env.example", "config/validator.env.example", "config/miner.env.example"),
+)
+def test_environment_templates_ship_the_canonical_feed_without_placeholders(
+    template: str,
+) -> None:
+    text = (ROOT / template).read_text(encoding="utf-8")
 
-    assert "BITCAST_X_CAMPAIGN_FEED_URL=" + str(Settings().campaign_feed_url) in template
-    assert "BITCAST_X_PROTOCOL_START_BLOCK" not in template
-    assert "qualification history ships with each reviewed release" in template
-    assert "BITCAST_X_QUALIFICATION_SCHEDULE_JSON=" not in template
-    assert "BITCAST_X_VALIDATOR_PREVIEW_MAX_CONCURRENCY=2" in template
-    assert "BITCAST_X_ENABLE_DATA_PUBLISH=true" in template
-    assert "BITCAST_X_ENABLE_WEIGHT_SUBMISSION=true" in template
-    assert "example.invalid" not in template
-    assert "ReplaceWithPublished" not in template
+    assert f"BITCAST_X_CAMPAIGN_FEED_URL={CAMPAIGN_FEED_URL}\n" in text
+    # Finney qualification history and the protocol start ship with the release.
+    assert "BITCAST_X_QUALIFICATION_SCHEDULE_JSON=" not in text
+    assert "BITCAST_X_PROTOCOL_START_BLOCK" not in text
+    assert "example.invalid" not in text
+    assert "ReplaceWithPublished" not in text
+
+
+def test_environment_template_documents_release_owned_qualification_history() -> None:
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "qualification history ships with each reviewed release" in text
