@@ -205,45 +205,6 @@ class MinerStore:
                 ),
             )
 
-    def current_history_id(self) -> str | None:
-        """Return the active history ID, or ``None`` for the legacy chain."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT history_id FROM history_state WHERE singleton = 1"
-            ).fetchone()
-        return str(row["history_id"]) if row is not None else None
-
-    def history_has_batches(self, history_id: str) -> bool:
-        """Return whether a history ID has already anchored any local batch."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM batches WHERE history_id = ? LIMIT 1", (history_id,)
-            ).fetchone()
-        return row is not None
-
-    def start_history(self, history_id: str) -> str:
-        """Atomically abandon pending work and activate an unused history ID."""
-
-        try:
-            valid = len(bytes.fromhex(history_id)) == 32
-        except ValueError:
-            valid = False
-        if not valid:
-            raise ProtocolError("history_id must be a 32-byte hexadecimal value")
-
-        with self._transaction() as connection:
-            if (
-                connection.execute(
-                    "SELECT 1 FROM batches WHERE history_id = ? LIMIT 1", (history_id,)
-                ).fetchone()
-                is not None
-            ):
-                raise ProtocolError("history_id was already used by this miner")
-            self._activate_history(connection, history_id)
-        return history_id
-
     def resume_history(self) -> str:
         """Return an unused current history or atomically rotate to a random one."""
 
@@ -955,6 +916,3 @@ class MinerStore:
             ],
             has_more,
         )
-
-    def close(self) -> None:
-        """Compatibility hook; connections are intentionally short-lived."""

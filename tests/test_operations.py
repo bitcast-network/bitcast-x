@@ -115,9 +115,7 @@ def test_unversioned_existing_store_is_adopted_without_losing_state(tmp_path: Pa
 
 def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path) -> None:
     path = tmp_path / "miner.sqlite3"
-    store = MinerStore(path)
-    history_id = "68" * 32
-    store.start_history(history_id)
+    history_id = MinerStore(path).resume_history()
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA user_version = 0")
@@ -126,7 +124,7 @@ def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path)
 
     reopened = MinerStore(path)
 
-    assert reopened.current_history_id() == history_id
+    assert reopened.resume_history() == history_id
     connection = sqlite3.connect(path)
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 3

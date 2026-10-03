@@ -101,8 +101,8 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     old_batch = await sdk.engine.commit_ready(force=True)
     assert old_batch is not None and old_batch.sequence == 1
 
-    anchor = await sdk.engine.resume_history()
-    repeated_anchor = await sdk.engine.resume_history()
+    anchor = sdk.engine.store.resume_history()
+    repeated_anchor = sdk.engine.store.resume_history()
     new_claim = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="new draft")
     new_batch = await sdk.engine.commit_ready(force=True)
     page = await sdk.engine.batch_page(
