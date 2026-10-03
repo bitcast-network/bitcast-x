@@ -328,6 +328,12 @@ def test_duplicate_event_id_is_idempotent_but_conflicts_fail(tmp_path: Path) -> 
     sdk.engine.enqueue(event, reveal=reveal)
 
     assert sdk.claim_status(reveal.claim_id) is EventStatus.WAITING_FOR_COMMITMENT
+    with pytest.raises(ProtocolError, match="event id was reused with different content"):
+        sdk.engine.enqueue(event.model_copy(update={"creator_x_id": "456"}), reveal=reveal)
+    other_draft = DraftReveal(claim_id=reveal.claim_id, draft="Another draft", nonce=reveal.nonce)
+    with pytest.raises(ProtocolError, match="event id was reused with different content"):
+        sdk.engine.enqueue(event, reveal=other_draft)
+    assert len(sdk.engine.store.queued(limit=100)) == 1
 
 
 def test_submission_rejects_claim_owned_by_another_miner(tmp_path: Path) -> None:

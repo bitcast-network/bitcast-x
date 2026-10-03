@@ -835,10 +835,21 @@ def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path
 
 
 def test_submission_requires_matching_safe_claim_and_creator(tmp_path: Path) -> None:
-    web = build_client(tmp_path)
+    """Refuse a claim made for another creator or campaign.
+
+    The unsafe-claim half is ``test_unsafe_claim_submission_is_refused_with_its_code``.
+    """
+
+    class TwoCampaignResults(Results):
+        async def campaign(self, campaign_id: str) -> dict[str, Any]:
+            if campaign_id == "other-campaign":
+                return {**self.campaign_record, "campaign_id": campaign_id}
+            return await super().campaign(campaign_id)
+
+    web = build_client(tmp_path, results_client=TwoCampaignResults())
     claim = _claim(web)
 
-    response = web.post(
+    other_creator = web.post(
         "/api/v1/submissions",
         headers={"Idempotency-Key": "submission-key-0001"},
         json={
@@ -848,9 +859,34 @@ def test_submission_requires_matching_safe_claim_and_creator(tmp_path: Path) -> 
             "creator_x_id": "456",
         },
     )
+    other_campaign = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0002"},
+        json={
+            "campaign_id": "other-campaign",
+            "tweet_id": "999",
+            "claim_id": claim["claim_id"],
+            "creator_x_id": "123",
+        },
+    )
 
-    assert response.status_code == 400
-    assert "creator" in response.json()["error"]["message"]
+    assert _error_envelope(other_creator) == (
+        400,
+        {
+            "code": "invalid_request",
+            "message": "claim creator does not match submission creator",
+            "retryable": False,
+        },
+    )
+    assert _error_envelope(other_campaign) == (
+        400,
+        {
+            "code": "invalid_request",
+            "message": "claim campaign does not match submission campaign",
+            "retryable": False,
+        },
+    )
+    assert web.get("/api/v1/submissions").json()["items"] == []
 
 
 def test_not_found_and_validation_errors_use_stable_envelope(tmp_path: Path) -> None:
@@ -1006,6 +1042,16 @@ def test_uncoded_protocol_refusal_is_an_invalid_request(tmp_path: Path) -> None:
                 "retryable": True,
             },
             "30",
+        ),
+        (
+            _central_error(503, "/api/v2/miners/x/campaigns", {"Retry-After": "5"}),
+            503,
+            {
+                "code": "central_api_unavailable",
+                "message": "The central miner API cannot currently verify this request.",
+                "retryable": True,
+            },
+            "5",
         ),
         (
             _central_error(500, "/api/v2/miners/x/campaigns"),
