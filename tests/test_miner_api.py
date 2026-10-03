@@ -2,17 +2,20 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
-from bitcast_x.campaigns import CampaignRecord
+from bitcast_x.config import Settings
 from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner import BatchPolicy, FinalizedCommitment, MinerEngine, MinerSdk, MinerStore
 from bitcast_x.miner.api import create_control_app
 from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
+from bitcast_x.miner.web import build_miner_api
 from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
 from bitcast_x.transport import BatchPageRequest, create_miner_app
 from contracts.bitcast_api_miner_campaign import (
@@ -58,14 +61,6 @@ class LateSubmitter(Submitter):
             position=CommitmentPosition(block=101, extrinsic_index=1),
             stored_envelope=envelope.encode(),
         )
-
-
-class Feed:
-    async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]:
-        return ()
-
-    async def close(self) -> None:
-        return None
 
 
 class Results:
@@ -154,7 +149,7 @@ class Results:
 
     async def campaign(self, campaign_id: str) -> dict[str, Any]:
         if campaign_id != "campaign":
-            raise FakeNotFoundError
+            raise _central_error(404, f"/api/v2/miners/x/campaigns/{campaign_id}")
         return self.campaign_record
 
     async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
@@ -253,12 +248,10 @@ def test_evaluating_direct_fixture_matches_pinned_bitcast_api_contract() -> None
     assert eligibility.eligible_if_published_now is False
 
 
-class FakeNotFoundResponse:
-    status_code = 404
-
-
-class FakeNotFoundError(Exception):
-    response = FakeNotFoundResponse()
+def _central_error(status_code: int, path: str) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", f"https://central.test{path}")
+    response = httpx.Response(status_code, request=request)
+    return httpx.HTTPStatusError("central error", request=request, response=response)
 
 
 def build_client(
@@ -286,9 +279,8 @@ def build_client(
 
     service = MinerControlService(
         MinerSdk(engine, qualification_provider=qualification),
-        Feed(),
-        timeout,
         results_client=results_client or Results(),  # type: ignore[arg-type]
+        commit_timeout_seconds=timeout,
         enabled_ecosystem_ids=enabled_ecosystems,
     )
     protocol = create_miner_app(
@@ -319,6 +311,27 @@ def _claim(web: TestClient, *, key: str = "claim-key-0001") -> dict[str, Any]:
     )
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_miner_api_does_not_require_the_campaign_feed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "bitcast_x.miner.web.load_wallet",
+        lambda _settings: SimpleNamespace(hotkey=SimpleNamespace(ss58_address=MINER)),
+    )
+
+    apps = build_miner_api(
+        Settings(
+            _env_file=None,
+            state_dir=tmp_path,
+            public_ip="203.0.113.10",
+            miner_api_token=INTERNAL_TOKEN,
+            campaign_feed_url=None,
+        )
+    )
+
+    assert apps.protocol is None
 
 
 def test_application_api_requires_internal_bearer_token(tmp_path: Path) -> None:
@@ -393,9 +406,7 @@ def test_central_registration_errors_keep_a_stable_application_envelope(
             ecosystem_ids: tuple[str, ...] = (),
         ) -> list[dict[str, Any]]:
             del ecosystem_ids
-            request = httpx.Request("GET", "https://central.test/api/v2/miners/x/campaigns")
-            response = httpx.Response(403, request=request)
-            raise httpx.HTTPStatusError("forbidden", request=request, response=response)
+            raise _central_error(403, "/api/v2/miners/x/campaigns")
 
     response = build_client(tmp_path, results_client=RegistrationDeniedResults()).get(
         "/api/v1/campaigns"
@@ -409,6 +420,19 @@ def test_central_registration_errors_keep_a_stable_application_envelope(
             "retryable": False,
         }
     }
+
+
+def test_campaign_lookup_only_treats_central_404_as_not_found(tmp_path: Path) -> None:
+    class UnavailableResults(Results):
+        async def campaign(self, campaign_id: str) -> dict[str, Any]:
+            raise _central_error(503, f"/api/v2/miners/x/campaigns/{campaign_id}")
+
+    web = build_client(tmp_path, results_client=UnavailableResults())
+
+    response = web.get("/api/v1/campaigns/campaign")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "central_api_unavailable"
 
 
 def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> None:

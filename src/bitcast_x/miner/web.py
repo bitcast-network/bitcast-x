@@ -10,7 +10,6 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI
 
-from bitcast_x.campaigns import CampaignFeedClient
 from bitcast_x.config import Settings
 from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.api import create_control_app
@@ -38,10 +37,7 @@ class MinerApps:
 def build_miner_api(settings: Settings) -> MinerApps:
     """Build a chain-backed API with a managed single-writer lifecycle."""
 
-    campaign_feed_url = settings.campaign_feed_url
     public_ip = settings.public_ip
-    if campaign_feed_url is None:
-        raise ValueError("BITCAST_X_CAMPAIGN_FEED_URL is required")
     if public_ip is None:
         raise ValueError("BITCAST_X_PUBLIC_IP is required")
     if settings.miner_api_token is None:
@@ -86,12 +82,6 @@ def build_miner_api(settings: Settings) -> MinerApps:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         chain, sdk = await build_sdk(settings)
-        campaign_source = CampaignFeedClient(
-            campaign_feed_url,
-            cache_path=settings.state_dir / "campaign-feed.json",
-            timeout=settings.request_timeout_seconds,
-            max_response_bytes=settings.campaign_feed_max_response_bytes,
-        )
         results_client = MinerResultsClient(
             settings.miner_results_api_url,
             wallet.hotkey,
@@ -100,9 +90,8 @@ def build_miner_api(settings: Settings) -> MinerApps:
         runtime["chain"] = chain
         runtime["service"] = MinerControlService(
             sdk=sdk,
-            campaign_source=campaign_source,
-            commit_timeout_seconds=settings.miner_api_commit_timeout_seconds,
             results_client=results_client,
+            commit_timeout_seconds=settings.miner_api_commit_timeout_seconds,
             enabled_ecosystem_ids=settings.miner_enabled_ecosystem_ids,
         )
 
@@ -144,7 +133,6 @@ def build_miner_api(settings: Settings) -> MinerApps:
                     with suppress(asyncio.CancelledError):
                         await task
             await results_client.close()
-            await campaign_source.close()
             await chain.close()
 
     app = create_control_app(

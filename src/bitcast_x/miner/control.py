@@ -6,9 +6,10 @@ import json
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any
 
-from bitcast_x.campaigns import CampaignRecord
+import httpx
+
 from bitcast_x.errors import ProtocolError
 from bitcast_x.miner.engine import MinerSdk
 from bitcast_x.miner.results import MinerResultsClient
@@ -16,14 +17,6 @@ from bitcast_x.miner.store import EventStatus, OperationMetadata
 from bitcast_x.protocol import MAX_ACTIVE_CLAIMS
 
 GRACE_SUBMISSION_COMMIT_TIMEOUT_SECONDS = 30.0
-
-
-class CampaignSource(Protocol):
-    """Fallback campaign operation required by offline development miners."""
-
-    async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]: ...
-
-    async def close(self) -> None: ...
 
 
 def _fingerprint(payload: dict[str, object]) -> str:
@@ -44,9 +37,8 @@ class MinerControlService:
     """Join local durable operations with authorized central read data."""
 
     sdk: MinerSdk
-    campaign_source: CampaignSource
+    results_client: MinerResultsClient
     commit_timeout_seconds: float
-    results_client: MinerResultsClient | None = None
     enabled_ecosystem_ids: tuple[str, ...] = ()
     # Qualification is derived from stake, which changes rarely. Caching it
     # briefly removes live chain RPCs from every submission/claim without
@@ -88,16 +80,6 @@ class MinerControlService:
         return requested or self.enabled_ecosystem_ids
 
     async def ecosystems(self) -> list[dict[str, Any]]:
-        if self.results_client is None:
-            return [
-                {
-                    "ecosystem_id": ecosystem_id,
-                    "name": ecosystem_id.replace("_", " ").title(),
-                    "status": "active",
-                    "enabled": True,
-                }
-                for ecosystem_id in self.enabled_ecosystem_ids
-            ]
         items = await self.results_client.ecosystems()
         enabled = set(self.enabled_ecosystem_ids)
         return [
@@ -111,18 +93,7 @@ class MinerControlService:
         ecosystem_ids: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         selected = self._ecosystems(ecosystem_ids)
-        if self.results_client is not None:
-            return list(await self.results_client.campaigns(selected))
-        campaigns = await self.campaign_source.fetch_campaigns()
-        return [
-            campaign.model_dump(mode="json")
-            for campaign in campaigns
-            if (not selected or bool(set(campaign.pools).intersection(selected)))
-            and (
-                campaign.access.exclusive_miner_hotkey is None
-                or campaign.access.exclusive_miner_hotkey == self.sdk.engine.miner_hotkey
-            )
-        ]
+        return list(await self.results_client.campaigns(selected))
 
     async def leaderboard(
         self,
@@ -131,8 +102,6 @@ class MinerControlService:
         limit: int = 100,
         offset: int = 0,
     ) -> dict[str, Any]:
-        if self.results_client is None:
-            raise ProtocolError("central leaderboard service is unavailable")
         selected = self._ecosystems(ecosystem_ids)
         result = dict(
             await self.results_client.leaderboard(
@@ -166,28 +135,16 @@ class MinerControlService:
         return result
 
     async def campaign(self, campaign_id: str) -> dict[str, Any] | None:
-        if self.results_client is not None:
-            try:
-                campaign = await self.results_client.campaign(campaign_id)
-            except Exception as error:
-                if getattr(getattr(error, "response", None), "status_code", None) == 404:
-                    return None
-                raise
-            pools = set(campaign.get("ecosystem_ids", []))
-            if self.enabled_ecosystem_ids and not pools.intersection(self.enabled_ecosystem_ids):
+        try:
+            campaign = await self.results_client.campaign(campaign_id)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code == 404:
                 return None
-            return campaign
-        return next(
-            (
-                campaign
-                for campaign in await self.campaigns()
-                if (
-                    campaign.get("campaign_id") == campaign_id
-                    or campaign.get("access", {}).get("campaign_id") == campaign_id
-                )
-            ),
-            None,
-        )
+            raise
+        pools = set(campaign.get("ecosystem_ids", []))
+        if self.enabled_ecosystem_ids and not pools.intersection(self.enabled_ecosystem_ids):
+            return None
+        return campaign
 
     async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
         campaign = await self.campaign(campaign_id)
@@ -197,8 +154,6 @@ class MinerControlService:
 
     async def _creator_eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
         """Fetch evidence after this operation has checked campaign visibility."""
-        if self.results_client is None:
-            raise ProtocolError("central eligibility service is unavailable")
         result = dict(await self.results_client.eligibility(campaign_id, creator_x_id))
         enabled = set(self.enabled_ecosystem_ids)
         if not enabled:
@@ -231,8 +186,6 @@ class MinerControlService:
     ) -> dict[str, Any]:
         if await self.campaign(campaign_id) is None:
             raise ProtocolError("campaign is not available to this miner")
-        if self.results_client is None:
-            raise ProtocolError("central campaign results service is unavailable")
         return await self.results_client.campaign_tweets(
             campaign_id,
             self._ecosystems(ecosystem_ids),
@@ -450,8 +403,6 @@ class MinerControlService:
         if receipt is None or receipt["kind"] != "submission":
             return None
         local = self._submission_resource(receipt)
-        if self.results_client is None:
-            return local
         result = await self.results_client.submission(submission_id)
         return self._merge_submission(local, result)
 
@@ -490,8 +441,6 @@ class MinerControlService:
         local = [self._submission_resource(receipt) for receipt in receipts]
         if tweet_id is not None:
             local = [item for item in local if item["tweet_id"] == tweet_id]
-        if self.results_client is None:
-            return local
         central = await self.results_client.submissions(
             campaign_id=campaign_id,
             tweet_id=tweet_id,
@@ -507,8 +456,6 @@ class MinerControlService:
     async def sync_submission_results(self) -> None:
         """Persist final central results for locally pending submissions."""
 
-        if self.results_client is None:
-            return
         central = await self.results_client.submissions()
         by_id = {str(item["submission_id"]): item for item in central}
         for submission in self.sdk.submissions():
