@@ -23,6 +23,7 @@ from pydantic import (
 
 from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
 from bitcast_x.errors import ProtocolError
+from bitcast_x.http import read_bounded
 from bitcast_x.protocol import CampaignAccess
 
 LOGGER = logging.getLogger(__name__)
@@ -506,14 +507,8 @@ class CampaignFeedClient:
             if response.status_code == httpx.codes.NOT_MODIFIED:
                 return b"", response.headers.get("etag"), True
             response.raise_for_status()
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > self._max_response_bytes:
-                    raise ValueError("campaign response exceeds configured byte limit")
-                chunks.append(chunk)
-            return b"".join(chunks), response.headers.get("etag"), False
+            payload = await read_bounded(response, self._max_response_bytes, source="campaign")
+            return payload, response.headers.get("etag"), False
 
     def _read_cache(self) -> dict[str, Any] | None:
         if not self.cache_path.exists():

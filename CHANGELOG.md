@@ -71,6 +71,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   so `weight_score_blend` in settings is the only default. When no featured tweet was pinned, the
   published `selection_pool` now uses the same view-rank order as a pinned selection (it was
   previously sorted by tweet ID); the selected tweet is unchanged.
+- Oversized campaign-feed, miner and LLM responses all raise `ResponseTooLargeError` from one bounded
+  reader. An oversized campaign feed previously raised a bare `ValueError`.
 - Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
   token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
 

@@ -20,7 +20,7 @@ from bitcast_x.campaigns import (
     eligible_creator_ids_for_campaign,
     eligible_creator_ids_in_map,
 )
-from bitcast_x.errors import ProtocolError
+from bitcast_x.errors import ProtocolError, ResponseTooLargeError
 
 FEED = {
     "snapshot_id": "snapshot-1",
@@ -202,7 +202,7 @@ async def test_rejects_oversized_snapshot_without_replacing_cache(tmp_path: Path
         transport=httpx.MockTransport(handler),
     )
     try:
-        with pytest.raises(ValueError, match="exceeds"):
+        with pytest.raises(ResponseTooLargeError, match="exceeds"):
             await client.fetch()
     finally:
         await client.close()

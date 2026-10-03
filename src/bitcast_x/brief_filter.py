@@ -11,7 +11,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from bitcast_x.campaigns import CampaignRecord
-from bitcast_x.errors import ReconciliationUnavailableError
+from bitcast_x.errors import ReconciliationUnavailableError, ResponseTooLargeError
+from bitcast_x.http import read_bounded
 from bitcast_x.prompts import generate_brief_evaluation_prompt
 from bitcast_x.x_provider import Tweet
 
@@ -114,7 +115,7 @@ class LlmBriefFilter:
                 if result is None:
                     try:
                         response_text = await self._request(prompt)
-                    except httpx.HTTPError:
+                    except (httpx.HTTPError, ResponseTooLargeError):
                         unavailable += 1
                         LOGGER.warning(
                             "brief evaluation unavailable campaign=%s tweet=%s check=%s",
@@ -139,7 +140,7 @@ class LlmBriefFilter:
         )
 
     async def _request(self, prompt: str) -> str:
-        last_error: httpx.HTTPError | None = None
+        last_error: httpx.HTTPError | ResponseTooLargeError | None = None
         for attempt in range(self._attempts):
             try:
                 async with self._client.stream(
@@ -155,23 +156,23 @@ class LlmBriefFilter:
                     timeout=self._timeout,
                 ) as response:
                     response.raise_for_status()
-                    declared = int(response.headers.get("content-length", 0))
-                    if declared > self._max_response_bytes:
-                        raise httpx.ProtocolError("LLM response exceeds byte limit")
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > self._max_response_bytes:
-                            raise httpx.ProtocolError("LLM response exceeds byte limit")
-                        chunks.append(chunk)
-                payload = TypeAdapter(dict[str, Any]).validate_json(b"".join(chunks))
+                    if int(response.headers.get("content-length", 0)) > self._max_response_bytes:
+                        raise ResponseTooLargeError("LLM response exceeds configured byte limit")
+                    body = await read_bounded(response, self._max_response_bytes, source="LLM")
+                payload = TypeAdapter(dict[str, Any]).validate_json(body)
                 content = payload["choices"][0]["message"].get("content")
                 if not isinstance(content, str) or not content:
                     raise httpx.ProtocolError("LLM response content is empty")
                 return content
-            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
-                if isinstance(exc, httpx.HTTPError):
+            except (
+                httpx.HTTPError,
+                ResponseTooLargeError,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                if isinstance(exc, (httpx.HTTPError, ResponseTooLargeError)):
                     last_error = exc
                 else:
                     last_error = httpx.ProtocolError("malformed LLM response")
