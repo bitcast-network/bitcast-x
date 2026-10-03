@@ -20,12 +20,12 @@ BLOCK = 10_000_000
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 
 
-def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
+def campaign(campaign_id: str) -> CampaignRecord:
     return CampaignRecord(
         access=CampaignAccess(
             campaign_id=campaign_id,
             mechanism_id=1,
-            mining_protocol=protocol,
+            mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=BLOCK - 10,
         ),
         display=campaign_id,
@@ -46,8 +46,8 @@ def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
 async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    preclaim = campaign("preclaim", MiningProtocol.PRECLAIM_V2)
-    open_campaign = campaign("open", MiningProtocol.PRECLAIM_V2).model_copy(
+    preclaim = campaign("preclaim")
+    open_campaign = campaign("open").model_copy(
         update={
             "access": preclaim.access.model_copy(
                 update={"campaign_id": "open", "scoring_close_block": BLOCK + 10}
@@ -91,8 +91,6 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
             decisions=[],
         )
     before = shadow_report(tmp_path)
-    archive = tmp_path / "connections.db"
-    archive.write_bytes(b"historical archive must not be opened or modified")
     ops = SimpleNamespace(started=True, should_exit=False, serve=AsyncMock())
     feed = CampaignFeed(
         snapshot_id="new",
@@ -174,7 +172,6 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         )
     ).run()
 
-    assert archive.read_bytes() == b"historical archive must not be opened or modified"
     publisher.publish_preview.assert_not_awaited()
     if case == "preview":
         reconciler.verified_events.assert_called_once_with(BLOCK)

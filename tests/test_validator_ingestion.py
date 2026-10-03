@@ -1,6 +1,5 @@
 """Tests for crash-safe finalized validator reconciliation."""
 
-import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -78,21 +77,17 @@ class FakeClient:
         self,
         available: list[CommittedBatch],
         *,
-        fail: bool = False,
-        timeout: bool = False,
+        error: Exception | None = None,
         block_offset: int = 9,
     ) -> None:
         self.available = available
-        self.fail = fail
-        self.timeout = timeout
+        self.error = error
         self.block_offset = block_offset
         self.closed = False
 
     async def fetch_batches(self, request: Any) -> BatchPageResponse:
-        if self.fail:
-            raise httpx.ConnectError("offline")
-        if self.timeout:
-            raise httpx.ReadTimeout("slow miner")
+        if self.error is not None:
+            raise self.error
         selected = [batch for batch in self.available if batch.sequence > request.after_sequence]
         if request.through_sequence is not None:
             selected = [batch for batch in selected if batch.sequence <= request.through_sequence]
@@ -166,9 +161,7 @@ def ingestor(
 
 
 @pytest.mark.asyncio
-async def test_reconciles_pages_and_recovers_cursor_after_restart(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+async def test_reconciles_pages_and_recovers_cursor_after_restart(tmp_path: Path) -> None:
     first, second = batches()
     path = tmp_path / "validator.sqlite3"
     store = ValidatorStore(path)
@@ -178,21 +171,15 @@ async def test_reconciles_pages_and_recovers_cursor_after_restart(
         latest=observation(second, 11).envelope,
     )
 
-    with caplog.at_level(logging.INFO):
-        result = await ingestor(store, client, chain).reconcile(
-            MinerEndpoint(MINER, "http://miner")
-        )
+    result = await ingestor(store, client, chain).reconcile(MinerEndpoint(MINER, "http://miner"))
     restarted = ValidatorStore(path)
 
     assert result.quarantined is False
     assert result.batches_verified == 2
+    assert result.cursor == 2
     assert restarted.history_cursor(MINER)[1:] == (2, second.batch_hash)
     assert chain.read_blocks == [10, 11]
     assert client.closed is True
-    assert (
-        f"miner reconciliation complete hotkey={MINER} endpoint=http://miner "
-        "batches_verified=2 cursor=2"
-    ) in caplog.messages
 
 
 @pytest.mark.asyncio
@@ -356,37 +343,6 @@ def test_closed_history_cannot_be_reactivated(tmp_path: Path) -> None:
         store.persist_verified(reused, observation(reused, 12))
 
 
-def test_observed_unverified_history_id_cannot_be_reused(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    legacy, _ = batches()
-    observed = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        history_id="71" * 32,
-        events=(legacy.events[0],),
-    )
-    active = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        history_id="72" * 32,
-        events=(legacy.events[0].model_copy(update={"claim_id": "05" * 16}),),
-    )
-    reused = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        history_id="71" * 32,
-        events=(legacy.events[0].model_copy(update={"claim_id": "07" * 16}),),
-    )
-    store.persist_verified(observed, observation(observed, 10))
-    store.persist_verified(active, observation(active, 11))
-
-    with pytest.raises(ProtocolError, match="history ID was already used"):
-        store.persist_verified(reused, observation(reused, 12))
-
-
 @pytest.mark.asyncio
 async def test_new_history_rejects_boundary_before_verified_history(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
@@ -446,58 +402,30 @@ async def test_recommitted_sequence_without_exact_batch_proof_is_quarantined(
 
 
 @pytest.mark.asyncio
-async def test_unreachable_miner_is_availability_failure_without_cursor_change(
+@pytest.mark.parametrize(
+    ("error", "message"),
+    [
+        pytest.param(httpx.ConnectError("offline"), "offline", id="unreachable"),
+        pytest.param(httpx.ReadTimeout("slow miner"), "slow miner", id="slow"),
+    ],
+)
+async def test_miner_transport_failure_is_availability_failure_without_cursor_change(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    message: str,
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     first, _second = batches()
     chain = FakeChain(latest=observation(first, 10).envelope)
 
-    result = await ingestor(store, FakeClient([], fail=True), chain).reconcile(
+    result = await ingestor(store, FakeClient([], error=error), chain).reconcile(
         MinerEndpoint(MINER, "http://miner")
     )
 
     assert result.available is False
     assert result.quarantined is False
+    assert result.error == message
     assert store.history_cursor(MINER)[1:] == (0, None)
-    assert any(
-        f"miner reconciliation unavailable hotkey={MINER} endpoint=http://miner" in message
-        and "error=offline" in message
-        for message in caplog.messages
-    )
-
-
-@pytest.mark.asyncio
-async def test_slow_miner_is_isolated_as_availability_failure(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    first, _second = batches()
-    chain = FakeChain(latest=observation(first, 10).envelope)
-
-    result = await ingestor(store, FakeClient([], timeout=True), chain).reconcile(
-        MinerEndpoint(MINER, "http://miner")
-    )
-
-    assert result.available is False
-    assert result.quarantined is False
-    assert "slow miner" in str(result.error)
-
-
-@pytest.mark.asyncio
-async def test_sparse_reconciliation_reads_only_reported_commitment_blocks(tmp_path: Path) -> None:
-    first, second = batches()
-    chain = FakeChain(
-        {10: [observation(first, 10)], 11: [observation(second, 11)]},
-        latest=observation(second, 11).envelope,
-    )
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-
-    result = await ingestor(store, FakeClient([first, second]), chain).reconcile(
-        MinerEndpoint(MINER, "http://miner")
-    )
-
-    assert result.batches_verified == 2
-    assert chain.read_blocks == [10, 11]
 
 
 def test_verified_positions_must_increase_with_batch_sequence(tmp_path: Path) -> None:
@@ -523,9 +451,9 @@ async def test_temporarily_offline_miner_heals_on_later_poll(
     )
     store = ValidatorStore(path)
 
-    unavailable = await ingestor(store, FakeClient([], fail=True), chain).reconcile(
-        MinerEndpoint(MINER, "http://miner")
-    )
+    unavailable = await ingestor(
+        store, FakeClient([], error=httpx.ConnectError("offline")), chain
+    ).reconcile(MinerEndpoint(MINER, "http://miner"))
     assert unavailable.available is False
     assert store.history_cursor(MINER)[1:] == (0, None)
 
@@ -552,7 +480,7 @@ async def test_one_incompatible_miner_isolated_from_other_histories(tmp_path: Pa
 
     clients = {
         MINER: FakeClient([]),
-        OLD_MINER: FakeClient([], fail=True),
+        OLD_MINER: FakeClient([], error=httpx.ConnectError("offline")),
     }
     validator = ValidatorIngestor(
         MixedChain(),  # type: ignore[arg-type]

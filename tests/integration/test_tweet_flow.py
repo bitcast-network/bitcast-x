@@ -441,6 +441,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     assert weights == {0: 0.0, 7: 1.0}
     assert len(rewards) == 1
     assert published == 1
+    assert publisher.payloads[0]["brief_id"] == CAMPAIGN_ID
     tweets = publisher.payloads[0]["tweets"]
     assert isinstance(tweets, list)
     assert tweets[0]["meets_brief"] is True
@@ -449,3 +450,5 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     assert isinstance(decisions, list)
     assert decisions[0]["reward_status"] == "rewarded"
     assert decisions[0]["reward_reason"] == "accepted"
+    assert decisions[0]["daily_usd_floor"] == rewards[0].daily_usd_floor
+    assert validator_store.publication_succeeded(CAMPAIGN_ID) is True
