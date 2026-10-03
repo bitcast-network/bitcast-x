@@ -833,20 +833,39 @@ def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) ->
     assert consumed["consumed_by_submission_id"] == submission["submission_id"]
 
 
-def test_direct_submission_fetches_campaign_once_and_fresh_eligibility(tmp_path: Path) -> None:
-    class CountingResults(DirectResults):
-        campaign_calls = 0
-        eligibility_calls = 0
+class CountingResults(Results):
+    """Count central campaign and eligibility reads made by one operation."""
 
-        async def campaign(self, campaign_id: str) -> dict[str, Any]:
-            self.campaign_calls += 1
-            return await super().campaign(campaign_id)
+    def __init__(self) -> None:
+        self.campaign_calls = 0
+        self.eligibility_calls = 0
 
-        async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
-            self.eligibility_calls += 1
-            return await super().eligibility(campaign_id, creator_x_id)
+    async def campaign(self, campaign_id: str) -> dict[str, Any]:
+        self.campaign_calls += 1
+        return await super().campaign(campaign_id)
 
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        self.eligibility_calls += 1
+        return await super().eligibility(campaign_id, creator_x_id)
+
+
+class CountingDirectResults(CountingResults, DirectResults):
+    """Counting double for an exclusive direct campaign."""
+
+
+def test_claim_fetches_campaign_once_and_fresh_eligibility(tmp_path: Path) -> None:
     results = CountingResults()
+    web = build_client(tmp_path, results_client=results)
+
+    claim = _claim(web)
+
+    assert results.campaign_calls == 1
+    assert results.eligibility_calls == 1
+    assert claim["usability"]["safe_to_post"] is True
+
+
+def test_direct_submission_fetches_campaign_once_and_fresh_eligibility(tmp_path: Path) -> None:
+    results = CountingDirectResults()
     web = build_client(tmp_path, results_client=results)
     response = web.post(
         "/api/v1/submissions",

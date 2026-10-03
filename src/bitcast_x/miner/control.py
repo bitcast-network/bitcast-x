@@ -208,7 +208,7 @@ class MinerControlService:
             raise ProtocolError("campaign is not available to this miner")
         if not campaign.get("capabilities", {}).get("can_claim", False):
             raise ProtocolError("campaign does not accept claims")
-        eligibility = await self.eligibility(campaign_id, creator_x_id)
+        eligibility = await self._creator_eligibility(campaign_id, creator_x_id)
         if not eligibility.get("claim_eligible", False):
             raise ProtocolError("creator is not eligible to claim this campaign")
         metadata = OperationMetadata(
