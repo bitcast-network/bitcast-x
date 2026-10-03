@@ -19,14 +19,10 @@ from bitcast_x.protocol import (
     MiningProtocol,
 )
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
-from bitcast_x.rewards import RewardDecision, TweetReward, featured_selection_pool
+from bitcast_x.rewards import RewardDecision, TweetReward
 from bitcast_x.scoring import EngagementContribution
 from bitcast_x.validator.preview import PreviewStore
-from bitcast_x.validator.publishing import (
-    ShadowResultPublisher,
-    _featured_selection,
-    create_brief_tweets_payload,
-)
+from bitcast_x.validator.publishing import ShadowResultPublisher, create_brief_tweets_payload
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet
@@ -165,6 +161,35 @@ async def test_publisher_gzips_large_payload_and_requires_accepted_status() -> N
     assert success is True
     assert captured["headers"]["content-encoding"] == "gzip"
     assert json.loads(gzip.decompress(captured["body"]))["payload_type"] == "brief_tweets"
+    await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        pytest.param(500, b'{"status": "accepted"}', id="server-error"),
+        pytest.param(200, b'{"status": "accepted"}', id="ok-but-not-202"),
+        pytest.param(202, b'{"status": "rejected"}', id="202-rejected-status"),
+        pytest.param(202, b'["accepted"]', id="202-non-object-body"),
+        pytest.param(202, b"accepted", id="202-malformed-json"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_publisher_reports_failure_unless_ingestion_accepts(status: int, body: bytes) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    publisher = DataPublisher(SimpleNamespace(hotkey=FakeHotkey()), client=client)
+
+    success = await publisher.publish(
+        endpoint="https://ingestion.example/api/v1/brief-tweets",
+        payload_type=BRIEF_TWEETS_PAYLOAD_TYPE,
+        run_id="run",
+        payload={"brief_id": "campaign", "tweets": []},
+    )
+
+    assert success is False
     await client.aclose()
 
 
@@ -811,7 +836,10 @@ def test_unpinned_featured_pool_is_published_in_settlement_rank_order() -> None:
             )
         )
 
-    featured = _featured_selection("campaign", rewards, scored_by_key)
+    payload = create_brief_tweets_payload(
+        campaign(), rewards, scored_by_key, {MINER: 7}, timestamp=NOW
+    )
 
-    assert featured is not None
-    assert featured["selection_pool"] == list(featured_selection_pool(views)) == ["2", "3", "1"]
+    featured = payload["featured_tweet"]
+    assert isinstance(featured, dict)
+    assert featured["selection_pool"] == ["2", "3", "1"]

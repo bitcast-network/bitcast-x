@@ -1,10 +1,14 @@
 """Tests for emission windows and equal exclusive/open economics."""
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from pydantic import TypeAdapter
+
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap
 from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
+from bitcast_x.rewards import RewardDecision
 from bitcast_x.validator.rewards import RewardCoordinator, preview_performance_rewards
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
@@ -227,6 +231,21 @@ def test_same_tweet_is_globally_assigned_once_with_duplicate_reason(tmp_path: Pa
     assert [(item.campaign_id, item.tweet_id) for item in floors] == [("a", "1")]
     assert store.campaign_rewards("b", campaign_b.model_dump_json()) is None
     assert store.campaign_finalized("b") is False
+    # Zero-value economics stay replaceable, so campaign_rewards() hides them;
+    # the audit row still records why campaign b's copy of the tweet lost.
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
+        (decisions_json,) = connection.execute(
+            "SELECT decisions_json FROM campaign_rewards WHERE campaign_id = 'b'"
+        ).fetchone()
+    assert TypeAdapter(list[RewardDecision]).validate_json(decisions_json) == [
+        RewardDecision(
+            campaign_id="b",
+            tweet_id="1",
+            miner_hotkey=MINER_B,
+            accepted=False,
+            reason=AttributionReason.DUPLICATE_TWEET,
+        )
+    ]
 
 
 def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: Path) -> None:
@@ -266,27 +285,25 @@ def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: 
     assert store.campaign_finalized("b") is False
 
 
-async def test_freeze_scores_skips_campaigns_before_scoring_close(tmp_path: Path) -> None:
-    closed = record("closed")
-    future = record("future").model_copy(
-        update={
-            "access": record("future").access.model_copy(update={"scoring_close_block": 50}),
-            "emission_start_block": 60,
-            "emission_end_block": 70,
-        }
-    )
+async def test_freeze_scores_skips_campaigns_without_a_stored_reconciliation(
+    tmp_path: Path,
+) -> None:
+    # freeze_scores takes no block. The reconciler gates on close by storing a
+    # reconciliation only once a campaign's close is finalized.
+    reconciled = record("reconciled")
+    unreconciled = record("unreconciled")
     feed = CampaignFeed(
         snapshot_id="snapshot",
         published_at=NOW,
-        campaigns=(closed, future),
+        campaigns=(reconciled, unreconciled),
         ecosystem_maps=(),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    attribution = scored("closed", "1", MINER_A).attribution
+    attribution = scored("reconciled", "1", MINER_A).attribution
     store.persist_reconciliation(
         snapshot_id=feed.snapshot_id,
-        campaign_id="closed",
-        campaign_json=closed.model_dump_json(),
+        campaign_id="reconciled",
+        campaign_json=reconciled.model_dump_json(),
         results=[attribution],
     )
     scorer = CountingScorer()
@@ -295,8 +312,8 @@ async def test_freeze_scores_skips_campaigns_before_scoring_close(tmp_path: Path
     result = await coordinator.freeze_scores(feed, [attribution])
 
     assert result == []
-    assert scorer.campaign_ids == ["closed"]
-    assert store.scored_reconciliation("future") is None
+    assert scorer.campaign_ids == ["reconciled"]
+    assert store.scored_reconciliation("unreconciled") is None
 
 
 async def test_only_current_cycle_completion_releases_zero_value_campaign(

@@ -247,18 +247,23 @@ def test_score_blend_one_allocates_by_unique_tweet_scores() -> None:
     assert np.allclose(weights, np.array([0.0, 0.2, 0.8], dtype=np.float64))
 
 
-def test_duplicate_matches_count_once_toward_score_weights() -> None:
+@pytest.mark.parametrize(
+    "score_blend",
+    [pytest.param(0.0, id="floor-term"), pytest.param(1.0, id="score-term")],
+)
+def test_duplicate_matches_count_once_toward_weights(score_blend: float) -> None:
     rewards = [
         _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
         # Attribution storage re-rows the same match once per validator run;
-        # the duplicate must not double either the floor or the score term.
+        # the duplicate must not double either the floor (blend 0.0) or the
+        # score term (blend 1.0).
         _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
         _tweet_reward("c2", "t2", "miner-b", score=30.0, daily_usd_floor=50.0),
     ]
     hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
     uids = [0, 1, 2]
 
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=1.0)
+    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=score_blend)
 
     assert np.allclose(weights, np.array([0.0, 0.5, 0.5], dtype=np.float64))
 
@@ -290,7 +295,7 @@ def test_blend_falls_back_to_floors_when_no_positive_scores_exist() -> None:
     assert np.allclose(weights, np.array([0.0, 0.9, 0.1], dtype=np.float64))
 
 
-def test_score_shares_fall_back_to_floor_shares_when_floors_absent() -> None:
+def test_blend_uses_score_shares_alone_when_floors_absent() -> None:
     rewards = [
         _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=0.0),
         _tweet_reward("c2", "t2", "miner-b", score=10.0, daily_usd_floor=0.0),
