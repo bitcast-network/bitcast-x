@@ -24,7 +24,7 @@ from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
 from bitcast_x.miner.errors import ErrorCode
 from bitcast_x.miner.web import build_miner_api
-from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
+from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition, CommittedBatch
 from bitcast_x.transport import BatchPageRequest, create_miner_app
 from contracts.bitcast_api_miner_campaign import (
     MinerCampaign as BitcastApiMinerCampaign,
@@ -754,6 +754,60 @@ def test_result_sync_records_final_results_only_for_pending_submissions(
     assert sdk.submission_status(rejected) is EventStatus.REJECTED
     assert sdk.submission_status(unresolved) is EventStatus.VERIFICATION_PENDING
     assert sdk.submission_status(queued) is EventStatus.TWEET_RECEIVED
+
+
+def test_submission_listing_reads_claims_in_one_query_and_each_batch_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = MinerEngine(
+        miner_hotkey=MINER,
+        store=MinerStore(tmp_path / "miner.sqlite3"),
+        submitter=Submitter(),
+    )
+    sdk = MinerSdk(engine)
+    service = MinerControlService(
+        sdk,
+        results_client=Results(),  # type: ignore[arg-type]
+        commit_timeout_seconds=5,
+    )
+    claim_ids = [
+        sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft=f"draft {index}")
+        for index in range(3)
+    ]
+    asyncio.run(engine.commit_ready(force=True))
+    for index, claim_id in enumerate(claim_ids):
+        sdk.submit_tweet(
+            campaign_id="campaign",
+            tweet_id=str(900 + index),
+            claim_id=claim_id,
+            creator_x_id="123",
+        )
+    asyncio.run(engine.commit_ready(force=True))
+    expected = {
+        claim_id: receipt["commitment"]
+        for claim_id in claim_ids
+        if (receipt := engine.store.receipt(claim_id)) is not None
+    }
+    calls = {"receipts": 0, "batch_parses": 0}
+    receipts = MinerStore.receipts
+    parse = CommittedBatch.model_validate_json
+
+    def counting_receipts(store: MinerStore, **filters: Any) -> list[dict[str, object]]:
+        calls["receipts"] += 1
+        return receipts(store, **filters)
+
+    def counting_parse(*args: Any, **kwargs: Any) -> CommittedBatch:
+        calls["batch_parses"] += 1
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(MinerStore, "receipts", counting_receipts)
+    monkeypatch.setattr(CommittedBatch, "model_validate_json", counting_parse)
+
+    submissions = asyncio.run(service.submissions())
+
+    assert calls == {"receipts": 2, "batch_parses": 2}
+    assert {item["claim_id"]: item["claim_commitment"] for item in submissions} == expected
+    assert sorted(commitment["event_index"] for commitment in expected.values()) == [0, 1, 2]
 
 
 def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path) -> None:

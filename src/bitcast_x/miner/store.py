@@ -29,6 +29,10 @@ from bitcast_x.sqlite import apply_migrations
 _EVENT_ADAPTER: TypeAdapter[ProtocolEvent] = TypeAdapter(ProtocolEvent)
 
 
+def _event_id(event: ProtocolEvent) -> str:
+    return event.claim_id if isinstance(event, ClaimEvent) else event.submission_id
+
+
 class EventStatus(StrEnum):
     """Platform-facing lifecycle states persisted by the miner."""
 
@@ -305,7 +309,7 @@ class MinerStore:
         if max_pending_events <= 0 or max_pending_bytes <= 0:
             raise ValueError("pending queue limits must be positive")
 
-        event_id = event.claim_id if isinstance(event, ClaimEvent) else event.submission_id
+        event_id = _event_id(event)
         status = (
             EventStatus.WAITING_FOR_COMMITMENT
             if isinstance(event, ClaimEvent)
@@ -419,14 +423,14 @@ class MinerStore:
     def receipt(self, event_id: str) -> dict[str, object] | None:
         """Return one application-safe local receipt with its chain position."""
 
-        receipts = self.receipts(event_id=event_id)
+        receipts = self.receipts(event_ids=(event_id,))
         return receipts[0] if receipts else None
 
     def receipts(
         self,
         *,
         kind: str | None = None,
-        event_id: str | None = None,
+        event_ids: tuple[str, ...] = (),
         campaign_id: str | None = None,
         creator_x_id: str | None = None,
         external_id: str | None = None,
@@ -434,6 +438,7 @@ class MinerStore:
     ) -> list[dict[str, object]]:
         """List durable receipts using indexed application correlation filters."""
 
+        event_json = json.dumps(event_ids, separators=(",", ":"))
         ecosystem_json = json.dumps(ecosystem_ids, separators=(",", ":"))
         query = """
             SELECT e.event_id, e.kind, e.payload_json, e.status, e.created_ns,
@@ -449,7 +454,7 @@ class MinerStore:
              AND b.sequence = e.batch_sequence
             LEFT JOIN operation_metadata m ON m.event_id = e.event_id
             WHERE (? IS NULL OR e.kind = ?)
-              AND (? IS NULL OR e.event_id = ?)
+              AND (? = '[]' OR e.event_id IN (SELECT value FROM json_each(?)))
               AND (? IS NULL OR m.creator_x_id = ?)
               AND (? IS NULL OR m.external_id = ?)
               AND (
@@ -464,8 +469,8 @@ class MinerStore:
         parameters = (
             kind,
             kind,
-            event_id,
-            event_id,
+            event_json,
+            event_json,
             creator_x_id,
             creator_x_id,
             external_id,
@@ -476,18 +481,22 @@ class MinerStore:
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
         receipts: list[dict[str, object]] = []
+        # Each batch is parsed once per call: (history_id, event positions) by batch key.
+        batches: dict[tuple[str, int], tuple[str | None, dict[str, int]]] = {}
         for row in rows:
             event = _EVENT_ADAPTER.validate_json(row["payload_json"])
             if campaign_id is not None and event.campaign_id != campaign_id:
                 continue
+            history_id = None
             event_index = None
             if row["batch_json"] is not None:
-                batch = CommittedBatch.model_validate_json(row["batch_json"])
-                ids = [
-                    item.claim_id if isinstance(item, ClaimEvent) else item.submission_id
-                    for item in batch.events
-                ]
-                event_index = ids.index(str(row["event_id"]))
+                key = (str(row["batch_history_id"]), int(row["batch_sequence"]))
+                if key not in batches:
+                    batch = CommittedBatch.model_validate_json(row["batch_json"])
+                    positions = {_event_id(item): index for index, item in enumerate(batch.events)}
+                    batches[key] = (batch.history_id, positions)
+                history_id, positions = batches[key]
+                event_index = positions[str(row["event_id"])]
             payload = event.model_dump(mode="json")
             receipts.append(
                 {
@@ -506,7 +515,7 @@ class MinerStore:
                     "commitment": {
                         "status": ("finalized" if row["batch_state"] == "finalized" else "queued"),
                         "batch_sequence": row["batch_sequence"],
-                        "history_id": batch.history_id if row["batch_json"] else None,
+                        "history_id": history_id,
                         "batch_hash": (
                             f"sha256-{row['batch_hash']}" if row["batch_hash"] else None
                         ),
@@ -632,10 +641,7 @@ class MinerStore:
 
         if not events:
             raise ProtocolError("cannot prepare an empty batch")
-        event_ids = [
-            event.claim_id if isinstance(event, ClaimEvent) else event.submission_id
-            for event in events
-        ]
+        event_ids = [_event_id(event) for event in events]
         with self._transaction() as connection:
             pending = connection.execute(
                 "SELECT batch_json FROM batches WHERE state = 'prepared'"

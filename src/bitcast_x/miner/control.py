@@ -391,13 +391,21 @@ class MinerControlService:
         )
         return [self._claim_resource(receipt) for receipt in receipts]
 
-    def _submission_resource(self, receipt: dict[str, object]) -> dict[str, Any]:
-        claim_commitment = None
+    def _submission_resources(self, receipts: list[dict[str, object]]) -> list[dict[str, Any]]:
+        """Project submission receipts, reading every referenced claim in one query."""
+
+        store = self.sdk.engine.store
+        claim_ids = {str(receipt["claim_id"]) for receipt in receipts if receipt["claim_id"]}
+        claims = store.receipts(kind="claim", event_ids=tuple(claim_ids)) if claim_ids else []
+        commitments = {str(claim["event_id"]): claim["commitment"] for claim in claims}
+        return [self._submission_resource(receipt, commitments) for receipt in receipts]
+
+    @staticmethod
+    def _submission_resource(
+        receipt: dict[str, object],
+        claim_commitments: dict[str, object],
+    ) -> dict[str, Any]:
         claim_id = receipt["claim_id"]
-        if claim_id is not None:
-            claim = self.sdk.engine.store.receipt(str(claim_id))
-            if claim is not None and claim["kind"] == "claim":
-                claim_commitment = claim["commitment"]
         return {
             "submission_id": receipt["submission_id"],
             "external_id": receipt["external_id"],
@@ -408,7 +416,9 @@ class MinerControlService:
             "claim_id": claim_id,
             "creator": {"submitted_x_id": receipt["creator_x_id"]},
             "status": receipt["status"],
-            "claim_commitment": claim_commitment,
+            "claim_commitment": (
+                None if claim_id is None else claim_commitments.get(str(claim_id))
+            ),
             "submission_commitment": receipt["commitment"],
             "created_at": _timestamp(int(str(receipt["created_ns"]))),
             "updated_at": _timestamp(int(str(receipt["updated_ns"]))),
@@ -418,7 +428,7 @@ class MinerControlService:
         receipt = self.sdk.engine.store.receipt(submission_id)
         if receipt is None or receipt["kind"] != "submission":
             return None
-        local = self._submission_resource(receipt)
+        local = self._submission_resources([receipt])[0]
         result = await self.results_client.submission(submission_id)
         return self._merge_submission(local, result)
 
@@ -454,9 +464,9 @@ class MinerControlService:
             external_id=external_id,
             ecosystem_ids=self._ecosystems(ecosystem_ids),
         )
-        local = [self._submission_resource(receipt) for receipt in receipts]
         if tweet_id is not None:
-            local = [item for item in local if item["tweet_id"] == tweet_id]
+            receipts = [receipt for receipt in receipts if receipt["tweet_id"] == tweet_id]
+        local = self._submission_resources(receipts)
         central = await self.results_client.submissions(
             campaign_id=campaign_id,
             tweet_id=tweet_id,
