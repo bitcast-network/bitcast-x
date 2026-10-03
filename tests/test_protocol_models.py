@@ -70,6 +70,7 @@ def test_new_history_batch_is_domain_separated_and_self_identifying() -> None:
 
     assert resumed.version == 3
     assert resumed.history_id == "04" * 32
+    assert resumed.batch_hash == "1b89e82dc7952dd16a12b5ce29cf5e4eed91fe9b346237865b0bc62b8aca67f3"
     assert resumed.batch_hash != legacy.batch_hash
     assert "history_id" not in legacy.model_dump()
 
