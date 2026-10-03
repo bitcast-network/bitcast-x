@@ -1,5 +1,6 @@
 """End-to-end offline tests for durable miner SDK batching and recovery."""
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from bitcast_x.protocol import (
     CommitmentPosition,
     DraftReveal,
     OnChainEnvelope,
+    ProtocolEvent,
+    SubmissionEvent,
 )
+from bitcast_x.protocol.canonical import canonical_json
 from bitcast_x.transport import BatchPageRequest
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -400,3 +404,126 @@ async def test_sixth_finalized_claim_fifo_evicts_first(tmp_path: Path) -> None:
 
     assert sdk.claim_status(claim_ids[0]) is EventStatus.EVICTED
     assert sdk.engine.store.active_claim_ids("campaign", "123") == claim_ids[1:]
+
+
+def _fixed_claim(index: int, draft_length: int) -> tuple[ClaimEvent, DraftReveal]:
+    reveal = DraftReveal(
+        claim_id=f"{index:032x}",
+        draft="d" * draft_length,
+        nonce=f"{index:064x}",
+    )
+    claim = ClaimEvent(
+        claim_id=reveal.claim_id,
+        campaign_id="campaign",
+        creator_x_id="123",
+        created_at="2026-08-05T12:00:00Z",
+        draft_commitment=reveal.commitment(),
+    )
+    return claim, reveal
+
+
+def _fixed_submission(index: int, claim_index: int | None) -> SubmissionEvent:
+    return SubmissionEvent(
+        submission_id=f"{0xFF00 + index:032x}",
+        campaign_id="campaign",
+        tweet_id=str(900 + index),
+        claim_id=None if claim_index is None else f"{claim_index:032x}",
+        miner_hotkey=MINER,
+        creator_x_id="123",
+    )
+
+
+async def _engine_with_mixed_queue(path: Path) -> MinerEngine:
+    """Queue claims and submissions whose reveals come from earlier and same batches."""
+
+    engine = MinerEngine(
+        miner_hotkey=MINER,
+        store=MinerStore(path),
+        submitter=FakeSubmitter(),
+        policy=BatchPolicy(max_batch_bytes=100_000),
+    )
+    for index, draft_length in ((1, 10), (2, 200)):
+        claim, reveal = _fixed_claim(index, draft_length)
+        engine.enqueue(claim, reveal=reveal)
+    await engine.commit_ready(force=True)
+    claim, reveal = _fixed_claim(3, 50)
+    engine.enqueue(_fixed_submission(1, claim_index=1))
+    engine.enqueue(claim, reveal=reveal)
+    engine.enqueue(_fixed_submission(2, claim_index=None))
+    engine.enqueue(_fixed_submission(3, claim_index=3))
+    engine.enqueue(_fixed_submission(4, claim_index=2))
+    return engine
+
+
+def _linear_selection(engine: MinerEngine, queued: list[ProtocolEvent]) -> list[ProtocolEvent]:
+    """Reference: grow the batch one queued event at a time until it overflows."""
+
+    draft = engine.store.batch_draft(tuple(queued))
+    selected: list[ProtocolEvent] = []
+    for event in queued:
+        batch = draft.build(engine.miner_hotkey, (*selected, event))
+        if len(canonical_json(batch)) > engine.policy.max_batch_bytes:
+            if not selected:
+                raise ProtocolError("one queued event exceeds the maximum batch byte size")
+            break
+        selected.append(event)
+    return selected
+
+
+@pytest.mark.asyncio
+async def test_batch_selection_matches_a_linear_scan_at_every_byte_boundary(
+    tmp_path: Path,
+) -> None:
+    engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
+    queued = [event for event, _created in engine.store.queued(limit=100)]
+    draft = engine.store.batch_draft(tuple(queued))
+    sizes = [
+        len(canonical_json(draft.build(MINER, tuple(queued[:count]))))
+        for count in range(1, len(queued) + 1)
+    ]
+
+    for limit in sorted({size + delta for size in sizes for delta in (-1, 0, 1)}):
+        engine.policy = BatchPolicy(max_batch_bytes=limit)
+        if limit < sizes[0]:
+            with pytest.raises(ProtocolError, match="one queued event exceeds"):
+                _linear_selection(engine, queued)
+            with pytest.raises(ProtocolError, match="one queued event exceeds"):
+                engine._select_events(queued)
+        else:
+            assert engine._select_events(queued) == _linear_selection(engine, queued)
+
+
+@pytest.mark.asyncio
+async def test_batch_selection_fails_only_on_an_unbuildable_event_it_reaches(
+    tmp_path: Path,
+) -> None:
+    engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
+    engine.enqueue(_fixed_submission(5, claim_index=99))  # no local reveal for claim 99
+    queued = [event for event, _created in engine.store.queued(limit=100)]
+    five_events = len(
+        canonical_json(engine.store.batch_draft(tuple(queued)).build(MINER, tuple(queued[:5])))
+    )
+
+    engine.policy = BatchPolicy(max_batch_bytes=five_events - 1)
+    assert engine._select_events(queued) == queued[:4]
+    engine.policy = BatchPolicy(max_batch_bytes=five_events)
+    with pytest.raises(ProtocolError, match="claim without a local reveal"):
+        engine._select_events(queued)
+
+
+@pytest.mark.asyncio
+async def test_prepared_batches_keep_their_pinned_bytes(tmp_path: Path) -> None:
+    engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
+    engine.policy = BatchPolicy(max_batch_bytes=1_161)
+
+    batches = [await engine.commit_ready(force=True) for _ in range(3)]
+
+    assert [
+        (batch.sequence, len(batch.events), hashlib.sha256(canonical_json(batch)).hexdigest())
+        for batch in batches
+        if batch is not None
+    ] == [
+        (2, 3, "ae03889770b017a3bc8fd7c76d50e96b1165448f3674963ac4274e68edfa6f24"),
+        (3, 1, "928c8f16c17514670e5f611ccb5d1f746352dcdc7643624f34a25187feec3884"),
+        (4, 1, "89958f6f240aa75a7f4acd48483c7f5c60c218d5f1b15e99701c814d9e2c0e46"),
+    ]

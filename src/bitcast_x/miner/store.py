@@ -5,7 +5,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
@@ -51,6 +51,36 @@ class OperationMetadata:
     ecosystem_ids: tuple[str, ...]
     creator_x_id: str
     external_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchDraft:
+    """Next-batch header and the private reveals its queued events need."""
+
+    history_id: str
+    sequence: int
+    previous_batch_hash: str | None
+    reveals: Mapping[str, DraftReveal]
+
+    def build(self, miner_hotkey: str, events: tuple[ProtocolEvent, ...]) -> CommittedBatch:
+        """Build the exact next batch for these events without I/O."""
+
+        reveals: list[DraftReveal] = []
+        for event in events:
+            if not isinstance(event, SubmissionEvent) or event.claim_id is None:
+                continue
+            reveal = self.reveals.get(event.claim_id)
+            if reveal is None:
+                raise ProtocolError("submission references a claim without a local reveal")
+            reveals.append(reveal)
+        return CommittedBatch.create(
+            miner_hotkey=miner_hotkey,
+            sequence=self.sequence,
+            previous_batch_hash=self.previous_batch_hash,
+            events=events,
+            reveals=tuple(reveals),
+            history_id=self.history_id or None,
+        )
 
 
 class MinerStore:
@@ -606,24 +636,11 @@ class MinerStore:
             ).fetchone()
             if pending is not None:
                 return CommittedBatch.model_validate_json(pending["batch_json"])
-            history = connection.execute(
-                "SELECT history_id FROM history_state WHERE singleton = 1"
-            ).fetchone()
-            history_id = str(history["history_id"]) if history is not None else ""
-            last = connection.execute(
-                """
-                SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' AND history_id = ?
-                ORDER BY sequence DESC LIMIT 1
-                """,
-                (history_id,),
-            ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else 1
-            previous_hash = str(last["batch_hash"]) if last else None
+            # Event IDs are primary keys, so one unbatched row per requested ID
+            # proves every requested event exists exactly once.
             rows = connection.execute(
                 """
-                SELECT event_id, payload_json, private_reveal_json, batch_sequence
-                FROM events
+                SELECT batch_sequence FROM events
                 WHERE event_id IN (SELECT value FROM json_each(?))
                 """,
                 (json.dumps(event_ids, separators=(",", ":")),),
@@ -632,16 +649,8 @@ class MinerStore:
                 row["batch_sequence"] is not None for row in rows
             ):
                 raise ProtocolError("batch events must all be uniquely queued")
-            by_id = {str(row["event_id"]): row for row in rows}
-            reveals = self._reveals_for(connection, events)
-            batch = CommittedBatch.create(
-                miner_hotkey=miner_hotkey,
-                sequence=sequence,
-                previous_batch_hash=previous_hash,
-                events=events,
-                reveals=tuple(reveals),
-                history_id=history_id or None,
-            )
+            draft = self._draft(connection, events)
+            batch = draft.build(miner_hotkey, events)
             connection.execute(
                 """
                 INSERT INTO batches(
@@ -649,80 +658,64 @@ class MinerStore:
                 ) VALUES (?, ?, ?, ?, 'prepared', ?)
                 """,
                 (
-                    history_id,
-                    sequence,
+                    draft.history_id,
+                    draft.sequence,
                     batch.model_dump_json(),
                     batch.batch_hash,
                     time.time_ns(),
                 ),
             )
-            for event_id in event_ids:
-                if event_id not in by_id:
-                    raise ProtocolError("event disappeared while preparing batch")
-                connection.execute(
-                    """
-                    UPDATE events SET batch_history_id = ?, batch_sequence = ?
-                    WHERE event_id = ?
-                    """,
-                    (history_id, sequence, event_id),
-                )
+            connection.executemany(
+                """
+                UPDATE events SET batch_history_id = ?, batch_sequence = ?
+                WHERE event_id = ?
+                """,
+                [(draft.history_id, draft.sequence, event_id) for event_id in event_ids],
+            )
         return batch
 
-    def preview_batch(self, miner_hotkey: str, events: tuple[ProtocolEvent, ...]) -> CommittedBatch:
-        """Build the exact next batch without mutating queue state."""
+    def batch_draft(self, events: tuple[ProtocolEvent, ...]) -> BatchDraft:
+        """Load, in one read, what building the next batch from these events needs."""
 
-        if not events:
-            raise ProtocolError("cannot preview an empty batch")
         with self._transaction() as connection:
-            pending = connection.execute(
-                "SELECT 1 FROM batches WHERE state = 'prepared'"
-            ).fetchone()
-            if pending is not None:
-                raise ProtocolError("cannot preview while a prepared batch exists")
-            history = connection.execute(
-                "SELECT history_id FROM history_state WHERE singleton = 1"
-            ).fetchone()
-            history_id = str(history["history_id"]) if history is not None else ""
-            last = connection.execute(
-                """
-                SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' AND history_id = ?
-                ORDER BY sequence DESC LIMIT 1
-                """,
-                (history_id,),
-            ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else 1
-            previous_hash = str(last["batch_hash"]) if last else None
-            reveals = self._reveals_for(connection, events)
-        return CommittedBatch.create(
-            miner_hotkey=miner_hotkey,
-            sequence=sequence,
-            previous_batch_hash=previous_hash,
-            events=events,
-            reveals=tuple(reveals),
-            history_id=history_id or None,
-        )
+            return self._draft(connection, events)
 
     @staticmethod
-    def _reveals_for(
-        connection: sqlite3.Connection,
-        events: tuple[ProtocolEvent, ...],
-    ) -> list[DraftReveal]:
-        reveals: list[DraftReveal] = []
-        for event in events:
-            if not isinstance(event, SubmissionEvent) or event.claim_id is None:
-                continue
-            claim_row = connection.execute(
-                """
-                SELECT private_reveal_json FROM events
-                WHERE event_id = ? AND kind = 'claim'
-                """,
-                (event.claim_id,),
-            ).fetchone()
-            if claim_row is None or claim_row["private_reveal_json"] is None:
-                raise ProtocolError("submission references a claim without a local reveal")
-            reveals.append(DraftReveal.model_validate_json(claim_row["private_reveal_json"]))
-        return reveals
+    def _draft(connection: sqlite3.Connection, events: tuple[ProtocolEvent, ...]) -> BatchDraft:
+        history = connection.execute(
+            "SELECT history_id FROM history_state WHERE singleton = 1"
+        ).fetchone()
+        history_id = str(history["history_id"]) if history is not None else ""
+        last = connection.execute(
+            """
+            SELECT sequence, batch_hash FROM batches
+            WHERE state = 'finalized' AND history_id = ?
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            (history_id,),
+        ).fetchone()
+        claim_ids = [
+            event.claim_id
+            for event in events
+            if isinstance(event, SubmissionEvent) and event.claim_id is not None
+        ]
+        reveal_rows = connection.execute(
+            """
+            SELECT event_id, private_reveal_json FROM events
+            WHERE kind = 'claim' AND private_reveal_json IS NOT NULL
+              AND event_id IN (SELECT value FROM json_each(?))
+            """,
+            (json.dumps(claim_ids, separators=(",", ":")),),
+        ).fetchall()
+        return BatchDraft(
+            history_id=history_id,
+            sequence=int(last["sequence"]) + 1 if last else 1,
+            previous_batch_hash=str(last["batch_hash"]) if last else None,
+            reveals={
+                str(row["event_id"]): DraftReveal.model_validate_json(row["private_reveal_json"])
+                for row in reveal_rows
+            },
+        )
 
     def mark_finalized(self, batch: CommittedBatch, position: CommitmentPosition) -> None:
         """Atomically finalize a batch and advance every platform event status."""

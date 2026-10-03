@@ -154,16 +154,33 @@ class MinerEngine:
             return batch
 
     def _select_events(self, queued: list[ProtocolEvent]) -> list[ProtocolEvent]:
-        selected: list[ProtocolEvent] = []
-        for event in queued:
-            candidate = [*selected, event]
-            preview = self.store.preview_batch(self.miner_hotkey, tuple(candidate))
-            if len(canonical_json(preview)) > self.policy.max_batch_bytes:
-                if not selected:
-                    raise ProtocolError("one queued event exceeds the maximum batch byte size")
-                break
-            selected.append(event)
-        return selected
+        """Return the longest queue prefix whose complete batch fits the byte limit."""
+
+        draft = self.store.batch_draft(tuple(queued))
+
+        def fits(count: int) -> bool:
+            try:
+                batch = draft.build(self.miner_hotkey, tuple(queued[:count]))
+            except (ProtocolError, ValueError):
+                return False
+            return len(canonical_json(batch)) <= self.policy.max_batch_bytes
+
+        # Batch bytes grow with every appended event and an unbuildable prefix
+        # stays unbuildable when extended, so the prefixes that fit are exactly
+        # those up to one boundary, found here by binary search.
+        fitting, unfit = 0, len(queued) + 1
+        while unfit - fitting > 1:
+            middle = (fitting + unfit) // 2
+            if fits(middle):
+                fitting = middle
+            else:
+                unfit = middle
+        if fitting < len(queued):
+            # Raise the first unfitting prefix's build error, as a linear scan would.
+            draft.build(self.miner_hotkey, tuple(queued[: fitting + 1]))
+            if fitting == 0:
+                raise ProtocolError("one queued event exceeds the maximum batch byte size")
+        return queued[:fitting]
 
     async def batch_page(self, request: BatchPageRequest, caller_hotkey: str) -> BatchPageResponse:
         """Serve a bounded page of finalized complete batches."""
