@@ -1,6 +1,7 @@
 """Tests for protocol event, reveal, batch, and attribution contracts."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -70,6 +71,7 @@ def test_new_history_batch_is_domain_separated_and_self_identifying() -> None:
 
     assert resumed.version == 3
     assert resumed.history_id == "04" * 32
+    assert resumed.batch_hash == "1b89e82dc7952dd16a12b5ce29cf5e4eed91fe9b346237865b0bc62b8aca67f3"
     assert resumed.batch_hash != legacy.batch_hash
     assert "history_id" not in legacy.model_dump()
 
@@ -114,20 +116,6 @@ def test_batch_rejects_submission_for_other_miner() -> None:
         )
 
 
-def test_submission_creator_binding_is_committed() -> None:
-    submission = SubmissionEvent(
-        submission_id=SUBMISSION_ID,
-        campaign_id="campaign",
-        tweet_id="1234",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id="456",
-    )
-
-    assert submission.version == 3
-    assert submission.model_dump()["creator_x_id"] == "456"
-
-
 def test_historical_submission_without_creator_keeps_its_original_hash_shape() -> None:
     submission = SubmissionEvent(
         version=2,
@@ -157,50 +145,72 @@ def test_submission_versions_enforce_their_creator_binding_shape() -> None:
         "miner_hotkey": MINER,
     }
 
+    submission = SubmissionEvent(creator_x_id="456", **common)
+    assert submission.version == 3
+    assert submission.model_dump()["creator_x_id"] == "456"
+
     with pytest.raises(ValidationError, match="version 2 submissions cannot include"):
         SubmissionEvent(version=2, creator_x_id="456", **common)
     with pytest.raises(ValidationError, match="version 3 submissions require"):
         SubmissionEvent(version=3, **common)
 
 
-def test_attribution_acceptance_must_match_reason() -> None:
-    with pytest.raises(ValidationError, match="must agree"):
-        AttributionResult(
-            tweet_id="1",
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.AMBIGUOUS_MATCH,
-        )
+@pytest.mark.parametrize(
+    ("accepted", "reason", "pending", "error"),
+    [
+        pytest.param(True, AttributionReason.ACCEPTED, False, None, id="accepted"),
+        pytest.param(
+            False, AttributionReason.EVIDENCE_UNAVAILABLE, True, None, id="unavailable-pending"
+        ),
+        pytest.param(
+            False, AttributionReason.MINER_NOT_QUALIFIED, True, None, id="unqualified-pending"
+        ),
+        pytest.param(
+            True, AttributionReason.AMBIGUOUS_MATCH, False, "must agree", id="accepted-rejection"
+        ),
+        pytest.param(
+            False, AttributionReason.ACCEPTED, False, "must agree", id="rejected-acceptance"
+        ),
+        pytest.param(
+            False,
+            AttributionReason.AMBIGUOUS_MATCH,
+            True,
+            "supported non-final reason",
+            id="final-reason-pending",
+        ),
+        pytest.param(
+            True,
+            AttributionReason.ACCEPTED,
+            True,
+            "supported non-final reason",
+            id="accepted-pending",
+        ),
+        pytest.param(
+            False,
+            AttributionReason.EVIDENCE_UNAVAILABLE,
+            False,
+            "must remain pending",
+            id="unavailable-final",
+        ),
+    ],
+)
+def test_attribution_result_keeps_acceptance_reason_and_pending_consistent(
+    accepted: bool,
+    reason: AttributionReason,
+    pending: bool,
+    error: str | None,
+) -> None:
+    fields: dict[str, Any] = {
+        "tweet_id": "1",
+        "campaign_id": "campaign",
+        "accepted": accepted,
+        "reason": reason,
+        "pending": pending,
+    }
 
-
-def test_evidence_unavailable_can_remain_pending() -> None:
-    result = AttributionResult(
-        tweet_id="1",
-        campaign_id="campaign",
-        accepted=False,
-        reason=AttributionReason.EVIDENCE_UNAVAILABLE,
-        pending=True,
-    )
-
-    assert result.pending is True
-
-
-def test_unsupported_reason_cannot_be_pending() -> None:
-    with pytest.raises(ValidationError, match="supported non-final reason"):
-        AttributionResult(
-            tweet_id="1",
-            campaign_id="campaign",
-            accepted=False,
-            reason=AttributionReason.AMBIGUOUS_MATCH,
-            pending=True,
-        )
-
-
-def test_evidence_unavailable_cannot_be_rejected() -> None:
-    with pytest.raises(ValidationError, match="must remain pending"):
-        AttributionResult(
-            tweet_id="1",
-            campaign_id="campaign",
-            accepted=False,
-            reason=AttributionReason.EVIDENCE_UNAVAILABLE,
-        )
+    if error is None:
+        result = AttributionResult(**fields)
+        assert (result.accepted, result.reason, result.pending) == (accepted, reason, pending)
+    else:
+        with pytest.raises(ValidationError, match=error):
+            AttributionResult(**fields)

@@ -279,8 +279,8 @@ Reward construction then:
    engagements per view—each adding at most 5% to score;
 4. at the first healthy preview on or after one day before the campaign's UTC `closes_at`,
    deterministically selects one of the five most-viewed campaign-local assigned tweets and pins
-   that featured identity; final rewards replay it and apply a 1.05 score multiplier to its author
-   and engaging accounts;
+   that featured identity; final rewards apply a 1.05 score multiplier to its author and engaging
+   accounts when it still qualifies;
 5. divides the daily budget in proportion to `max(score, 0) ** 0.65` and freezes the per-tweet
    daily USD floors;
 6. sums floors by miner UID and normalizes them into the mechanism-1 weight vector.
@@ -290,25 +290,21 @@ burn UID 0. The formulas are in [`src/bitcast_x/scoring.py`](../src/bitcast_x/sc
 [`src/bitcast_x/rewards.py`](../src/bitcast_x/rewards.py). Positive attribution, evidence, reward
 decisions, and weights are durable and reused after restart. Zero-value state is also durable for
 inspection and crash recovery, but it is replaced by the next successful campaign cycle.
-The featured identity is the exception: once pinned it is creator-visible protocol state and is
-never reselected. If selection was missed during downtime, the first later healthy preview or final
-reward cycle creates it. Temporary provider or ingestion failures preserve the last successful
-preview and retry; missing selected-tweet evidence at finalization defers the complete coupled
-assignment and weight submission rather than silently dropping or changing the bonus. If the
-campaign feed temporarily omits a pinned, unsettled campaign, validators retain its stored contract
-and continue recovery from that authoritative record. A pinned selection is released only when the
-campaign contract in force provably excludes it — determinable from the stored pin and its scored
-tweet snapshot alone, such as a scoring-window edit adopted after the pin was created. Release
-drops the pin, records an audit event, and lets settlement proceed without the featured bonus; a
-replacement is selected from the tweets that qualify under the current contract. Exclusions that
-cannot be proven from durable state keep the conservative deferral.
+The featured identity is creator-visible once pinned and is never replaced by a different tweet.
+The pin does not freeze the campaign contract: edits are adopted until economics settle, as for any
+campaign. At settlement the pinned tweet receives the featured bonus if it still qualifies;
+otherwise that campaign settles without a featured bonus. If no pin exists, for example after
+downtime, the final reward cycle selects the featured tweet from final data. Either way the
+featured identity freezes with the campaign's rewards.
 
 ## Legacy campaign retirement
 
 The last `legacy_connection` campaign completed emissions on 2026-09-01. The validator no longer
 collects legacy tweets, replays legacy snapshots, emits legacy referrals, or combines legacy
 weights with preclaim rewards. All weight construction uses the preclaim reward vector, including
-its normal burn behavior. A legacy campaign in the live feed fails the cycle closed.
+its normal burn behavior. `legacy_connection` is no longer a valid `mining_protocol`: a feed that
+carries it fails validation and the cycle fails closed. A stored contract that still names it is
+quarantined if it is ever read, without affecting other campaigns.
 
 Historical records retain their original protocol identifiers. Existing signed preclaim histories,
 creator-binding activation rules, and batch wire compatibility remain in force. Preserve archived

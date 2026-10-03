@@ -1,5 +1,6 @@
 """End-to-end offline tests for durable miner SDK batching and recovery."""
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,11 +18,13 @@ from bitcast_x.miner import (
 )
 from bitcast_x.protocol import (
     ClaimEvent,
-    CommitmentEnvelope,
     CommitmentPosition,
     DraftReveal,
     OnChainEnvelope,
+    ProtocolEvent,
+    SubmissionEvent,
 )
+from bitcast_x.protocol.canonical import canonical_json
 from bitcast_x.transport import BatchPageRequest
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -69,7 +72,6 @@ def build_sdk(
     return MinerSdk(engine)
 
 
-@pytest.mark.asyncio
 async def test_claim_becomes_safe_only_after_finalized_batch(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     sdk = build_sdk(tmp_path / "miner.db", submitter)
@@ -89,7 +91,6 @@ async def test_claim_becomes_safe_only_after_finalized_batch(tmp_path: Path) -> 
     assert submitter.submissions == 1
 
 
-@pytest.mark.asyncio
 async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     tmp_path: Path,
 ) -> None:
@@ -101,8 +102,8 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     old_batch = await sdk.engine.commit_ready(force=True)
     assert old_batch is not None and old_batch.sequence == 1
 
-    anchor = await sdk.engine.resume_history()
-    repeated_anchor = await sdk.engine.resume_history()
+    anchor = sdk.engine.store.resume_history()
+    repeated_anchor = sdk.engine.store.resume_history()
     new_claim = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="new draft")
     new_batch = await sdk.engine.commit_ready(force=True)
     page = await sdk.engine.batch_page(
@@ -119,7 +120,6 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     assert [item.batch["sequence"] for item in page.batches] == [1]
 
 
-@pytest.mark.asyncio
 async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     sdk = build_sdk(tmp_path / "miner.db", submitter)
@@ -169,7 +169,6 @@ async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path
         sdk.record_submission_result(submission_id, EventStatus.REJECTED)
 
 
-@pytest.mark.asyncio
 async def test_page_truncates_at_complete_batch_before_response_byte_limit(
     tmp_path: Path,
 ) -> None:
@@ -197,7 +196,6 @@ async def test_page_truncates_at_complete_batch_before_response_byte_limit(
     assert len(bounded.model_dump_json().encode()) <= sdk.engine.policy.max_page_bytes
 
 
-@pytest.mark.asyncio
 async def test_page_is_pinned_to_validator_snapshot_sequence(tmp_path: Path) -> None:
     sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
     for creator in ("123", "456"):
@@ -214,37 +212,41 @@ async def test_page_is_pinned_to_validator_snapshot_sequence(tmp_path: Path) -> 
     assert page.has_more is False
 
 
-@pytest.mark.asyncio
+class LostResponseSubmitter(FakeSubmitter):
+    """Finalize every commitment on chain, then lose the response to the caller."""
+
+    async def submit(self, envelope: OnChainEnvelope) -> FinalizedCommitment:
+        await super().submit(envelope)
+        raise ChainOperationError("connection lost after finalization")
+
+
 async def test_restart_recovers_prepared_batch_without_duplicate_commit(tmp_path: Path) -> None:
     database = tmp_path / "miner.db"
-    submitter = FakeSubmitter()
+    submitter = LostResponseSubmitter()
     first_sdk = build_sdk(database, submitter)
     claim_id = first_sdk.create_claim(
         campaign_id="campaign",
         creator_x_id="123",
         draft="A private draft",
     )
-    queued = first_sdk.engine.store.queued(limit=100)
-    prepared = first_sdk.engine.store.prepare_batch(MINER, tuple(event for event, _ in queued))
-    envelope = CommitmentEnvelope(
-        sequence=prepared.sequence,
-        event_count=len(prepared.events),
-        batch_hash=bytes.fromhex(prepared.batch_hash),
-    )
-    submitter.latest_commitment = FinalizedCommitment(
-        position=CommitmentPosition(block=101, extrinsic_index=3),
-        stored_envelope=envelope.encode(),
-    )
+    with pytest.raises(ChainOperationError, match="connection lost"):
+        await first_sdk.engine.commit_ready(force=True)
+    assert first_sdk.claim_status(claim_id) is EventStatus.WAITING_FOR_COMMITMENT
 
     restarted_sdk = build_sdk(database, submitter)
     recovered = await restarted_sdk.engine.commit_ready(force=True)
+    page = await restarted_sdk.engine.batch_page(
+        BatchPageRequest(after_sequence=0, max_batches=10), caller_hotkey="validator"
+    )
 
-    assert recovered == prepared
-    assert submitter.submissions == 0
+    assert recovered is not None
+    assert submitter.submissions == 1
     assert restarted_sdk.claim_status(claim_id) is EventStatus.SAFE_TO_POST
+    assert [(item.batch["batch_hash"], item.position.block) for item in page.batches] == [
+        (recovered.batch_hash, 101)
+    ]
 
 
-@pytest.mark.asyncio
 async def test_capacity_exhaustion_preserves_prepared_batch(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     submitter.available = False
@@ -280,6 +282,30 @@ def test_pending_queue_applies_backpressure_before_unbounded_growth(tmp_path: Pa
         sdk.create_claim(campaign_id="campaign", creator_x_id="456", draft="second")
 
 
+def test_pending_queue_byte_bound_counts_payload_and_private_reveal(tmp_path: Path) -> None:
+    store = MinerStore(tmp_path / "miner.db")
+    first, first_reveal = _fixed_claim(1, draft_length=100)
+    second, second_reveal = _fixed_claim(2, draft_length=100)
+    first_bytes = len(first.model_dump_json().encode()) + len(
+        first_reveal.model_dump_json().encode()
+    )
+
+    store.enqueue(
+        first,
+        max_pending_events=10,
+        max_pending_bytes=2 * first_bytes - 1,
+        reveal=first_reveal,
+    )
+
+    with pytest.raises(ProtocolError, match="queue capacity is exhausted"):
+        store.enqueue(
+            second,
+            max_pending_events=10,
+            max_pending_bytes=2 * first_bytes - 1,
+            reveal=second_reveal,
+        )
+
+
 def test_duplicate_event_id_is_idempotent_but_conflicts_fail(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     sdk = build_sdk(tmp_path / "miner.db", submitter)
@@ -300,6 +326,12 @@ def test_duplicate_event_id_is_idempotent_but_conflicts_fail(tmp_path: Path) -> 
     sdk.engine.enqueue(event, reveal=reveal)
 
     assert sdk.claim_status(reveal.claim_id) is EventStatus.WAITING_FOR_COMMITMENT
+    with pytest.raises(ProtocolError, match="event id was reused with different content"):
+        sdk.engine.enqueue(event.model_copy(update={"creator_x_id": "456"}), reveal=reveal)
+    other_draft = DraftReveal(claim_id=reveal.claim_id, draft="Another draft", nonce=reveal.nonce)
+    with pytest.raises(ProtocolError, match="event id was reused with different content"):
+        sdk.engine.enqueue(event, reveal=other_draft)
+    assert len(sdk.engine.store.queued(limit=100)) == 1
 
 
 def test_submission_rejects_claim_owned_by_another_miner(tmp_path: Path) -> None:
@@ -314,7 +346,9 @@ def test_submission_rejects_claim_owned_by_another_miner(tmp_path: Path) -> None
         )
 
 
-def test_submission_identity_is_idempotent_across_restart(tmp_path: Path) -> None:
+def test_submission_identity_is_idempotent_across_restart_and_includes_the_creator(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "miner.db"
     first = build_sdk(database, FakeSubmitter())
     submission_id = first.submit_tweet(
@@ -335,28 +369,17 @@ def test_submission_identity_is_idempotent_across_restart(tmp_path: Path) -> Non
     assert repeated_id == submission_id
     assert len(restarted.submissions()) == 1
 
-
-def test_submission_identity_includes_the_signed_creator(tmp_path: Path) -> None:
-    sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
-
-    first_id = sdk.submit_tweet(
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        creator_x_id="123",
-    )
-    second_id = sdk.submit_tweet(
+    other_creator_id = restarted.submit_tweet(
         campaign_id="campaign",
         tweet_id="999",
         claim_id=None,
         creator_x_id="456",
     )
 
-    assert second_id != first_id
-    assert {item["creator_x_id"] for item in sdk.submissions()} == {"123", "456"}
+    assert other_creator_id != submission_id
+    assert {item["creator_x_id"] for item in restarted.submissions()} == {"123", "456"}
 
 
-@pytest.mark.asyncio
 async def test_batch_limit_covers_complete_payload_and_private_reveal(tmp_path: Path) -> None:
     store = MinerStore(tmp_path / "miner.db")
     engine = MinerEngine(
@@ -384,7 +407,6 @@ async def test_batch_limit_covers_complete_payload_and_private_reveal(tmp_path: 
         await engine.commit_ready(force=True)
 
 
-@pytest.mark.asyncio
 async def test_sixth_finalized_claim_fifo_evicts_first(tmp_path: Path) -> None:
     sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
     claim_ids: list[str] = []
@@ -400,3 +422,123 @@ async def test_sixth_finalized_claim_fifo_evicts_first(tmp_path: Path) -> None:
 
     assert sdk.claim_status(claim_ids[0]) is EventStatus.EVICTED
     assert sdk.engine.store.active_claim_ids("campaign", "123") == claim_ids[1:]
+
+
+def _fixed_claim(index: int, draft_length: int) -> tuple[ClaimEvent, DraftReveal]:
+    reveal = DraftReveal(
+        claim_id=f"{index:032x}",
+        draft="d" * draft_length,
+        nonce=f"{index:064x}",
+    )
+    claim = ClaimEvent(
+        claim_id=reveal.claim_id,
+        campaign_id="campaign",
+        creator_x_id="123",
+        created_at="2026-08-05T12:00:00Z",
+        draft_commitment=reveal.commitment(),
+    )
+    return claim, reveal
+
+
+def _fixed_submission(index: int, claim_index: int | None) -> SubmissionEvent:
+    return SubmissionEvent(
+        submission_id=f"{0xFF00 + index:032x}",
+        campaign_id="campaign",
+        tweet_id=str(900 + index),
+        claim_id=None if claim_index is None else f"{claim_index:032x}",
+        miner_hotkey=MINER,
+        creator_x_id="123",
+    )
+
+
+async def _engine_with_mixed_queue(path: Path) -> MinerEngine:
+    """Queue claims and submissions whose reveals come from earlier and same batches."""
+
+    engine = MinerEngine(
+        miner_hotkey=MINER,
+        store=MinerStore(path),
+        submitter=FakeSubmitter(),
+        policy=BatchPolicy(max_batch_bytes=100_000),
+    )
+    for index, draft_length in ((1, 10), (2, 200)):
+        claim, reveal = _fixed_claim(index, draft_length)
+        engine.enqueue(claim, reveal=reveal)
+    await engine.commit_ready(force=True)
+    claim, reveal = _fixed_claim(3, 50)
+    engine.enqueue(_fixed_submission(1, claim_index=1))
+    engine.enqueue(claim, reveal=reveal)
+    engine.enqueue(_fixed_submission(2, claim_index=None))
+    engine.enqueue(_fixed_submission(3, claim_index=3))
+    engine.enqueue(_fixed_submission(4, claim_index=2))
+    return engine
+
+
+def _linear_selection(engine: MinerEngine, queued: list[ProtocolEvent]) -> list[ProtocolEvent]:
+    """Reference: grow the batch one queued event at a time until it overflows."""
+
+    draft = engine.store.batch_draft(tuple(queued))
+    selected: list[ProtocolEvent] = []
+    for event in queued:
+        batch = draft.build(engine.miner_hotkey, (*selected, event))
+        if len(canonical_json(batch)) > engine.policy.max_batch_bytes:
+            if not selected:
+                raise ProtocolError("one queued event exceeds the maximum batch byte size")
+            break
+        selected.append(event)
+    return selected
+
+
+async def test_batch_selection_matches_a_linear_scan_at_every_byte_boundary(
+    tmp_path: Path,
+) -> None:
+    engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
+    queued = [event for event, _created in engine.store.queued(limit=100)]
+    draft = engine.store.batch_draft(tuple(queued))
+    sizes = [
+        len(canonical_json(draft.build(MINER, tuple(queued[:count]))))
+        for count in range(1, len(queued) + 1)
+    ]
+
+    for limit in sorted({size + delta for size in sizes for delta in (-1, 0, 1)}):
+        engine.policy = BatchPolicy(max_batch_bytes=limit)
+        if limit < sizes[0]:
+            with pytest.raises(ProtocolError, match="one queued event exceeds"):
+                _linear_selection(engine, queued)
+            with pytest.raises(ProtocolError, match="one queued event exceeds"):
+                engine._select_events(queued)
+        else:
+            assert engine._select_events(queued) == _linear_selection(engine, queued)
+
+
+async def test_batch_selection_fails_only_on_an_unbuildable_event_it_reaches(
+    tmp_path: Path,
+) -> None:
+    engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
+    engine.enqueue(_fixed_submission(5, claim_index=99))  # no local reveal for claim 99
+    queued = [event for event, _created in engine.store.queued(limit=100)]
+    five_events = len(
+        canonical_json(engine.store.batch_draft(tuple(queued)).build(MINER, tuple(queued[:5])))
+    )
+
+    engine.policy = BatchPolicy(max_batch_bytes=five_events - 1)
+    assert engine._select_events(queued) == queued[:4]
+    engine.policy = BatchPolicy(max_batch_bytes=five_events)
+    with pytest.raises(ProtocolError, match="claim without a local reveal"):
+        engine._select_events(queued)
+
+
+async def test_prepared_batches_keep_their_pinned_bytes(tmp_path: Path) -> None:
+    engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
+    engine.policy = BatchPolicy(max_batch_bytes=1_161)
+
+    batches = [await engine.commit_ready(force=True) for _ in range(3)]
+
+    assert [
+        (batch.sequence, len(batch.events), hashlib.sha256(canonical_json(batch)).hexdigest())
+        for batch in batches
+        if batch is not None
+    ] == [
+        (2, 3, "ae03889770b017a3bc8fd7c76d50e96b1165448f3674963ac4274e68edfa6f24"),
+        (3, 1, "928c8f16c17514670e5f611ccb5d1f746352dcdc7643624f34a25187feec3884"),
+        (4, 1, "89958f6f240aa75a7f4acd48483c7f5c60c218d5f1b15e99701c814d9e2c0e46"),
+    ]

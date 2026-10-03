@@ -3,16 +3,16 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlsplit
 
 import httpx
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -23,7 +23,13 @@ from pydantic import (
 
 from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
 from bitcast_x.errors import ProtocolError
+from bitcast_x.http import read_bounded
 from bitcast_x.protocol import CampaignAccess
+
+if TYPE_CHECKING:
+    from bitcast_x.config import Settings
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SocialAccount(BaseModel):
@@ -58,7 +64,6 @@ class EcosystemMap(BaseModel):
     updated_at: datetime
     accounts: tuple[SocialAccount, ...] = ()
     relationships: tuple[RelationshipEdge, ...] = ()
-    max_referral_amount: float = Field(default=100.0, ge=0)
 
     @field_validator("updated_at")
     @classmethod
@@ -103,16 +108,9 @@ class CampaignRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     access: CampaignAccess
-    display: str = Field(
-        min_length=1,
-        max_length=512,
-        validation_alias=AliasChoices("display", "title"),
-    )
+    display: str = Field(min_length=1, max_length=512)
     brief: str = Field(min_length=1, max_length=20_000)
-    pools: tuple[str, ...] = Field(
-        min_length=1,
-        validation_alias=AliasChoices("pools", "ecosystem_id"),
-    )
+    pools: tuple[str, ...] = Field(min_length=1)
     opens_at: datetime
     closes_at: datetime
     reward_pool_usd: str
@@ -143,8 +141,6 @@ class CampaignRecord(BaseModel):
     @field_validator("pools", mode="before")
     @classmethod
     def validate_pools(cls, value: object) -> tuple[str, ...]:
-        if isinstance(value, str):
-            value = (value,)
         if not isinstance(value, (list, tuple)):
             raise ValueError("campaign pools must be a list")
         normalized = tuple(pool.strip() for pool in value)
@@ -156,7 +152,7 @@ class CampaignRecord(BaseModel):
 
     @property
     def primary_pool(self) -> str:
-        """Return the first configured pool for legacy single-pool persistence."""
+        """Return the first configured pool, used when no specific pool is requested."""
         return self.pools[0]
 
     @field_validator("opens_at", "closes_at")
@@ -216,11 +212,10 @@ class CampaignRecord(BaseModel):
 
 
 class CampaignFeed(BaseModel):
-    """Immutable versioned snapshot shared by all miner platforms."""
+    """Immutable campaign snapshot with its ecosystem maps resolved."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    protocol_version: int = Field(default=2, frozen=True)
     snapshot_id: str = Field(min_length=1, max_length=256)
     published_at: datetime
     campaigns: tuple[CampaignRecord, ...]
@@ -269,11 +264,11 @@ class EcosystemMapReference(BaseModel):
 
 
 class CampaignManifest(BaseModel):
-    """Small protocol-v3 index whose maps are fetched only when needed."""
+    """Small protocol-v4 index whose maps are fetched only when needed."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    protocol_version: Literal[3, 4] = Field(default=3, frozen=True)
+    protocol_version: Literal[4] = Field(default=4, frozen=True)
     snapshot_id: str = Field(min_length=1, max_length=256)
     published_at: datetime
     campaigns: tuple[CampaignRecord, ...]
@@ -294,11 +289,8 @@ class CampaignManifest(BaseModel):
         identities = [(item.ecosystem_id, item.run_id) for item in self.ecosystem_maps]
         if len(set(identities)) != len(identities):
             raise ValueError("ecosystem map references must be unique")
-        has_rank_cutoffs = tuple(item.max_members is not None for item in self.campaigns)
-        if self.protocol_version == 4 and not all(has_rank_cutoffs):
+        if any(item.max_members is None for item in self.campaigns):
             raise ValueError("manifest v4 campaigns must define max_members")
-        if self.protocol_version == 3 and any(has_rank_cutoffs):
-            raise ValueError("manifest v3 campaigns cannot define max_members")
         return self
 
 
@@ -438,22 +430,30 @@ class CampaignFeedClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         normalized_url = url.rstrip("/")
-        self._document_urls: tuple[str, ...]
-        if normalized_url == LEGACY_CAMPAIGN_FEED_URL:
-            self.url = CAMPAIGN_FEED_URL
-            self._document_urls = (CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL)
-        elif normalized_url == CAMPAIGN_FEED_URL:
-            self.url = CAMPAIGN_FEED_URL
-            self._document_urls = (CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL)
-        else:
-            self.url = normalized_url
-            self._document_urls = (normalized_url,)
+        # Operators may still configure the retired v3 endpoint; it lacks the
+        # v4 rank cutoff, so always read the canonical v4 manifest instead.
+        self.url = (
+            CAMPAIGN_FEED_URL if normalized_url == LEGACY_CAMPAIGN_FEED_URL else normalized_url
+        )
         self.cache_path = cache_path
         self._max_response_bytes = max_response_bytes
         self._client = httpx.AsyncClient(
             timeout=timeout,
             transport=transport,
             trust_env=False,
+        )
+
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "CampaignFeedClient":
+        """Build the configured feed client with its cache in the state directory."""
+
+        if settings.campaign_feed_url is None:
+            raise ValueError("BITCAST_X_CAMPAIGN_FEED_URL is not configured")
+        return cls(
+            settings.campaign_feed_url,
+            cache_path=settings.state_dir / "campaign-feed.json",
+            timeout=settings.request_timeout_seconds,
+            max_response_bytes=settings.campaign_feed_max_response_bytes,
         )
 
     async def close(self) -> None:
@@ -465,12 +465,9 @@ class CampaignFeedClient:
         """Return a full feed, downloading only maps absent from the local cache."""
 
         document = await self._fetch_document()
-        if isinstance(document, CampaignFeed):
-            return document
         maps = await asyncio.gather(*(self._resolve_map(item) for item in document.ecosystem_maps))
         self._record_map_bindings(document.ecosystem_maps)
         return CampaignFeed(
-            protocol_version=2,
             snapshot_id=document.snapshot_id,
             published_at=document.published_at,
             campaigns=document.campaigns,
@@ -483,73 +480,26 @@ class CampaignFeedClient:
         document = await self._fetch_document()
         return document.campaigns
 
-    def cached(self) -> CampaignFeed | None:
-        """Return the last valid local snapshot without making a network request."""
-
-        cached = self._read_cache()
-        if cached is None or cached.get("url") not in self._document_urls:
-            return None
-        if "feed" in cached:
-            return CampaignFeed.model_validate(cached["feed"])
-        manifest = CampaignManifest.model_validate(cached["manifest"])
-        self._reject_map_mutations(manifest.ecosystem_maps)
-        maps: list[EcosystemMap] = []
-        for reference in manifest.ecosystem_maps:
-            ecosystem_map = self._read_map_cache(reference)
-            if ecosystem_map is None:
-                return None
-            maps.append(ecosystem_map)
-        return CampaignFeed(
-            protocol_version=2,
-            snapshot_id=manifest.snapshot_id,
-            published_at=manifest.published_at,
-            campaigns=manifest.campaigns,
-            ecosystem_maps=tuple(maps),
-        )
-
-    async def _fetch_document(self) -> CampaignFeed | CampaignManifest:
+    async def _fetch_document(self) -> CampaignManifest:
         stored = self._read_cache()
-        for index, document_url in enumerate(self._document_urls):
-            # ETags are only meaningful for the resource that issued them.
-            cached = stored if stored is not None and stored.get("url") == document_url else None
-            headers = (
-                {"if-none-match": str(cached["etag"])} if cached and cached.get("etag") else {}
-            )
-            try:
-                payload, etag, not_modified = await self._get_bounded(document_url, headers=headers)
-            except httpx.HTTPStatusError as exc:
-                if index == 0 and exc.response.status_code == httpx.codes.NOT_FOUND:
-                    continue
-                raise
-            if not_modified:
-                if cached is None:
-                    raise ValueError("campaign endpoint returned 304 without a local cache")
-                if "manifest" in cached:
-                    manifest = CampaignManifest.model_validate(cached["manifest"])
-                    self._reject_map_mutations(manifest.ecosystem_maps)
-                    return manifest
-                return CampaignFeed.model_validate(cached["feed"])
-
-            raw = TypeAdapter(dict[str, Any]).validate_json(payload)
-            if raw.get("protocol_version") in {3, 4}:
-                manifest = CampaignManifest.model_validate(raw)
-                self._reject_map_mutations(manifest.ecosystem_maps)
-                self._write_document_cache(
-                    "manifest",
-                    manifest.model_dump(mode="json"),
-                    etag,
-                    source_url=document_url,
-                )
-                return manifest
-            feed = CampaignFeed.model_validate(raw)
-            self._write_document_cache(
-                "feed",
-                feed.model_dump(mode="json"),
-                etag,
-                source_url=document_url,
-            )
-            return feed
-        raise ValueError("no supported campaign manifest endpoint is available")
+        # ETags are only meaningful for the resource that issued them.
+        cached = (
+            stored
+            if stored is not None and stored.get("url") == self.url and "manifest" in stored
+            else None
+        )
+        headers = {"if-none-match": str(cached["etag"])} if cached and cached.get("etag") else {}
+        payload, etag, not_modified = await self._get_bounded(self.url, headers=headers)
+        if not_modified:
+            if cached is None:
+                raise ValueError("campaign endpoint returned 304 without a local cache")
+            manifest = CampaignManifest.model_validate(cached["manifest"])
+            self._reject_map_mutations(manifest.ecosystem_maps)
+            return manifest
+        manifest = CampaignManifest.model_validate_json(payload)
+        self._reject_map_mutations(manifest.ecosystem_maps)
+        self._write_manifest_cache(manifest, etag)
+        return manifest
 
     async def _resolve_map(self, reference: EcosystemMapReference) -> EcosystemMap:
         cached = self._read_map_cache(reference)
@@ -573,32 +523,19 @@ class CampaignFeedClient:
             if response.status_code == httpx.codes.NOT_MODIFIED:
                 return b"", response.headers.get("etag"), True
             response.raise_for_status()
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > self._max_response_bytes:
-                    raise ValueError("campaign response exceeds configured byte limit")
-                chunks.append(chunk)
-            return b"".join(chunks), response.headers.get("etag"), False
+            payload = await read_bounded(response, self._max_response_bytes, source="campaign")
+            return payload, response.headers.get("etag"), False
 
     def _read_cache(self) -> dict[str, Any] | None:
         if not self.cache_path.exists():
             return None
         return TypeAdapter(dict[str, Any]).validate_json(self.cache_path.read_bytes())
 
-    def _write_document_cache(
-        self,
-        kind: str,
-        document: Any,
-        etag: str | None,
-        *,
-        source_url: str,
-    ) -> None:
+    def _write_manifest_cache(self, manifest: CampaignManifest, etag: str | None) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.cache_path.with_suffix(self.cache_path.suffix + ".tmp")
         payload = TypeAdapter(dict[str, Any]).dump_json(
-            {"url": source_url, "etag": etag, kind: document}
+            {"url": self.url, "etag": etag, "manifest": manifest.model_dump(mode="json")}
         )
         temporary.write_bytes(payload)
         os.replace(temporary, self.cache_path)
@@ -681,8 +618,14 @@ class CampaignFeedClient:
         path = self._map_cache_path(reference)
         if not path.exists():
             return None
-        ecosystem_map = EcosystemMap.model_validate_json(path.read_bytes())
-        self._validate_map(reference, ecosystem_map)
+        try:
+            ecosystem_map = EcosystemMap.model_validate_json(path.read_bytes())
+            self._validate_map(reference, ecosystem_map)
+        except ValueError:
+            # The cache is digest-addressed, so a stale or damaged entry is just
+            # a miss: the map is downloaded again and verified against its digest.
+            LOGGER.warning("discarding unreadable ecosystem map cache path=%s", path)
+            return None
         return ecosystem_map
 
     def _write_map_cache(
@@ -706,8 +649,5 @@ class CampaignFeedClient:
 
 def _map_digest(ecosystem_map: EcosystemMap) -> str:
     payload = ecosystem_map.model_dump(mode="json")
-    # This consumer-only compatibility default is not part of the API's v2 map
-    # contract and therefore is deliberately excluded from the wire digest.
-    payload.pop("max_referral_amount", None)
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return f"sha256-{hashlib.sha256(canonical.encode()).hexdigest()}"

@@ -19,13 +19,11 @@ from bitcast_x.miner.store import MinerStore
 from bitcast_x.ops import RuntimeHealth, create_ops_app
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.release import source_revision
-from bitcast_x.rewards import TweetReward
 from bitcast_x.sqlite import apply_migrations
 from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.store import ValidatorStore
 
 
-@pytest.mark.asyncio
 async def test_resume_history_command_needs_no_chain_connection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -46,7 +44,6 @@ async def test_resume_history_command_needs_no_chain_connection(
     assert len(str(result["history_id"])) == 64
 
 
-@pytest.mark.asyncio
 async def test_validator_readiness_and_metrics_have_fixed_cardinality() -> None:
     health = RuntimeHealth.create()
     app = create_ops_app(health)
@@ -96,19 +93,19 @@ def test_migration_runner_rejects_state_from_newer_binary(tmp_path: Path) -> Non
 
 def test_unversioned_existing_store_is_adopted_without_losing_state(tmp_path: Path) -> None:
     path = tmp_path / "legacy-validator.sqlite3"
-    original = ValidatorStore(path, start_block=10)
-    original.persist_block(10, [])
+    original = ValidatorStore(path)
+    original.persist_shadow_weights(10, "snapshot", {0: 1.0})
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA user_version = 0")
     finally:
         connection.close()
 
-    reopened = ValidatorStore(path, start_block=999)
+    ValidatorStore(path)
 
-    assert reopened.scanned_block() == 10
     connection = sqlite3.connect(path)
     try:
+        assert connection.execute("SELECT block FROM shadow_weights").fetchall() == [(10,)]
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
     finally:
         connection.close()
@@ -116,9 +113,7 @@ def test_unversioned_existing_store_is_adopted_without_losing_state(tmp_path: Pa
 
 def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path) -> None:
     path = tmp_path / "miner.sqlite3"
-    store = MinerStore(path)
-    history_id = "68" * 32
-    store.start_history(history_id)
+    history_id = MinerStore(path).resume_history()
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA user_version = 0")
@@ -127,7 +122,7 @@ def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path)
 
     reopened = MinerStore(path)
 
-    assert reopened.current_history_id() == history_id
+    assert reopened.resume_history() == history_id
     connection = sqlite3.connect(path)
     try:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
@@ -135,95 +130,26 @@ def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path)
         connection.close()
 
 
-def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: Path) -> None:
+def test_featured_pin_survives_retry_and_restart_and_first_pin_wins(tmp_path: Path) -> None:
     path = tmp_path / "validator.sqlite3"
     store = ValidatorStore(path)
     now = datetime(2026, 8, 13, tzinfo=UTC)
-    original = CampaignRecord(
-        access=CampaignAccess(
-            campaign_id="frozen",
-            mechanism_id=1,
-            mining_protocol=MiningProtocol.PRECLAIM_V2,
-            scoring_close_block=20,
-        ),
-        title="Frozen campaign",
-        brief="original brief",
-        ecosystem_id="eco",
-        opens_at=now,
-        closes_at=now + timedelta(days=1),
-        reward_pool_usd="700",
-        emission_start_block=30,
-        emission_end_block=40,
-    )
-    store.bind_campaign_protocols((original,))
-    store.persist_reconciliation(
-        snapshot_id="snapshot",
-        campaign_id="frozen",
-        campaign_json=original.model_dump_json(),
-        results=[],
-    )
-    store.persist_campaign_rewards(
-        snapshot_id="snapshot",
-        campaign_id="frozen",
-        campaign_json=original.model_dump_json(),
-        rewards=[
-            TweetReward(
-                campaign_id="frozen",
-                tweet_id="1",
-                creator_x_id="creator",
-                miner_hotkey="miner",
-                score=1.0,
-                daily_usd_floor=1.0,
-            )
-        ],
-        decisions=[],
-    )
-    connection = sqlite3.connect(path)
-    try:
-        connection.execute("ALTER TABLE campaign_protocols DROP COLUMN campaign_contract_json")
-        connection.execute("PRAGMA user_version = 4")
-    finally:
-        connection.close()
-
-    reopened = ValidatorStore(path)
-    connection = sqlite3.connect(path)
-    try:
-        row = connection.execute(
-            "SELECT campaign_contract_json FROM campaign_protocols WHERE campaign_id = 'frozen'"
-        ).fetchone()
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert row is not None and row[0] == original.model_dump_json()
-    finally:
-        connection.close()
-
-    assert reopened.bind_campaign_protocols(
-        (original.model_copy(update={"brief": "mutated brief"}),)
-    ) == (original,)
-
-
-def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> None:
-    path = tmp_path / "validator.sqlite3"
-    store = ValidatorStore(path)
-    now = datetime(2026, 8, 13, tzinfo=UTC)
-    original = CampaignRecord(
+    campaign_json = CampaignRecord(
         access=CampaignAccess(
             campaign_id="featured",
             mechanism_id=1,
             mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=20,
         ),
-        title="Featured campaign",
+        display="Featured campaign",
         brief="original brief",
-        ecosystem_id="eco",
+        pools=("eco",),
         opens_at=now,
         closes_at=now + timedelta(days=1),
         reward_pool_usd="700",
         emission_start_block=30,
         emission_end_block=40,
-    )
-    campaign_json = original.model_dump_json()
-    store.bind_campaign_protocols((original,))
-
+    ).model_dump_json()
     selected = store.pin_featured_tweet_selection(
         campaign_id="featured",
         campaign_json=campaign_json,
@@ -232,21 +158,17 @@ def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> Non
         selected_block=19,
         selected_at=now,
     )
-    store.persist_reconciliation(
-        snapshot_id="first",
-        campaign_id="featured",
-        campaign_json=campaign_json,
-        results=[],
-    )
-    store.persist_reconciliation(
-        snapshot_id="recovered",
-        campaign_id="featured",
-        campaign_json=campaign_json,
-        results=[],
-    )
+    # The second zero-value reconciliation takes the retry path, which clears
+    # downstream state; the featured pin must not be part of it.
+    for snapshot_id in ("first", "recovered"):
+        store.persist_reconciliation(
+            snapshot_id=snapshot_id,
+            campaign_id="featured",
+            campaign_json=campaign_json,
+            results=[],
+        )
 
-    reopened = ValidatorStore(path)
-    replayed = reopened.pin_featured_tweet_selection(
+    replayed = ValidatorStore(path).pin_featured_tweet_selection(
         campaign_id="featured",
         campaign_json=campaign_json,
         tweet_id="2",
@@ -254,23 +176,8 @@ def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> Non
         selected_block=20,
         selected_at=now + timedelta(minutes=1),
     )
-    assert replayed == selected
-    assert reopened.reconciliation("recovered", "featured", campaign_json) == []
-    assert reopened.bind_campaign_protocols(
-        (original.model_copy(update={"brief": "mutated brief"}),)
-    ) == (original,)
-    assert reopened.bind_campaign_protocols(()) == (original,)
 
-    connection = sqlite3.connect(path)
-    try:
-        tables = {
-            str(row[0])
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert "featured_tweet_selections" in tables
-    finally:
-        connection.close()
+    assert replayed == selected
 
 
 def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -> None:
@@ -281,9 +188,9 @@ def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -
     wal.write_bytes(b"preserved wal")
     shm.write_bytes(b"preserved shm")
 
-    store = ValidatorStore(path, start_block=321)
+    store = ValidatorStore(path)
 
-    assert store.scanned_block() == 320
+    assert store.verified_batches() == []
     assert path.read_bytes().startswith(b"SQLite format 3\x00")
     quarantined = sorted(tmp_path.glob("validator.sqlite3*.corrupt-*"))
     assert len(quarantined) == 3

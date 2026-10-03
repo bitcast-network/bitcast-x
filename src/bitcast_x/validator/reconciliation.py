@@ -2,7 +2,7 @@
 
 import logging
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
@@ -16,18 +16,20 @@ from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.matcher import MatchCandidate, choose_match, normalize_match_text
 from bitcast_x.protocol import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
+    MAX_ACTIVE_CLAIMS,
     AttributionReason,
     AttributionResult,
     ClaimEvent,
     CommitmentPosition,
     DraftReveal,
-    MiningProtocol,
     SubmissionEvent,
 )
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet, XProvider
 
 LOGGER = logging.getLogger(__name__)
+
+_QUALIFICATION_CACHE_LIMIT = 10_000
 
 
 class QualificationChecker(Protocol):
@@ -95,6 +97,20 @@ class _LocatedSubmission:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _CampaignEvents:
+    claims: list[_LocatedClaim] = field(default_factory=list)
+    submissions: list[_LocatedSubmission] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedEvents:
+    """Verified claim and submission events through one block, grouped by campaign."""
+
+    through_block: int
+    by_campaign: dict[str, _CampaignEvents]
+
+
 class CampaignReconciler:
     """Independently fetch tweets and apply protocol attribution at scoring close."""
 
@@ -127,6 +143,7 @@ class CampaignReconciler:
         results: list[AttributionResult] = []
         completed_campaign_ids: set[str] = set()
         self._completed_campaign_ids = frozenset()
+        events: VerifiedEvents | None = None
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
             reconciliation_block = (
                 campaign.emission_start_block
@@ -146,11 +163,13 @@ class CampaignReconciler:
                 else None
             )
             if campaign_results is None:
+                events = events or self.verified_events(finalized_block)
                 try:
                     campaign_results = await self.reconcile_campaign(
                         campaign,
                         feed,
                         through_block=finalized_block,
+                        events=events,
                         defer_unavailable_tweets=True,
                     )
                 except ReconciliationUnavailableError as exc:
@@ -172,30 +191,16 @@ class CampaignReconciler:
         self._completed_campaign_ids = frozenset(completed_campaign_ids)
         return results
 
-    async def reconcile_campaign(
-        self,
-        campaign: CampaignRecord,
-        feed: CampaignFeed,
-        *,
-        through_block: int | None = None,
-        defer_unavailable_tweets: bool = False,
-    ) -> list[AttributionResult]:
-        """Replay one campaign, optionally preserving unavailable tweets as pending."""
+    def verified_events(self, through_block: int) -> VerifiedEvents:
+        """Load verified history through one block once, grouped by campaign."""
 
-        records = self.store.verified_batches(
-            through_block=(
-                campaign.access.scoring_close_block if through_block is None else through_block
-            )
-        )
-        claims: list[_LocatedClaim] = []
-        submissions: list[_LocatedSubmission] = []
-        for record in records:
+        by_campaign: dict[str, _CampaignEvents] = defaultdict(_CampaignEvents)
+        for record in self.store.verified_batches(through_block=through_block):
             reveals = {reveal.claim_id: reveal for reveal in record.batch.reveals}
             for event_index, event in enumerate(record.batch.events):
-                if event.campaign_id != campaign.access.campaign_id:
-                    continue
+                located = by_campaign[event.campaign_id]
                 if isinstance(event, ClaimEvent):
-                    claims.append(
+                    located.claims.append(
                         _LocatedClaim(
                             claim=event,
                             miner_hotkey=record.batch.miner_hotkey,
@@ -206,7 +211,7 @@ class CampaignReconciler:
                         )
                     )
                 else:
-                    submissions.append(
+                    located.submissions.append(
                         _LocatedSubmission(
                             submission=event,
                             position=record.position,
@@ -216,6 +221,32 @@ class CampaignReconciler:
                             history_start=record.history_start,
                         )
                     )
+        return VerifiedEvents(through_block=through_block, by_campaign=dict(by_campaign))
+
+    async def reconcile_campaign(
+        self,
+        campaign: CampaignRecord,
+        feed: CampaignFeed,
+        *,
+        through_block: int | None = None,
+        events: VerifiedEvents | None = None,
+        defer_unavailable_tweets: bool = False,
+    ) -> list[AttributionResult]:
+        """Replay one campaign, optionally preserving unavailable tweets as pending.
+
+        Callers reconciling several campaigns pass ``events`` from one
+        ``verified_events`` load instead of reloading the history per campaign.
+        """
+
+        history_block = (
+            campaign.access.scoring_close_block if through_block is None else through_block
+        )
+        if events is None:
+            events = self.verified_events(history_block)
+        elif events.through_block != history_block:
+            raise ValueError("verified events were loaded through a different block")
+        located = events.by_campaign.get(campaign.access.campaign_id, _CampaignEvents())
+        claims, submissions = located.claims, located.submissions
         by_tweet: dict[str, list[_LocatedSubmission]] = defaultdict(list)
         for submission in submissions:
             by_tweet[submission.submission.tweet_id].append(submission)
@@ -454,8 +485,6 @@ class CampaignReconciler:
         *,
         through_block: int | None,
     ) -> AttributionResult:
-        if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-            return self._reject(tweet.tweet_id, campaign, AttributionReason.CAMPAIGN_INELIGIBLE)
         claims_by_id = {
             (item.miner_hotkey, item.claim.claim_id, item.history_start): item for item in claims
         }
@@ -591,11 +620,15 @@ class CampaignReconciler:
             ),
             key=lambda item: item.order,
         )
-        return {(item.miner_hotkey, item.claim.claim_id) for item in active[-5:]}
+        return {(item.miner_hotkey, item.claim.claim_id) for item in active[-MAX_ACTIVE_CLAIMS:]}
 
     async def _qualified(self, hotkey: str, block: int) -> bool:
         key = (hotkey, block)
         if key not in self._qualification_cache:
+            # Previews query a new block every cycle; bound the memo so a
+            # long-running validator does not accumulate one entry per cycle.
+            if len(self._qualification_cache) >= _QUALIFICATION_CACHE_LIMIT:
+                self._qualification_cache.clear()
             self._qualification_cache[key] = await self._qualification.eligible(hotkey, block)
         return self._qualification_cache[key]
 

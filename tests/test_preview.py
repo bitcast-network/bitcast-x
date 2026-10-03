@@ -70,7 +70,6 @@ def test_preview_refresh_interval_uses_age_tiers(age: timedelta, expected: timed
     assert _refresh_interval(tweet, now=NOW) == expected
 
 
-@pytest.mark.asyncio
 async def test_preview_evidence_is_cached_then_refreshed_and_merged(tmp_path: Path) -> None:
     current = [NOW]
     upstream = Provider()
@@ -100,7 +99,6 @@ async def test_preview_evidence_is_cached_then_refreshed_and_merged(tmp_path: Pa
     assert refreshed_engagements.engagements == {"alice": "quote", "bob": "quote"}
 
 
-@pytest.mark.asyncio
 async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_other_old_tweets(
     tmp_path: Path,
 ) -> None:
@@ -131,7 +129,6 @@ async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_othe
     assert upstream.engagement_tweet_ids == ["101", "202", "101"]
 
 
-@pytest.mark.asyncio
 async def test_preview_outage_reuses_evidence_and_retries_once_per_minute(tmp_path: Path) -> None:
     current = [NOW]
     upstream = Provider()
@@ -155,3 +152,38 @@ async def test_preview_outage_reuses_evidence_and_retries_once_per_minute(tmp_pa
     await provider.fetch_tweet_by_id("123")
 
     assert upstream.tweet_fetches == 3
+
+
+async def test_unreadable_preview_entries_are_fetched_again(tmp_path: Path) -> None:
+    store = PreviewStore(tmp_path / "preview-cache")
+    # Entries written by another release: a model field this release does not
+    # know, and a timestamp it cannot parse.
+    store._cache.set(
+        "tweet:1",
+        {
+            "result": {"tweet": None, "provider_available": True, "retired_field": 1},
+            "refreshed_at": NOW.isoformat(),
+            "attempted_at": NOW.isoformat(),
+            "last_attempt_available": True,
+        },
+    )
+    store._cache.set(
+        "engagements:1",
+        {
+            "result": {"engagements": {}, "provider_available": True},
+            "refreshed_at": None,
+            "attempted_at": "not-a-timestamp",
+            "last_attempt_available": True,
+        },
+    )
+    store._cache.set("publication:campaign", {"payload": {}, "attempted_at": None})
+    upstream = Provider()
+    provider = PreviewXProvider(upstream, store, now=lambda: NOW)
+
+    tweet = await provider.fetch_tweet_by_id("1")
+    engagements = await provider.fetch_engagements("1")
+
+    assert tweet.tweet is not None
+    assert engagements.engagements == {"alice": "quote"}
+    assert (upstream.tweet_fetches, upstream.engagement_fetches) == (1, 1)
+    assert store.preview_publication("campaign") is None

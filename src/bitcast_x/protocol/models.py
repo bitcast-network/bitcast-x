@@ -38,8 +38,6 @@ class ProtocolModel(BaseModel):
 class MiningProtocol(StrEnum):
     """Application behavior selected by a campaign feed record."""
 
-    # Retained to decode historical contracts; the validator rejects it in live feeds.
-    LEGACY_CONNECTION = "legacy_connection"
     PRECLAIM_V2 = "preclaim_v2"
 
 

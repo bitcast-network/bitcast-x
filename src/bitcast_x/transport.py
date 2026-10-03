@@ -12,7 +12,8 @@ from bittensor.http_auth import AuthError, Caller, InMemoryNonceStore
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from bitcast_x.errors import AuthenticationError, ResponseTooLargeError
+from bitcast_x.errors import AuthenticationError
+from bitcast_x.http import read_bounded
 from bitcast_x.protocol import CommitmentPosition
 
 BATCHES_PATH = "/v3/batches"
@@ -298,11 +299,5 @@ class SignedMinerClient:
             "POST", BATCHES_PATH, headers=headers, content=body
         ) as response:
             response.raise_for_status()
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > self._max_response_bytes:
-                    raise ResponseTooLargeError("miner response exceeds configured byte limit")
-                chunks.append(chunk)
-        return BatchPageResponse.model_validate_json(b"".join(chunks))
+            payload = await read_bounded(response, self._max_response_bytes, source="miner")
+        return BatchPageResponse.model_validate_json(payload)

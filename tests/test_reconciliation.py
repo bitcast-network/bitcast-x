@@ -1,17 +1,23 @@
 """End-to-end attribution replay tests over verified validator history."""
 
 import json
+import logging
+import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap, SocialAccount
 from bitcast_x.chain import ChainCommitment
-from bitcast_x.errors import ProtocolError, ReconciliationUnavailableError
+from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
+    MAX_ACTIVE_CLAIMS,
     AttributionReason,
+    AttributionResult,
     CampaignAccess,
     ClaimEvent,
     CommitmentEnvelope,
@@ -22,11 +28,12 @@ from bitcast_x.protocol import (
 )
 from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
+from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
-from bitcast_x.validator.scoring import AttributionScorer
-from bitcast_x.validator.store import ValidatorStore
+from bitcast_x.validator.scoring import AttributionScorer, ScoredAttribution
+from bitcast_x.validator.store import ValidatorStore, VerifiedBatchRecord
 from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -42,16 +49,6 @@ class FakeQualification:
     async def eligible(self, _miner_hotkey: str, _block: int) -> bool:
         self.calls.append(_block)
         return self.value
-
-
-class QualificationByBlock:
-    def __init__(self, eligible_from: int) -> None:
-        self.eligible_from = eligible_from
-        self.calls: list[int] = []
-
-    async def eligible(self, _miner_hotkey: str, block: int) -> bool:
-        self.calls.append(block)
-        return block >= self.eligible_from
 
 
 class QualificationAtBlocks:
@@ -76,25 +73,6 @@ class FakeX:
 
     async def close(self) -> None:
         pass
-
-
-class CapturingPublisher:
-    def __init__(self) -> None:
-        self.payloads: list[dict[str, object]] = []
-
-    async def publish(
-        self,
-        *,
-        endpoint: str,
-        payload_type: str,
-        run_id: str,
-        payload: dict[str, object],
-    ) -> bool:
-        assert endpoint == "https://ingestion.example/api/v1/brief-tweets"
-        assert payload_type == "brief_tweets"
-        assert run_id == "v3:snapshot:campaign"
-        self.payloads.append(payload)
-        return True
 
 
 class MultiCampaignPublisher:
@@ -130,9 +108,9 @@ def campaign(
             scoring_close_block=scoring_close_block,
             exclusive_miner_hotkey=exclusive,
         ),
-        title="Campaign",
+        display="Campaign",
         brief="Talk about the wallet in your own words",
-        ecosystem_id="ecosystem",
+        pools=("ecosystem",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="1000.00",
@@ -140,17 +118,24 @@ def campaign(
     )
 
 
-def feed(record: CampaignRecord) -> CampaignFeed:
+def feed(*records: CampaignRecord, influence: float | None = None) -> CampaignFeed:
+    """Build a feed whose creator ``456`` scores engagement only when given ``influence``."""
+
     return CampaignFeed(
         snapshot_id="snapshot",
         published_at=NOW,
-        campaigns=(record,),
+        campaigns=records,
         ecosystem_maps=(
             EcosystemMap(
                 ecosystem_id="ecosystem",
                 name="Ecosystem",
                 eligible_creator_x_ids=("456",),
                 updated_at=NOW,
+                accounts=(
+                    ()
+                    if influence is None
+                    else (SocialAccount(x_id="456", username="creator", influence=influence),)
+                ),
             ),
         ),
     )
@@ -196,7 +181,6 @@ def persist_batch(
             history_id=(bytes.fromhex(batch.history_id) if batch.history_id else None),
         ),
     )
-    store.persist_block(block, [anchor])
     store.persist_verified(batch, anchor)
 
 
@@ -207,7 +191,7 @@ def open_history(
     draft: str | None = None,
     revealed_draft: str | None = None,
 ) -> ValidatorStore:
-    store = ValidatorStore(path, start_block=10)
+    store = ValidatorStore(path)
     claim_reveal = DraftReveal(
         claim_id="01" * 16,
         draft=draft
@@ -307,7 +291,131 @@ def miner_claim_history(
     return history
 
 
-@pytest.mark.asyncio
+def submission_only_history(
+    path: Path,
+    *,
+    block: int = 10,
+    timestamp: datetime = NOW + timedelta(minutes=20),
+    claim_id: str | None = None,
+    creator_x_id: str | None = "456",
+) -> ValidatorStore:
+    """Commit MINER's single submission ``03…`` of tweet 999 with no preceding claim.
+
+    A submission without ``creator_x_id`` is a legacy version-2 event.
+    """
+
+    store = ValidatorStore(path)
+    submission = SubmissionEvent(
+        version=3 if creator_x_id is not None else 2,
+        submission_id="03" * 16,
+        campaign_id="campaign",
+        tweet_id="999",
+        claim_id=claim_id,
+        miner_hotkey=MINER,
+        creator_x_id=creator_x_id,
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(submission,),
+    )
+    persist_batch(store, batch, block=block, timestamp=timestamp)
+    return store
+
+
+def two_tweet_history(
+    path: Path,
+    campaign_ids: tuple[str, str] = ("campaign", "campaign"),
+) -> ValidatorStore:
+    """Commit MINER's direct submissions ``03…`` of tweet 998 and ``04…`` of tweet 999."""
+
+    store = ValidatorStore(path)
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=tuple(
+            SubmissionEvent(
+                submission_id=submission_id,
+                campaign_id=campaign_id,
+                tweet_id=tweet_id,
+                claim_id=None,
+                miner_hotkey=MINER,
+                creator_x_id="456",
+            )
+            for campaign_id, tweet_id, submission_id in zip(
+                campaign_ids, ("998", "999"), ("03" * 16, "04" * 16), strict=True
+            )
+        ),
+    )
+    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    return store
+
+
+@dataclass(frozen=True)
+class RewardRun:
+    attributions: list[AttributionResult]
+    coordinator: RewardCoordinator
+    scored: list[ScoredAttribution]
+    weights: dict[int, float]
+    floors: list[TweetReward]
+
+
+async def run_rewards(
+    store: ValidatorStore,
+    provider: FakeX,
+    snapshot: CampaignFeed,
+    *,
+    persist: bool = False,
+) -> RewardRun:
+    """Reconcile at block 30, freeze scores and compute the block-35 shadow vector."""
+
+    attributions = await CampaignReconciler(
+        store,
+        provider,
+        FakeQualification(),
+    ).reconcile_feed(snapshot, finalized_block=30)
+    coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
+    scored = await coordinator.freeze_scores(snapshot, attributions)
+    weights, floors = coordinator.shadow_weights(
+        snapshot,
+        scored,
+        block=35,
+        hotkey_to_uid={MINER: 7},
+        uids=[0, 7],
+        persist=persist,
+    )
+    return RewardRun(attributions, coordinator, scored, weights, floors)
+
+
+async def test_feed_reconciliation_loads_verified_history_once(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    loads: list[int | None] = []
+    load_history = store.verified_batches
+
+    def counted(*, through_block: int | None = None) -> list[VerifiedBatchRecord]:
+        loads.append(through_block)
+        return load_history(through_block=through_block)
+
+    store.verified_batches = counted  # type: ignore[method-assign]
+    other = campaign().model_copy(
+        update={"access": campaign().access.model_copy(update={"campaign_id": "other"})}
+    )
+    snapshot = feed(campaign(), other)
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+
+    assert loads == [20]
+    assert [item.campaign_id for item in results if item.accepted] == ["campaign"]
+    assert reconciler.completed_campaign_ids == {"campaign", "other"}
+
+
 async def test_open_campaign_attributes_independently_fetched_ordinary_edit(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     qualification = FakeQualification()
@@ -327,11 +435,10 @@ async def test_open_campaign_attributes_independently_fetched_ordinary_edit(tmp_
     assert qualification.calls == [10, 20]
 
 
-@pytest.mark.asyncio
 async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
     tmp_path: Path,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     reveal = DraftReveal(claim_id="01" * 16, draft=tweet().text, nonce="02" * 32)
     claim_batch = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -379,7 +486,6 @@ async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
     assert results[0].reason is AttributionReason.CLAIM_NOT_ACTIVE
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("campaign_updates", "public_only_text", "quoted_tweet_id"),
     [
@@ -431,13 +537,19 @@ async def test_public_campaign_material_alone_does_not_prove_draft_access(
     assert result.winner_score == pytest.approx(0.55)
 
 
-@pytest.mark.asyncio
-async def test_open_claim_unqualified_at_commitment_cannot_be_rescued_by_later_top_up(
+@pytest.mark.parametrize(
+    ("eligible_blocks", "expected_calls"),
+    [({20}, [10]), ({10}, [10, 20])],
+    ids=["later_top_up_cannot_rescue_claim", "finally_rejected_at_scoring_close"],
+)
+async def test_open_claim_must_be_qualified_at_commitment_and_scoring_close(
     tmp_path: Path,
+    eligible_blocks: set[int],
+    expected_calls: list[int],
 ) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
-    qualification = QualificationByBlock(18)
+    qualification = QualificationAtBlocks(eligible_blocks)
     reconciler = CampaignReconciler(
         store,
         FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
@@ -449,10 +561,9 @@ async def test_open_claim_unqualified_at_commitment_cannot_be_rescued_by_later_t
     assert result.accepted is False
     assert result.pending is False
     assert result.reason.value == "miner_not_qualified"
-    assert qualification.calls == [10]
+    assert qualification.calls == expected_calls
 
 
-@pytest.mark.asyncio
 async def test_open_preview_can_recover_at_close_only_if_claim_was_initially_qualified(
     tmp_path: Path,
 ) -> None:
@@ -480,80 +591,8 @@ async def test_open_preview_can_recover_at_close_only_if_claim_was_initially_qua
     assert qualification.calls == [10, 15, 20]
 
 
-@pytest.mark.asyncio
-async def test_unqualified_miner_is_finally_rejected_at_scoring_close(tmp_path: Path) -> None:
-    store = open_history(tmp_path / "validator.sqlite3")
-    record = campaign()
-    qualification = QualificationAtBlocks({10})
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
-        qualification,
-    )
-
-    result = (await reconciler.reconcile_campaign(record, feed(record), through_block=20))[0]
-
-    assert result.accepted is False
-    assert result.pending is False
-    assert result.reason.value == "miner_not_qualified"
-    assert qualification.calls == [10, 20]
-
-
-@pytest.mark.asyncio
-async def test_claim_finalized_after_publication_is_rejected(tmp_path: Path) -> None:
-    publication = NOW + timedelta(minutes=10)
-    store = open_history(
-        tmp_path / "validator.sqlite3",
-        claim_timestamp=publication + timedelta(seconds=1),
-    )
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=tweet(created_at=publication), provider_available=True)}),
-        FakeQualification(),
-    )
-
-    result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
-
-    assert result.accepted is False
-    assert result.reason.value == "claim_after_publication"
-
-
-@pytest.mark.asyncio
-async def test_changed_reveal_is_rejected_against_the_committed_open_claim(tmp_path: Path) -> None:
-    store = open_history(
-        tmp_path / "validator.sqlite3",
-        revealed_draft="A different draft was revealed after publication. #Launch",
-    )
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
-        FakeQualification(),
-    )
-
-    result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
-
-    assert result.accepted is False
-    assert result.reason.value == "draft_reveal_mismatch"
-
-
-@pytest.mark.asyncio
 async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    submission = SubmissionEvent(
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id="04" * 16,
-        miner_hotkey=MINER,
-        creator_x_id="456",
-    )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    store = submission_only_history(tmp_path / "validator.sqlite3", claim_id="04" * 16)
     reconciler = CampaignReconciler(
         store,
         FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
@@ -566,7 +605,6 @@ async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: P
     assert result.reason.value == "claim_not_active"
 
 
-@pytest.mark.asyncio
 async def test_eligible_tweet_author_must_match_the_open_claim(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
@@ -595,40 +633,8 @@ async def test_eligible_tweet_author_must_match_the_open_claim(tmp_path: Path) -
     assert result.reason.value == "author_mismatch"
 
 
-@pytest.mark.asyncio
-async def test_tweet_published_after_campaign_close_is_rejected(tmp_path: Path) -> None:
-    store = open_history(tmp_path / "validator.sqlite3")
-    late_tweet = tweet(created_at=NOW + timedelta(days=1, seconds=1))
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=late_tweet, provider_available=True)}),
-        FakeQualification(),
-    )
-
-    result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
-
-    assert result.accepted is False
-    assert result.reason is AttributionReason.POST_OUTSIDE_CAMPAIGN_WINDOW
-
-
-@pytest.mark.asyncio
 async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    submission = SubmissionEvent(
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id="456",
-    )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    store = submission_only_history(tmp_path / "validator.sqlite3")
     record = campaign(exclusive=MINER)
     evidence = tweet(created_at=NOW - timedelta(days=1))
     reconciler = CampaignReconciler(
@@ -645,24 +651,12 @@ async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path
     assert result.submission_id == "03" * 16
 
 
-@pytest.mark.asyncio
 async def test_late_submission_is_audited_without_fetching_x(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=21)
-    submission = SubmissionEvent(
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id="456",
+    store = submission_only_history(
+        tmp_path / "validator.sqlite3",
+        block=21,
+        timestamp=NOW + timedelta(days=2),
     )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(store, batch, block=21, timestamp=NOW + timedelta(days=2))
     record = campaign(exclusive=MINER)
     reconciler = CampaignReconciler(store, FakeX({}), FakeQualification())
 
@@ -674,7 +668,6 @@ async def test_late_submission_is_audited_without_fetching_x(tmp_path: Path) -> 
     assert result.submission_id == "03" * 16
 
 
-@pytest.mark.asyncio
 async def test_campaign_freezes_only_after_its_reconciliation_window(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"emission_start_block": 30, "emission_end_block": 40})
@@ -692,25 +685,85 @@ async def test_campaign_freezes_only_after_its_reconciliation_window(tmp_path: P
     assert at_emission[0].accepted is True
 
 
-@pytest.mark.asyncio
-async def test_exclusive_campaign_skips_claim_and_matcher(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    submission = SubmissionEvent(
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id="456",
+@pytest.mark.parametrize(
+    (
+        "exclusive",
+        "creator_x_id",
+        "block",
+        "scoring_close_block",
+        "reason",
+        "identified",
+        "qualification_calls",
+    ),
+    [
+        pytest.param(
+            MINER,
+            "456",
+            10,
+            20,
+            AttributionReason.ACCEPTED,
+            True,
+            [10, 20],
+            id="skips_claim_and_matcher",
+        ),
+        pytest.param(
+            MINER,
+            None,
+            CREATOR_BINDING_ACTIVATION_BLOCK - 1,
+            CREATOR_BINDING_ACTIVATION_BLOCK + 1,
+            AttributionReason.ACCEPTED,
+            True,
+            [CREATOR_BINDING_ACTIVATION_BLOCK - 1, CREATOR_BINDING_ACTIVATION_BLOCK + 1],
+            id="accepts_legacy_submission_before_activation",
+        ),
+        pytest.param(
+            MINER,
+            None,
+            CREATOR_BINDING_ACTIVATION_BLOCK,
+            CREATOR_BINDING_ACTIVATION_BLOCK + 1,
+            AttributionReason.AUTHOR_MISMATCH,
+            True,
+            [],
+            id="rejects_missing_identity_at_activation",
+        ),
+        pytest.param(
+            MINER,
+            "789",
+            CREATOR_BINDING_ACTIVATION_BLOCK,
+            CREATOR_BINDING_ACTIVATION_BLOCK + 1,
+            AttributionReason.AUTHOR_MISMATCH,
+            True,
+            [],
+            id="rejects_wrong_identity_at_activation",
+        ),
+        pytest.param(
+            OTHER_MINER,
+            "456",
+            10,
+            20,
+            AttributionReason.WRONG_EXCLUSIVE_MINER,
+            False,
+            [],
+            id="rejects_a_different_miner",
+        ),
+    ],
+)
+async def test_exclusive_campaign_submitter_identity(
+    tmp_path: Path,
+    exclusive: str,
+    creator_x_id: str | None,
+    block: int,
+    scoring_close_block: int,
+    reason: AttributionReason,
+    identified: bool,
+    qualification_calls: list[int],
+) -> None:
+    store = submission_only_history(
+        tmp_path / "validator.sqlite3",
+        block=block,
+        creator_x_id=creator_x_id,
     )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
-    record = campaign(exclusive=MINER)
+    record = campaign(exclusive=exclusive, scoring_close_block=scoring_close_block)
     qualification = FakeQualification()
     reconciler = CampaignReconciler(
         store,
@@ -720,166 +773,20 @@ async def test_exclusive_campaign_skips_claim_and_matcher(tmp_path: Path) -> Non
 
     result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
 
-    assert result.accepted is True
+    assert result.accepted is (reason is AttributionReason.ACCEPTED)
+    assert result.reason is reason
     assert result.claim_id is None
-    assert result.miner_hotkey == MINER
-    assert qualification.calls == [10, 20]
+    assert result.miner_hotkey == (MINER if identified else None)
+    assert result.submission_id == ("03" * 16 if identified else None)
+    assert qualification.calls == qualification_calls
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("submitted_creator_x_id", [None, "789"])
-async def test_exclusive_campaign_rejects_missing_or_wrong_submitter_identity_at_activation(
-    tmp_path: Path,
-    submitted_creator_x_id: str | None,
-) -> None:
-    store = ValidatorStore(
-        tmp_path / "validator.sqlite3",
-        start_block=CREATOR_BINDING_ACTIVATION_BLOCK,
-    )
-    submission = SubmissionEvent(
-        version=2 if submitted_creator_x_id is None else 3,
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id=submitted_creator_x_id,
-    )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(
-        store,
-        batch,
-        block=CREATOR_BINDING_ACTIVATION_BLOCK,
-        timestamp=NOW + timedelta(minutes=20),
-    )
-    record = campaign(
-        exclusive=MINER,
-        scoring_close_block=CREATOR_BINDING_ACTIVATION_BLOCK + 1,
-    )
-    qualification = FakeQualification()
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
-        qualification,
-    )
-
-    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
-
-    assert result.accepted is False
-    assert result.reason is AttributionReason.AUTHOR_MISMATCH
-    assert result.miner_hotkey == MINER
-    assert result.submission_id == submission.submission_id
-    assert qualification.calls == []
-
-
-@pytest.mark.asyncio
-async def test_exclusive_campaign_accepts_legacy_submission_before_activation(
-    tmp_path: Path,
-) -> None:
-    store = ValidatorStore(
-        tmp_path / "validator.sqlite3",
-        start_block=CREATOR_BINDING_ACTIVATION_BLOCK - 1,
-    )
-    submission = SubmissionEvent(
-        version=2,
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-    )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(
-        store,
-        batch,
-        block=CREATOR_BINDING_ACTIVATION_BLOCK - 1,
-        timestamp=NOW + timedelta(minutes=20),
-    )
-    record = campaign(
-        exclusive=MINER,
-        scoring_close_block=CREATOR_BINDING_ACTIVATION_BLOCK + 1,
-    )
-    qualification = FakeQualification()
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
-        qualification,
-    )
-
-    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
-
-    assert result.accepted is True
-    assert result.miner_hotkey == MINER
-    assert result.submission_id == submission.submission_id
-    assert qualification.calls == [
-        CREATOR_BINDING_ACTIVATION_BLOCK - 1,
-        CREATOR_BINDING_ACTIVATION_BLOCK + 1,
-    ]
-
-
-@pytest.mark.asyncio
-async def test_exclusive_campaign_rejects_a_different_miner(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    submission = SubmissionEvent(
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id="456",
-    )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
-    record = campaign(exclusive=OTHER_MINER)
-    reconciler = CampaignReconciler(
-        store,
-        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
-        FakeQualification(),
-    )
-
-    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
-
-    assert result.accepted is False
-    assert result.reason.value == "wrong_exclusive_miner"
-
-
-@pytest.mark.asyncio
 async def test_exclusive_submission_unqualified_at_commitment_cannot_be_rescued(
     tmp_path: Path,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    submission = SubmissionEvent(
-        submission_id="03" * 16,
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        miner_hotkey=MINER,
-        creator_x_id="456",
-    )
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(submission,),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
+    store = submission_only_history(tmp_path / "validator.sqlite3")
     record = campaign(exclusive=MINER)
-    qualification = QualificationByBlock(18)
+    qualification = QualificationAtBlocks({20})
     reconciler = CampaignReconciler(
         store,
         FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
@@ -896,7 +803,6 @@ async def test_exclusive_submission_unqualified_at_commitment_cannot_be_rescued(
     assert qualification.calls == [10]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("victim_blocks", "attacker_blocks"),
     [
@@ -909,7 +815,7 @@ async def test_claim_ids_are_namespaced_by_miner_across_order_and_retry(
     victim_blocks: tuple[int, int, int],
     attacker_blocks: tuple[int, int],
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     claim_id = "01" * 16
     history = miner_claim_history(
         hotkey=MINER,
@@ -948,11 +854,10 @@ async def test_claim_ids_are_namespaced_by_miner_across_order_and_retry(
     assert result.submission_id == "05" * 16
 
 
-@pytest.mark.asyncio
 async def test_consuming_claim_id_for_one_miner_does_not_consume_another_miners_claim(
     tmp_path: Path,
 ) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
     claim_id = "01" * 16
     history = miner_claim_history(
         hotkey=MINER,
@@ -995,50 +900,213 @@ async def test_consuming_claim_id_for_one_miner_does_not_consume_another_miners_
     }
 
 
-def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
+def claim_event(reveal: DraftReveal) -> ClaimEvent:
+    return ClaimEvent(
+        claim_id=reveal.claim_id,
+        campaign_id="campaign",
+        creator_x_id="456",
+        created_at=NOW + timedelta(minutes=1),
+        draft_commitment=reveal.commitment(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("referenced_claim", "accepted"),
+    [(0, False), (1, True)],
+    ids=["evicted_oldest_claim", "oldest_claim_still_active"],
+)
+async def test_sixth_claim_evicts_the_oldest_from_the_active_set(
     tmp_path: Path,
+    referenced_claim: int,
+    accepted: bool,
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
+    # Claim IDs descend while chain positions ascend, so eviction must follow position.
+    reveals = [
+        DraftReveal(
+            claim_id=f"{MAX_ACTIVE_CLAIMS + 1 - index:02x}" * 16,
+            draft=tweet().text,
+            nonce=f"{index + 1:02x}" * 32,
+        )
+        for index in range(MAX_ACTIVE_CLAIMS + 1)
+    ]
+    previous_hash = None
+    for sequence, reveal in enumerate(reveals, start=1):
+        claim_batch = CommittedBatch.create(
+            miner_hotkey=MINER,
+            sequence=sequence,
+            previous_batch_hash=previous_hash,
+            events=(claim_event(reveal),),
+        )
+        persist_batch(store, claim_batch, block=9 + sequence, timestamp=NOW + timedelta(minutes=1))
+        previous_hash = claim_batch.batch_hash
+    referenced = reveals[referenced_claim]
+    submission_batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=len(reveals) + 1,
+        previous_batch_hash=previous_hash,
+        events=(
+            SubmissionEvent(
+                submission_id="aa" * 16,
+                campaign_id="campaign",
+                tweet_id="999",
+                claim_id=referenced.claim_id,
+                miner_hotkey=MINER,
+                creator_x_id="456",
+            ),
+        ),
+        reveals=(referenced,),
+    )
+    persist_batch(store, submission_batch, block=17, timestamp=NOW + timedelta(minutes=20))
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    result = (await reconciler.reconcile_campaign(campaign(), feed(campaign())))[0]
+
+    # Whether an evicted claim becomes active again once a newer claim is consumed is an
+    # open protocol decision, so it is deliberately not pinned here.
+    assert result.accepted is accepted
+    if accepted:
+        assert result.claim_id == referenced.claim_id
+        assert result.submission_id == "aa" * 16
+    else:
+        assert result.reason is AttributionReason.CLAIM_NOT_ACTIVE
+        assert result.claim_id is None
+
+
+async def test_consumed_claim_cannot_win_a_second_tweet(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    reveal = DraftReveal(claim_id="01" * 16, draft=tweet().text, nonce="02" * 32)
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(claim_event(reveal),),
+    )
+    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=1))
+    for sequence, (tweet_id, submission_id) in enumerate(
+        (("998", "03" * 16), ("999", "04" * 16)), start=2
+    ):
+        batch = CommittedBatch.create(
+            miner_hotkey=MINER,
+            sequence=sequence,
+            previous_batch_hash=batch.batch_hash,
+            events=(
+                SubmissionEvent(
+                    submission_id=submission_id,
+                    campaign_id="campaign",
+                    tweet_id=tweet_id,
+                    claim_id=reveal.claim_id,
+                    miner_hotkey=MINER,
+                    creator_x_id="456",
+                ),
+            ),
+            reveals=(reveal,),
+        )
+        persist_batch(store, batch, block=9 + sequence, timestamp=NOW + timedelta(minutes=20))
+    reconciler = CampaignReconciler(
+        store,
+        FakeX(
+            {
+                "998": TweetFetch(
+                    tweet=tweet("998", created_at=NOW + timedelta(minutes=10)),
+                    provider_available=True,
+                ),
+                "999": TweetFetch(
+                    tweet=tweet("999", created_at=NOW + timedelta(minutes=15)),
+                    provider_available=True,
+                ),
+            }
+        ),
+        FakeQualification(),
+    )
+
+    results = await reconciler.reconcile_campaign(campaign(), feed(campaign()))
+
+    by_tweet = {item.tweet_id: item for item in results}
+    assert by_tweet["998"].accepted is True
+    assert by_tweet["998"].claim_id == reveal.claim_id
+    assert by_tweet["998"].submission_id == "03" * 16
+    assert by_tweet["999"].accepted is False
+    assert by_tweet["999"].reason is AttributionReason.CLAIM_NOT_ACTIVE
+
+
+def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "validator.sqlite3"
+    store = ValidatorStore(path)
     record = campaign()
-    legacy_payload = json.loads(record.model_dump_json())
+    current_json = record.model_dump_json()
+    legacy_payload = json.loads(current_json)
     legacy_payload["language"] = None
     legacy_json = json.dumps(legacy_payload, sort_keys=True)
-    current_json = record.model_dump_json()
-
+    assert legacy_json != current_json
+    accepted = AttributionResult(
+        tweet_id="999",
+        campaign_id="campaign",
+        accepted=True,
+        reason=AttributionReason.ACCEPTED,
+        miner_hotkey=MINER,
+        submission_id="03" * 16,
+        claim_id="01" * 16,
+    )
+    reward = TweetReward(
+        campaign_id="campaign",
+        tweet_id="999",
+        creator_x_id="456",
+        miner_hotkey=MINER,
+        score=1.0,
+        daily_usd_floor=1.0,
+    )
+    # Freeze a positive allocation whose every stored contract is the legacy JSON.
+    store.bind_campaign_protocols((record,))
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE campaign_protocols SET campaign_contract_json = ? WHERE campaign_id = ?",
+            (legacy_json, "campaign"),
+        )
     store.persist_reconciliation(
         snapshot_id="snapshot",
         campaign_id="campaign",
         campaign_json=legacy_json,
-        results=[],
-    )
-    store.persist_reconciliation(
-        snapshot_id="snapshot",
-        campaign_id="campaign",
-        campaign_json=current_json,
-        results=[],
+        results=[accepted],
     )
     store.persist_campaign_rewards(
         snapshot_id="snapshot",
         campaign_id="campaign",
         campaign_json=legacy_json,
-        rewards=[],
+        rewards=[reward],
         decisions=[],
     )
-    store.persist_campaign_rewards(
-        snapshot_id="snapshot",
+    assert store.campaign_finalized("campaign") is True
+
+    # Replaying the frozen state under the current serialization is a no-op, not a mutation.
+    store.persist_reconciliation(
+        snapshot_id="snapshot-2",
         campaign_id="campaign",
         campaign_json=current_json,
-        rewards=[],
+        results=[accepted],
+    )
+    store.persist_campaign_rewards(
+        snapshot_id="snapshot-2",
+        campaign_id="campaign",
+        campaign_json=current_json,
+        rewards=[reward],
         decisions=[],
     )
+    assert store.reconciliation("snapshot-2", "campaign", current_json) == [accepted]
+    assert store.campaign_rewards("campaign", current_json) == ([reward], [])
+    assert store.reconciled_campaigns() == [record]
+    with caplog.at_level(logging.ERROR, logger="bitcast_x.validator.store"):
+        assert store.bind_campaign_protocols((record,)) == (record,)
+    assert "rejected campaign mutation" not in caplog.text
 
-    assert store.reconciliation("snapshot-2", "campaign", current_json) == []
-    assert store.reconciled_campaigns() == []
-    assert store.campaign_rewards("campaign", current_json) is None
-    assert store.campaign_finalized("campaign") is False
 
-
-@pytest.mark.asyncio
 async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
@@ -1048,9 +1116,6 @@ async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
         FakeX({"999": TweetFetch(tweet=None, provider_available=False)}),
         FakeQualification(),
     )
-
-    with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
-        await reconciler.reconcile_campaign(record, snapshot)
 
     results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
 
@@ -1066,10 +1131,8 @@ async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
         )
         == results
     )
-    assert len(store.verified_batches()) == 2
 
 
-@pytest.mark.asyncio
 async def test_authoritative_tweet_absence_freezes_a_rejection(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
@@ -1110,154 +1173,62 @@ def _exclusive_final_campaign(campaign_id: str) -> CampaignRecord:
 def _two_campaign_finalization(
     tmp_path: Path,
 ) -> tuple[ValidatorStore, CampaignFeed, CampaignRecord, CampaignRecord]:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    store = two_tweet_history(tmp_path / "validator.sqlite3", ("campaign-a", "campaign-b"))
     campaign_a = _exclusive_final_campaign("campaign-a")
     campaign_b = _exclusive_final_campaign("campaign-b")
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(
-            SubmissionEvent(
-                submission_id="03" * 16,
-                campaign_id="campaign-a",
-                tweet_id="998",
-                claim_id=None,
-                miner_hotkey=MINER,
-                creator_x_id="456",
-            ),
-            SubmissionEvent(
-                submission_id="04" * 16,
-                campaign_id="campaign-b",
-                tweet_id="999",
-                claim_id=None,
-                miner_hotkey=MINER,
-                creator_x_id="456",
-            ),
-        ),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
-    snapshot = feed(campaign_a).model_copy(
-        update={
-            "campaigns": (campaign_a, campaign_b),
-            "ecosystem_maps": (
-                EcosystemMap(
-                    ecosystem_id="ecosystem",
-                    name="Ecosystem",
-                    eligible_creator_x_ids=("456",),
-                    updated_at=NOW,
-                    accounts=(SocialAccount(x_id="456", username="creator", influence=10.0),),
-                ),
-            ),
-        }
-    )
-    return store, snapshot, campaign_a, campaign_b
+    return store, feed(campaign_a, campaign_b, influence=10.0), campaign_a, campaign_b
 
 
-@pytest.mark.asyncio
-async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    record = _exclusive_final_campaign("campaign")
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(
-            SubmissionEvent(
-                submission_id="03" * 16,
-                campaign_id="campaign",
-                tweet_id="998",
-                claim_id=None,
-                miner_hotkey=MINER,
-                creator_x_id="456",
-            ),
-            SubmissionEvent(
-                submission_id="04" * 16,
-                campaign_id="campaign",
-                tweet_id="999",
-                claim_id=None,
-                miner_hotkey=MINER,
-                creator_x_id="456",
-            ),
-        ),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
-    snapshot = feed(record).model_copy(
-        update={
-            "ecosystem_maps": (
-                EcosystemMap(
-                    ecosystem_id="ecosystem",
-                    name="Ecosystem",
-                    eligible_creator_x_ids=("456",),
-                    updated_at=NOW,
-                    accounts=(SocialAccount(x_id="456", username="creator", influence=10.0),),
-                ),
-            )
-        }
-    )
-    provider = FakeX(
+def _unavailable_998_provider() -> FakeX:
+    return FakeX(
         {
             "998": TweetFetch(tweet=None, provider_available=False),
             "999": TweetFetch(tweet=tweet("999"), provider_available=True),
         }
     )
-    attributions = await CampaignReconciler(
-        store,
-        provider,
-        FakeQualification(),
-    ).reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
 
-    scored = await coordinator.freeze_scores(snapshot, attributions)
-    weights, floors = coordinator.shadow_weights(
-        snapshot,
-        scored,
-        block=35,
-        hotkey_to_uid={MINER: 7},
-        uids=[0, 7],
-        persist=False,
-    )
 
-    results_by_tweet = {item.tweet_id: item for item in attributions}
+async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: Path) -> None:
+    store = two_tweet_history(tmp_path / "validator.sqlite3")
+    snapshot = feed(_exclusive_final_campaign("campaign"), influence=10.0)
+
+    run = await run_rewards(store, _unavailable_998_provider(), snapshot)
+
+    # Available evidence is ordered first; the unavailable tweet keeps its submission identity.
+    assert [item.tweet_id for item in run.attributions] == ["999", "998"]
+    results_by_tweet = {item.tweet_id: item for item in run.attributions}
     assert results_by_tweet["998"].pending is True
     assert results_by_tweet["998"].reason is AttributionReason.EVIDENCE_UNAVAILABLE
+    assert results_by_tweet["998"].miner_hotkey == MINER
+    assert results_by_tweet["998"].submission_id == "03" * 16
     assert results_by_tweet["999"].accepted is True
-    assert [item.tweet_id for item in floors] == ["999"]
-    assert floors[0].daily_usd_floor == pytest.approx(1000 / 7)
-    assert weights == {0: 0.0, 7: 1.0}
-    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+    assert results_by_tweet["999"].submission_id == "04" * 16
+    assert [item.tweet_id for item in run.floors] == ["999"]
+    assert run.floors[0].daily_usd_floor == pytest.approx(1000 / 7)
+    assert run.weights == {0: 0.0, 7: 1.0}
+    assert run.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
 
 
-@pytest.mark.asyncio
 async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
-    provider = FakeX(
-        {
-            "998": TweetFetch(tweet=None, provider_available=False),
-            "999": TweetFetch(tweet=tweet("999"), provider_available=True),
-        }
-    )
-    reconciler = CampaignReconciler(store, provider, FakeQualification())
 
-    attributions = await reconciler.reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
-    scored = await coordinator.freeze_scores(snapshot, attributions)
-    weights, floors = coordinator.shadow_weights(
-        snapshot,
-        scored,
-        block=35,
-        hotkey_to_uid={MINER: 7},
-        uids=[0, 7],
-        persist=False,
-    )
+    run = await run_rewards(store, _unavailable_998_provider(), snapshot)
     publisher = MultiCampaignPublisher()
     published = await ShadowResultPublisher(
         store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
-    ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
+        preview_store=PreviewStore(tmp_path / "preview-cache"),
+    ).publish(
+        snapshot,
+        run.scored,
+        run.floors,
+        block=35,
+        hotkey_to_uid={MINER: 7},
+        completed_campaign_ids=run.coordinator.completed_campaign_ids,
+    )
 
-    assert [item.campaign_id for item in attributions] == ["campaign-a", "campaign-b"]
+    assert [item.campaign_id for item in run.attributions] == ["campaign-a", "campaign-b"]
     campaign_a_results = store.reconciliation(
         snapshot.snapshot_id,
         "campaign-a",
@@ -1276,8 +1247,8 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
         )
         is not None
     )
-    assert weights == {0: 0.0, 7: 1.0}
-    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+    assert run.weights == {0: 0.0, 7: 1.0}
+    assert run.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
     assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
     assert published == 1
@@ -1290,7 +1261,6 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
     assert campaign_a_decision["reward_status"] == "pending"
 
 
-@pytest.mark.asyncio
 async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
@@ -1307,87 +1277,17 @@ async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> No
             "999": TweetFetch(tweet=tweet("999"), provider_available=True),
         }
     )
-    attributions = await CampaignReconciler(
-        store,
-        provider,
-        FakeQualification(),
-    ).reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
 
-    scored = await coordinator.freeze_scores(snapshot, attributions)
-    coordinator.shadow_weights(
-        snapshot,
-        scored,
-        block=35,
-        hotkey_to_uid={MINER: 7},
-        uids=[0, 7],
-        persist=False,
-    )
+    run = await run_rewards(store, provider, snapshot)
 
-    assert [item.attribution.campaign_id for item in scored] == ["campaign-b"]
-    assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-a") == []
-    assert store.scored_reconciliation(snapshot.snapshot_id, "campaign-b") is not None
-    assert coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+    assert [item.attribution.campaign_id for item in run.scored] == ["campaign-b"]
+    assert store.scored_reconciliation("campaign-a") == []
+    assert store.scored_reconciliation("campaign-b") is not None
+    assert run.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
     assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
 
 
-@pytest.mark.asyncio
-async def test_preview_defers_only_the_tweet_with_unavailable_evidence(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
-    batch = CommittedBatch.create(
-        miner_hotkey=MINER,
-        sequence=1,
-        previous_batch_hash=None,
-        events=(
-            SubmissionEvent(
-                submission_id="03" * 16,
-                campaign_id="campaign",
-                tweet_id="998",
-                claim_id=None,
-                miner_hotkey=MINER,
-                creator_x_id="456",
-            ),
-            SubmissionEvent(
-                submission_id="04" * 16,
-                campaign_id="campaign",
-                tweet_id="999",
-                claim_id=None,
-                miner_hotkey=MINER,
-                creator_x_id="456",
-            ),
-        ),
-    )
-    persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=20))
-    record = campaign(exclusive=MINER)
-    reconciler = CampaignReconciler(
-        store,
-        FakeX(
-            {
-                "998": TweetFetch(tweet=None, provider_available=False),
-                "999": TweetFetch(tweet=tweet("999"), provider_available=True),
-            }
-        ),
-        FakeQualification(),
-    )
-
-    results = await reconciler.reconcile_campaign(
-        record,
-        feed(record),
-        through_block=15,
-        defer_unavailable_tweets=True,
-    )
-
-    assert [item.tweet_id for item in results] == ["999", "998"]
-    assert results[0].accepted is True
-    assert results[0].submission_id == "04" * 16
-    assert results[1].pending is True
-    assert results[1].reason is AttributionReason.EVIDENCE_UNAVAILABLE
-    assert results[1].miner_hotkey == MINER
-    assert results[1].submission_id == "03" * 16
-
-
-@pytest.mark.asyncio
 async def test_eligibility_remains_after_creator_drops_below_rank_cutoff(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"max_members": 1})
@@ -1435,7 +1335,6 @@ async def test_eligibility_remains_after_creator_drops_below_rank_cutoff(tmp_pat
     assert result.accepted is True
 
 
-@pytest.mark.asyncio
 async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"max_members": 1})
@@ -1467,8 +1366,9 @@ async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Pat
     assert result.reason is AttributionReason.CREATOR_NOT_ELIGIBLE_FOR_CAMPAIGN
 
 
-@pytest.mark.asyncio
-async def test_missing_historical_map_keeps_campaign_unreconciled(tmp_path: Path) -> None:
+async def test_missing_historical_map_leaves_tweet_pending_in_completed_campaign(
+    tmp_path: Path,
+) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
     snapshot = feed(record).model_copy(
@@ -1489,41 +1389,97 @@ async def test_missing_historical_map_keeps_campaign_unreconciled(tmp_path: Path
         FakeQualification(),
     )
 
-    with pytest.raises(ReconciliationUnavailableError, match="no ecosystem map overlaps"):
-        await reconciler.reconcile_campaign(record, snapshot)
+    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+
+    # The missing map defers only the tweet: it stays pending, never rejected, while the
+    # campaign itself completes for this cycle.
+    assert len(results) == 1
+    assert results[0].tweet_id == "999"
+    assert results[0].accepted is False
+    assert results[0].pending is True
+    assert results[0].reason is AttributionReason.EVIDENCE_UNAVAILABLE
+    assert reconciler.completed_campaign_ids == {"campaign"}
+    assert store.reconciliation(snapshot.snapshot_id, "campaign", record.model_dump_json()) == (
+        results
+    )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("campaign_update", "tweet_update", "expected_reason"),
+    ("history_update", "campaign_update", "tweet_update", "expected_reason"),
     [
-        (
+        pytest.param(
+            {},
             {"required_terms": ("required phrase",)},
             {},
             AttributionReason.REQUIRED_TERMS_MISSING,
+            id="required_terms_missing",
         ),
-        ({}, {"text": "RT @someone: #Launch wallet"}, AttributionReason.RETWEET_NOT_ALLOWED),
-        ({}, {"in_reply_to_status_id": "1"}, AttributionReason.REPLY_NOT_ALLOWED),
-        ({"tag": "@bitcast"}, {}, AttributionReason.CAMPAIGN_TAG_MISSING),
-        (
+        pytest.param(
+            {},
+            {},
+            {"text": "RT @someone: #Launch wallet"},
+            AttributionReason.RETWEET_NOT_ALLOWED,
+            id="retweet",
+        ),
+        pytest.param(
+            {},
+            {},
+            {"in_reply_to_status_id": "1"},
+            AttributionReason.REPLY_NOT_ALLOWED,
+            id="reply",
+        ),
+        pytest.param(
+            {},
+            {"tag": "@bitcast"},
+            {},
+            AttributionReason.CAMPAIGN_TAG_MISSING,
+            id="campaign_tag_missing",
+        ),
+        pytest.param(
+            {},
             {"quoted_tweet_id": "123"},
             {"quoted_tweet_id": "456"},
             AttributionReason.REQUIRED_QUOTE_MISSING_OR_INCORRECT,
+            id="wrong_quote",
         ),
-        (
+        pytest.param(
+            {},
             {"inclusion_keywords": ("airdrop", "rewards")},
             {},
             AttributionReason.REQUIRED_CAMPAIGN_KEYWORD_MISSING,
+            id="inclusion_keyword_missing",
+        ),
+        pytest.param(
+            {"claim_timestamp": NOW + timedelta(minutes=10, seconds=1)},
+            {},
+            {"created_at": NOW + timedelta(minutes=10)},
+            AttributionReason.CLAIM_AFTER_PUBLICATION,
+            id="claim_finalized_after_publication",
+        ),
+        pytest.param(
+            {"revealed_draft": "A different draft was revealed after publication. #Launch"},
+            {},
+            {},
+            AttributionReason.DRAFT_REVEAL_MISMATCH,
+            id="changed_reveal",
+        ),
+        pytest.param(
+            {},
+            {},
+            {"created_at": NOW + timedelta(days=1, seconds=1)},
+            AttributionReason.POST_OUTSIDE_CAMPAIGN_WINDOW,
+            id="published_after_campaign_close",
         ),
     ],
 )
 async def test_v2_content_prefilters_reject_ineligible_submissions(
     tmp_path: Path,
+    history_update: dict[str, Any],
     campaign_update: dict[str, object],
     tweet_update: dict[str, object],
     expected_reason: AttributionReason,
 ) -> None:
-    store = open_history(tmp_path / "validator.sqlite3")
+    store = open_history(tmp_path / "validator.sqlite3", **history_update)
     record = campaign().model_copy(update=campaign_update)
     evidence = tweet().model_copy(update=tweet_update)
     reconciler = CampaignReconciler(
@@ -1538,7 +1494,6 @@ async def test_v2_content_prefilters_reject_ineligible_submissions(
     assert result.reason is expected_reason
 
 
-@pytest.mark.asyncio
 async def test_campaign_freeze_survives_feed_snapshot_rotation_and_rejects_mutation(
     tmp_path: Path,
 ) -> None:
@@ -1576,63 +1531,6 @@ async def test_campaign_freeze_survives_feed_snapshot_rotation_and_rejects_mutat
         )
 
 
-@pytest.mark.asyncio
-async def test_verified_history_reaches_frozen_weights_and_shadow_publication(
-    tmp_path: Path,
-) -> None:
-    store = open_history(tmp_path / "validator.sqlite3")
-    record = campaign().model_copy(update={"emission_start_block": 30, "emission_end_block": 40})
-    snapshot = feed(record).model_copy(
-        update={
-            "ecosystem_maps": (
-                EcosystemMap(
-                    ecosystem_id="ecosystem",
-                    name="Ecosystem",
-                    eligible_creator_x_ids=("456",),
-                    updated_at=NOW,
-                    accounts=(SocialAccount(x_id="456", username="creator", influence=10.0),),
-                ),
-            )
-        }
-    )
-    provider = FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)})
-    attributions = await CampaignReconciler(
-        store,
-        provider,
-        FakeQualification(),
-    ).reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
-
-    scored = await coordinator.freeze_scores(snapshot, attributions)
-    weights, floors = coordinator.shadow_weights(
-        snapshot,
-        scored,
-        block=35,
-        hotkey_to_uid={MINER: 7},
-        uids=[0, 7],
-    )
-    publisher = CapturingPublisher()
-    published = await ShadowResultPublisher(
-        store,
-        publisher,  # type: ignore[arg-type]
-        endpoint="https://ingestion.example/api/v1/brief-tweets",
-    ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
-
-    assert attributions[0].accepted is True
-    assert scored[0].score == 20.0
-    assert weights == {0: 0.0, 7: 1.0}
-    assert len(floors) == 1
-    assert published == 1
-    assert publisher.payloads[0]["brief_id"] == "campaign"
-    decisions = publisher.payloads[0]["attribution_decisions"]
-    assert isinstance(decisions, list)
-    assert decisions[0]["reward_status"] == "rewarded"
-    assert decisions[0]["reward_reason"] == "accepted"
-    assert decisions[0]["daily_usd_floor"] == floors[0].daily_usd_floor
-    assert store.publication_succeeded("snapshot", "campaign") is True
-
-
-@pytest.mark.asyncio
 async def test_independent_restarted_validators_produce_identical_full_shadow_reports(
     tmp_path: Path,
 ) -> None:
@@ -1641,40 +1539,18 @@ async def test_independent_restarted_validators_produce_identical_full_shadow_re
         state_dir = tmp_path / operator
         path = state_dir / "validator.sqlite3"
         open_history(path)
-        store = ValidatorStore(path, start_block=999)
         record = campaign().model_copy(
             update={"emission_start_block": 30, "emission_end_block": 40}
         )
-        snapshot = feed(record).model_copy(
-            update={
-                "ecosystem_maps": (
-                    EcosystemMap(
-                        ecosystem_id="ecosystem",
-                        name="Ecosystem",
-                        eligible_creator_x_ids=("456",),
-                        updated_at=NOW,
-                        accounts=(SocialAccount(x_id="456", username="creator", influence=10.0),),
-                    ),
-                )
-            }
-        )
-        provider = FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)})
-        attributions = await CampaignReconciler(
-            store,
-            provider,
-            FakeQualification(),
-        ).reconcile_feed(snapshot, finalized_block=30)
-        coordinator = RewardCoordinator(store, AttributionScorer(provider))
-        scored = await coordinator.freeze_scores(snapshot, attributions)
-        weights, _floors = coordinator.shadow_weights(
-            snapshot,
-            scored,
-            block=35,
-            hotkey_to_uid={MINER: 7},
-            uids=[0, 7],
+
+        run = await run_rewards(
+            ValidatorStore(path),
+            FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+            feed(record, influence=10.0),
+            persist=True,
         )
 
-        assert weights == {0: 0.0, 7: 1.0}
+        assert run.weights == {0: 0.0, 7: 1.0}
         reports.append(shadow_report(state_dir))
 
     assert reports[0] == reports[1]

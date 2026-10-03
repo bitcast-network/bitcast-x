@@ -29,6 +29,22 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
   These incompatible operator and package changes require a software major release. See the
   [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
+- Remove unused validator and protocol APIs: the block-scan store methods (`persist_block`,
+  `scanned_block`, `commitment_for_sequence`, `next_commitment_sequence`) and the `start_block`
+  store argument, `ValidatorStore.cursor`/`record_error` (which wrote a column nothing read),
+  `ClaimLedger`/`ClaimRecord`, the test-only reward wrappers (`assign_tweets`, `apply_v2_bonuses`,
+  `calculate_rewards`), `HistoricalQualificationChecker` (use `QualificationReader.eligible`),
+  `auto_update_enabled`, `AttributionScorer.score(cached_evidence=...)`, the publisher's unused
+  `miner_uid` argument, ignored `snapshot_id` store arguments, the `title`/`ecosystem_id` campaign
+  field aliases and `CampaignFeed.protocol_version`. `ShadowResultPublisher` now requires its
+  `preview_store`. Startup no longer re-runs a contract backfill that every schema-6 database has
+  already applied.
+- Remove the remaining legacy compatibility code: `MiningProtocol.LEGACY_CONNECTION` and its
+  retirement guard, the v3 manifest fallback, v2 full-feed parsing, `CampaignFeedClient.cached()`,
+  and the unused `max_referral_amount` map field. Clients read only the v4 manifest; the retired v3
+  URL is redirected to it. Map cache entries written by earlier releases are re-downloaded once, an
+  unreadable or retired feed fails the validator cycle instead of stopping the process, and a stored
+  legacy contract is quarantined rather than failing every cycle.
 
 ### Compatibility
 
@@ -43,13 +59,50 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - Cache the miner qualification snapshot for 60 seconds and reuse a fetched campaign during direct
   submission, reducing repeated upstream reads.
+- Final and preview reconciliation load the verified batch history once per pass, grouped by
+  campaign, instead of reloading and re-hashing the whole history for every campaign. The
+  reconciler's qualification memo is bounded so long-running previews no longer grow it per cycle.
+- Engagement scoring looks up relationship edges in a sparse map built once per campaign pool,
+  instead of allocating a dense N×N matrix for every tweet (about 376 MB per tweet on the live
+  indie_hacker map). Scores are bit-identical; scoring 400 tweets on that map drops from 7.8 s to
+  0.4 s and peak memory from 523 MB to 143 MB.
+- Reward tuning values (performance bonus per metric, featured multiplier, featured pool size) are
+  module constants instead of repeated keyword defaults, and `score_blend` is a required argument
+  so `weight_score_blend` in settings is the only default. When no featured tweet was pinned, the
+  published `selection_pool` now uses the same view-rank order as a pinned selection (it was
+  previously sorted by tweet ID); the selected tweet is unchanged.
+- Oversized campaign-feed, miner and LLM responses all raise `ResponseTooLargeError` from one bounded
+  reader. An oversized campaign feed previously raised a bare `ValueError`.
+- Validator settings logic lives in `config.py`: one `missing_validator_settings()` rule used by
+  the startup check, the economics on/off decision and the PM2 launcher (the copies disagreed on
+  empty strings), and the LLM endpoint and model table. The env templates no longer pin the
+  consensus-relevant LLM check settings or the weight cadence and version key; existing `.env`
+  files that set them keep their values, so remove those lines to follow release defaults.
+- `run-miner-api` no longer requires `BITCAST_X_CAMPAIGN_FEED_URL`; only `bitcast-x campaigns` reads
+  the campaign feed. Miner claims fetch the central campaign once per request.
+- Miner submission no longer decodes every stored submission, and result polling skips the central
+  API when nothing is pending. Batch selection uses one store read and a binary search instead of
+  one write transaction per candidate; batch bytes are unchanged. Receipt listings parse each batch
+  once and read referenced claims in one query.
+- Miner API error codes are typed instead of derived from message text; codes, statuses and
+  messages are unchanged. `run-miner` and `run-miner-api` share one validator-permit check,
+  protocol app and commitment loop. The miner store uses the shared SQLite helpers.
+- `config/miner.env.example` states the enforced 64-character minimum for
+  `BITCAST_X_MINER_API_TOKEN`.
+- Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
+  token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
 
 ### Fixed
 
-- Release featured-tweet selections that an adopted campaign edit excludes — for example a moved
-  scoring window that no longer contains the pinned tweet — instead of deferring the campaign's
-  final economics (and weight submission) for the rest of the emission window. The decision is
-  recorded in a new validator store audit table.
+- An unreadable preview cache entry (for example after an evidence model change, or a malformed
+  timestamp) is now a cache miss that is fetched again. It previously aborted the whole validator
+  cycle before weights, or stopped the process.
+
+- A pinned featured tweet no longer freezes its campaign contract or holds back settlement. Campaign
+  edits are adopted until economics settle; if an edit leaves the pinned tweet ineligible, that
+  campaign settles without a featured bonus instead of deferring every campaign's economics and
+  weight submission for the rest of the emission window. Replaces the pin-release logic and its
+  `store_audit_events` table; the pinned tweet is never replaced by a different one.
 - Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
   period only when the creator was historically eligible and the submission is committed no later
   than the campaign's scoring-close block.

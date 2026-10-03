@@ -20,27 +20,22 @@ async def reset_loki() -> None:
     await shutdown_loki_logging()
 
 
-def test_loki_is_disabled_without_complete_configuration() -> None:
-    settings = Settings(
-        loki_url="https://example.test",
-        loki_username="tenant",
-        loki_token=None,
-    )
+@pytest.mark.parametrize(
+    "configured",
+    (
+        pytest.param({}, id="default"),
+        pytest.param(
+            {"loki_url": "https://example.test", "loki_username": "tenant"}, id="no-token"
+        ),
+    ),
+)
+def test_loki_is_disabled_without_complete_configuration(configured: dict[str, str]) -> None:
+    settings = Settings(_env_file=None, **configured)
 
     assert configure_loki_logging(settings, labels={"neuron": "validator"}) is False
     assert logging_module._loki_handler is None
 
 
-def test_loki_has_zero_configuration_write_defaults() -> None:
-    settings = Settings()
-
-    assert settings.loki_url == "https://logs-prod-042.grafana.net"
-    assert settings.loki_username == "1693344"
-    assert settings.loki_token is not None
-    assert settings.loki_token.get_secret_value()
-
-
-@pytest.mark.asyncio
 async def test_loki_batches_labels_and_pushes_records() -> None:
     handler = LokiHandler(
         url="https://example.test/",
@@ -78,7 +73,6 @@ async def test_loki_batches_labels_and_pushes_records() -> None:
     assert stream["values"][0][1] == "miner unavailable"
 
 
-@pytest.mark.asyncio
 async def test_loki_network_failure_never_escapes() -> None:
     handler = LokiHandler(
         url="https://example.test",
@@ -116,7 +110,6 @@ def test_loki_does_not_buffer_its_own_http_push_log() -> None:
     assert not handler._buffer
 
 
-@pytest.mark.asyncio
 async def test_configure_and_shutdown_attach_to_root_logger() -> None:
     settings = Settings(
         loki_url="https://example.test",
@@ -135,15 +128,19 @@ async def test_configure_and_shutdown_attach_to_root_logger() -> None:
         assert logging_module._loki_handler is None
 
 
-@pytest.mark.asyncio
 async def test_run_miner_does_not_enable_loki() -> None:
+    settings = Settings(
+        _env_file=None,
+        loki_url="https://example.test",
+        loki_username="tenant",
+        loki_token="write-token",  # noqa: S106 - inert test credential
+    )
     miner = AsyncMock()
     with (
         patch("bitcast_x.main.build_sdk", new=AsyncMock(return_value=(object(), object()))),
         patch("bitcast_x.main.ReferenceMiner", return_value=miner),
-        patch("bitcast_x.validator.service.configure_loki_logging") as configure_loki,
     ):
-        await run_command(Namespace(command="run-miner"), Settings())
+        await run_command(Namespace(command="run-miner"), settings)
 
     miner.run.assert_awaited_once()
-    configure_loki.assert_not_called()
+    assert logging_module._loki_handler is None

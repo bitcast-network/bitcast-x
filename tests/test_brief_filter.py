@@ -2,6 +2,8 @@
 
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -43,9 +45,9 @@ def campaign(*, prompt_version: int = 1) -> CampaignRecord:
             mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=20,
         ),
-        title="Campaign",
+        display="Campaign",
         brief="Talk about Bitcast and tag @bitcast_network",
-        ecosystem_id="ecosystem",
+        pools=("ecosystem",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="1000",
@@ -78,7 +80,31 @@ def completion(verdict: str, summary: str) -> dict[str, Any]:
     }
 
 
+@asynccontextmanager
+async def evaluator(
+    handler: Callable[[httpx.Request], Any],
+    cache: MemoryCache | None = None,
+) -> AsyncIterator[LlmBriefFilter]:
+    """Yield a single-attempt filter whose provider calls go to ``handler``."""
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        yield LlmBriefFilter(
+            api_url="https://llm.test/chat",
+            api_key="secret",
+            model="model",
+            cache=cache if cache is not None else MemoryCache(),
+            attempts=1,
+            client=client,
+        )
+
+
 def test_prompt_versions_have_frozen_hashes() -> None:
+    # The templates are static apart from the brief and post, so these hashes
+    # pin every phrase. Key wording: v6 checks only "instructions in the brief"
+    # ("Do not add requirements that are not stated in the brief"; no product
+    # or sponsor framing). v5 is sentiment-neutral ("Positive, neutral, mixed,
+    # critical, and negative reviews are equally acceptable") yet requires
+    # substance ("Generic praise ... do not constitute a review").
     expected = {
         1: "193ca82cc622774a2cb142bb724378b33fbdbf8ec113cc16778a1153297849a0",
         2: "f2d2d4c2cf16821be3decbf5ae2478ec5ff821abfb7cc289b96e106066efbcaf",
@@ -101,20 +127,6 @@ def test_prompt_versions_have_frozen_hashes() -> None:
     assert actual == expected
 
 
-def test_generic_prompt_only_checks_instructions_in_the_brief() -> None:
-    prompt = generate_brief_evaluation_prompt(
-        {"brief": "Explain the launch date and include #Example."},
-        "Example launches Friday. #Example",
-        6,
-    )
-
-    assert "follows all instructions in the brief" in prompt
-    assert "Treat the brief as the complete source of requirements" in prompt
-    assert "Do not add requirements that are not stated in the brief" in prompt
-    assert "product or service" not in prompt
-    assert "sponsor" not in prompt.lower()
-
-
 @pytest.mark.parametrize("version", [3, 4])
 def test_retired_prompt_versions_are_unavailable(version: int) -> None:
     with pytest.raises(ValueError, match=r"Available versions: \[1, 2, 5, 6\]"):
@@ -125,25 +137,6 @@ def test_retired_prompt_versions_are_unavailable(version: int) -> None:
         )
 
 
-def test_honest_review_prompt_is_sentiment_neutral_and_requires_substance() -> None:
-    prompt = generate_brief_evaluation_prompt(
-        {"brief": "Review Example Cloud after trying its deployment workflow."},
-        "Example Cloud was quick to deploy, but its logs were difficult to navigate.",
-        5,
-    )
-
-    assert (
-        "Positive, neutral, mixed, critical, and negative reviews are equally acceptable" in prompt
-    )
-    assert (
-        "Generic praise, promotional slogans, or a passing mention do not constitute a review"
-        in prompt
-    )
-    assert "Relevant comparisons with alternatives count as on-topic" in prompt
-    assert "must not be negative or critical" not in prompt
-
-
-@pytest.mark.asyncio
 async def test_optimistic_checks_short_circuit_and_replay_from_cache() -> None:
     requests = 0
 
@@ -154,28 +147,18 @@ async def test_optimistic_checks_short_circuit_and_replay_from_cache() -> None:
         return httpx.Response(200, json=payload)
 
     cache = MemoryCache()
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    evaluator = LlmBriefFilter(
-        api_url="https://llm.test/chat",
-        api_key="secret",
-        model="model",
-        cache=cache,
-        attempts=1,
-        client=client,
-    )
 
-    first = await evaluator.evaluate(campaign(), tweet())
-    replay = await evaluator.evaluate(campaign(), tweet())
+    async with evaluator(handler, cache) as brief_filter:
+        first = await brief_filter.evaluate(campaign(), tweet())
+        replay = await brief_filter.evaluate(campaign(), tweet())
 
     assert first == replay
     assert first.meets_brief is True
     assert first.checks_used == 2
     assert requests == 2
     assert len(cache.values) == 2
-    await client.aclose()
 
 
-@pytest.mark.asyncio
 async def test_concurrent_identical_prompts_make_one_provider_request() -> None:
     requests = 0
 
@@ -185,131 +168,90 @@ async def test_concurrent_identical_prompts_make_one_provider_request() -> None:
         await asyncio.sleep(0.01)
         return httpx.Response(200, json=completion("YES", "pass"))
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    evaluator = LlmBriefFilter(
-        api_url="https://llm.test/chat",
-        api_key="secret",
-        model="model",
-        cache=MemoryCache(),
-        attempts=1,
-        client=client,
-    )
-
-    first, second = await asyncio.gather(
-        evaluator.evaluate(campaign(), tweet()),
-        evaluator.evaluate(campaign(), tweet()),
-    )
+    async with evaluator(handler) as brief_filter:
+        first, second = await asyncio.gather(
+            brief_filter.evaluate(campaign(), tweet()),
+            brief_filter.evaluate(campaign(), tweet()),
+        )
 
     assert first == second
     assert requests == 1
-    await client.aclose()
 
 
-@pytest.mark.asyncio
-async def test_total_provider_failure_keeps_campaign_unreconciled() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("offline", request=request)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    evaluator = LlmBriefFilter(
-        api_url="https://llm.test/chat",
-        api_key="secret",
-        model="model",
-        cache=MemoryCache(),
-        attempts=1,
-        client=client,
-    )
-
-    with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
-        await evaluator.evaluate(campaign(), tweet())
-    await client.aclose()
-
-
-@pytest.mark.asyncio
-async def test_one_missing_optimistic_check_cannot_be_frozen_as_a_rejection() -> None:
+@pytest.mark.parametrize(
+    "failed_requests",
+    [
+        pytest.param(1, id="one-check-unavailable-others-reject"),
+        pytest.param(3, id="every-check-unavailable"),
+    ],
+)
+async def test_unavailable_checks_keep_campaign_unreconciled(failed_requests: int) -> None:
+    # One missing optimistic check might have passed, so the remaining NO
+    # verdicts cannot be frozen as a rejection; total failure is never one either.
     requests = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requests
         requests += 1
-        if requests == 1:
-            raise httpx.ConnectError("transient", request=request)
+        if requests <= failed_requests:
+            raise httpx.ConnectError("offline", request=request)
         return httpx.Response(200, json=completion("NO", "failed"))
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    evaluator = LlmBriefFilter(
-        api_url="https://llm.test/chat",
-        api_key="secret",
-        model="model",
-        cache=MemoryCache(),
-        attempts=1,
-        client=client,
-    )
+    async with evaluator(handler) as brief_filter:
+        with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
+            await brief_filter.evaluate(campaign(), tweet())
 
-    with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
-        await evaluator.evaluate(campaign(), tweet())
-    await client.aclose()
+    # An unavailable check never ends evaluation early: any later check could pass.
+    assert requests == 3
 
 
-def test_validator_store_freezes_llm_cache_across_restart(tmp_path: Path) -> None:
+def test_validator_store_keeps_first_llm_verdict_across_restart(tmp_path: Path) -> None:
     path = tmp_path / "validator.sqlite3"
-    result = BriefEvaluation(meets_brief=True, reasoning="pass", checks_used=2)
-    ValidatorStore(path).persist_llm_evaluation("ab" * 32, result)
-
-    assert ValidatorStore(path).llm_evaluation("ab" * 32) == result
-
-
-def test_validator_store_keeps_first_llm_verdict(tmp_path: Path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    store = ValidatorStore(path)
     first = BriefEvaluation(meets_brief=True, reasoning="first", checks_used=1)
     later = BriefEvaluation(meets_brief=True, reasoning="different markdown", checks_used=1)
 
     assert store.persist_llm_evaluation("ab" * 32, first) == first
     assert store.persist_llm_evaluation("ab" * 32, later) == first
     assert store.llm_evaluation("ab" * 32) == first
+    assert ValidatorStore(path).llm_evaluation("ab" * 32) == first
 
 
-def test_response_parser_preserves_v2_fields() -> None:
-    result = parse_brief_evaluation(
-        "## Requirement-by-Requirement\n- Req 1: Met\n"
-        "## Verdict\nYES\n## Summary\nAll requirements met.",
-        checks_used=1,
-    )
-
-    assert result == BriefEvaluation(
-        meets_brief=True,
-        reasoning="All requirements met.",
-        detailed_breakdown="- Req 1: Met",
-        checks_used=1,
-    )
-
-
-def test_response_parser_preserves_v5_objective_requirements() -> None:
-    result = parse_brief_evaluation(
-        '## Objective Requirements\n- Req 1: Met — "quick to deploy"\n'
-        "## Review Quality\n- Relevance: Met\n- Substance: Met\n"
-        "## Verdict\nYES\n## Summary\nA specific mixed review.",
-        checks_used=1,
-    )
-
-    assert result == BriefEvaluation(
-        meets_brief=True,
-        reasoning="A specific mixed review.",
-        detailed_breakdown='- Req 1: Met — "quick to deploy"',
-        checks_used=1,
-    )
-
-
-def test_response_parser_preserves_v6_instruction_breakdown() -> None:
-    result = parse_brief_evaluation(
-        '## Instruction-by-Instruction\n- Instruction 1: Met — "launches Friday"\n'
-        "## Verdict\nYES\n## Summary\nEvery stated instruction was met.",
-        checks_used=1,
-    )
+@pytest.mark.parametrize(
+    ("response", "summary", "breakdown"),
+    [
+        pytest.param(
+            "## Requirement-by-Requirement\n- Req 1: Met\n"
+            "## Verdict\nYES\n## Summary\nAll requirements met.",
+            "All requirements met.",
+            "- Req 1: Met",
+            id="v2-requirements",
+        ),
+        pytest.param(
+            '## Objective Requirements\n- Req 1: Met — "quick to deploy"\n'
+            "## Review Quality\n- Relevance: Met\n- Substance: Met\n"
+            "## Verdict\nYES\n## Summary\nA specific mixed review.",
+            "A specific mixed review.",
+            '- Req 1: Met — "quick to deploy"',
+            id="v5-objective-requirements",
+        ),
+        pytest.param(
+            '## Instruction-by-Instruction\n- Instruction 1: Met — "launches Friday"\n'
+            "## Verdict\nYES\n## Summary\nEvery stated instruction was met.",
+            "Every stated instruction was met.",
+            '- Instruction 1: Met — "launches Friday"',
+            id="v6-instruction-breakdown",
+        ),
+    ],
+)
+def test_response_parser_preserves_versioned_fields(
+    response: str, summary: str, breakdown: str
+) -> None:
+    result = parse_brief_evaluation(response, checks_used=1)
 
     assert result == BriefEvaluation(
         meets_brief=True,
-        reasoning="Every stated instruction was met.",
-        detailed_breakdown='- Instruction 1: Met — "launches Friday"',
+        reasoning=summary,
+        detailed_breakdown=breakdown,
         checks_used=1,
     )
