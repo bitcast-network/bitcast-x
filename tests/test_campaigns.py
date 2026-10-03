@@ -63,14 +63,13 @@ FEED = {
 }
 
 
-def _manifest(*, protocol_version: int = 3) -> dict[str, object]:
+def _manifest() -> dict[str, object]:
     ecosystem_map = EcosystemMap.model_validate(FEED["ecosystem_maps"][0])  # type: ignore[index]
     digest = _map_digest(ecosystem_map)
     campaigns = deepcopy(FEED["campaigns"])
-    if protocol_version == 4:
-        campaigns[0]["max_members"] = 1  # type: ignore[index]
+    campaigns[0]["max_members"] = 1  # type: ignore[index]
     return {
-        "protocol_version": protocol_version,
+        "protocol_version": 4,
         "snapshot_id": "snapshot-1",
         "published_at": FEED["published_at"],
         "campaigns": campaigns,
@@ -118,14 +117,22 @@ def test_campaign_contract_only_accepts_supported_prompt_versions() -> None:
 
 
 def test_manifest_v4_requires_rank_cutoff_on_every_campaign() -> None:
-    ranked = CampaignManifest.model_validate(_manifest(protocol_version=4))
+    ranked = CampaignManifest.model_validate(_manifest())
 
     assert ranked.campaigns[0].max_members == 1
 
-    missing = _manifest(protocol_version=4)
+    missing = _manifest()
     missing["campaigns"][0].pop("max_members")  # type: ignore[index]
     with pytest.raises(ValidationError, match="must define max_members"):
         CampaignManifest.model_validate(missing)
+
+
+def test_retired_manifest_versions_are_rejected() -> None:
+    for retired in (2, 3):
+        payload = _manifest()
+        payload["protocol_version"] = retired
+        with pytest.raises(ValidationError, match="protocol_version"):
+            CampaignManifest.model_validate(payload)
 
 
 def test_rank_cutoff_uses_influence_then_immutable_id_for_ties() -> None:
@@ -184,36 +191,6 @@ def test_campaign_rank_eligibility_unions_top_n_across_overlapping_maps() -> Non
 
 
 @pytest.mark.asyncio
-async def test_fetches_valid_snapshot_and_reuses_etag_cache(tmp_path: Path) -> None:
-    calls = 0
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return httpx.Response(200, json=FEED, headers={"etag": '"v1"'})
-        assert request.headers["if-none-match"] == '"v1"'
-        return httpx.Response(304)
-
-    client = CampaignFeedClient(
-        "https://feed.example/v2/snapshot",
-        cache_path=tmp_path / "feed.json",
-        transport=httpx.MockTransport(handler),
-    )
-    try:
-        first = await client.fetch()
-        second = await client.fetch()
-    finally:
-        await client.close()
-
-    assert first == second
-    assert second.campaigns[0].access.campaign_id == "campaign-1"
-    assert second.campaigns[0].display == "Example campaign"
-    assert second.campaigns[0].pools == ("example",)
-    assert json.loads((tmp_path / "feed.json").read_text())["etag"] == '"v1"'
-
-
-@pytest.mark.asyncio
 async def test_rejects_oversized_snapshot_without_replacing_cache(tmp_path: Path) -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"x" * 101)
@@ -257,15 +234,11 @@ async def test_campaign_listing_does_not_download_manifest_maps(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_canonical_v4_manifest_falls_back_to_v3_only_while_unpublished(
-    tmp_path: Path,
-) -> None:
+async def test_retired_v3_feed_url_reads_the_v4_manifest(tmp_path: Path) -> None:
     requests: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request.url.path)
-        if request.url.path.endswith("campaign-manifest-v4"):
-            return httpx.Response(404)
         return httpx.Response(200, json=_manifest())
 
     client = CampaignFeedClient(
@@ -279,11 +252,8 @@ async def test_canonical_v4_manifest_falls_back_to_v3_only_while_unpublished(
         await client.close()
 
     assert client.url == CAMPAIGN_FEED_URL
-    assert campaigns[0].max_members is None
-    assert requests == [
-        "/api/v2/public/x/campaign-manifest-v4",
-        "/api/v2/public/x/campaign-manifest",
-    ]
+    assert campaigns[0].max_members == 1
+    assert requests == ["/api/v2/public/x/campaign-manifest-v4"]
 
 
 @pytest.mark.asyncio
@@ -313,7 +283,9 @@ async def test_split_feed_downloads_each_map_once_then_uses_digest_cache(tmp_pat
 
     assert first == second
     assert calls == {"manifest": 2, "map": 1}
-    assert client.cached() == second
+    assert second.campaigns[0].display == "Example campaign"
+    assert second.campaigns[0].pools == ("example",)
+    assert json.loads((tmp_path / "feed.json").read_text())["etag"] == '"manifest-1"'
     bindings = json.loads((tmp_path / "feed.json.map-bindings.json").read_text())
     assert bindings == {
         "version": 1,
@@ -363,8 +335,8 @@ async def test_rejects_changed_digest_for_an_accepted_ecosystem_run(tmp_path: Pa
     finally:
         await client.close()
 
+    assert first.ecosystem_maps[0].name == "Example"
     assert map_calls == 1
-    assert client.cached() == first
     cached = json.loads(path.read_text())
     assert (
         cached["manifest"]["ecosystem_maps"][0]["digest"]
@@ -484,9 +456,22 @@ async def test_split_feed_rejects_map_whose_content_does_not_match_digest(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_does_not_reuse_an_etag_cached_for_a_different_feed_url(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stale",
+    [
+        {"url": "https://other.example/campaign-manifest", "manifest": "replaced below"},
+        {"url": "https://feed.example/api/v2/public/x/campaign-manifest", "feed": FEED},
+    ],
+    ids=["different-url", "retired-v2-feed"],
+)
+async def test_does_not_reuse_an_etag_from_a_stale_cache(
+    tmp_path: Path, stale: dict[str, object]
+) -> None:
     path = tmp_path / "feed.json"
-    path.write_text(json.dumps({"etag": '"snapshot-1"', "feed": FEED}))
+    cache = {**stale, "etag": '"snapshot-1"'}
+    if "manifest" in cache:
+        cache["manifest"] = _manifest()
+    path.write_text(json.dumps(cache))
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert "if-none-match" not in request.headers
@@ -504,6 +489,39 @@ async def test_does_not_reuse_an_etag_cached_for_a_different_feed_url(tmp_path: 
 
     assert campaigns[0].access.campaign_id == "campaign-1"
     assert json.loads(path.read_text())["url"] == str(client.url)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_map_cache_is_downloaded_again(tmp_path: Path) -> None:
+    manifest = _manifest()
+    digest = manifest["ecosystem_maps"][0]["digest"]  # type: ignore[index]
+    cached_map = tmp_path / "feed.json.maps" / f"{digest}.json"
+    cached_map.parent.mkdir()
+    # Written by releases that still carried the retired referral field.
+    stale = {**FEED["ecosystem_maps"][0], "max_referral_amount": 100.0}  # type: ignore[dict-item]
+    cached_map.write_text(json.dumps(stale))
+    map_calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal map_calls
+        if request.url.path.endswith("campaign-manifest"):
+            return httpx.Response(200, json=manifest)
+        map_calls += 1
+        return httpx.Response(200, json=FEED["ecosystem_maps"][0])  # type: ignore[index]
+
+    client = CampaignFeedClient(
+        "https://feed.example/api/v2/public/x/campaign-manifest",
+        cache_path=tmp_path / "feed.json",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        feed = await client.fetch()
+    finally:
+        await client.close()
+
+    assert map_calls == 1
+    assert feed.ecosystem_maps[0].ecosystem_id == "example"
+    assert "max_referral_amount" not in json.loads(cached_map.read_text())
 
 
 @pytest.mark.parametrize(

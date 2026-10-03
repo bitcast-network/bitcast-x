@@ -29,6 +29,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
   These incompatible operator and package changes require a software major release. See the
   [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
+- Remove the remaining legacy compatibility code: `MiningProtocol.LEGACY_CONNECTION` and its
+  retirement guard, the v3 manifest fallback, v2 full-feed parsing, `CampaignFeedClient.cached()`,
+  and the unused `max_referral_amount` map field. Clients read only the v4 manifest; the retired v3
+  URL is redirected to it. Map cache entries written by earlier releases are re-downloaded once, an
+  unreadable or retired feed fails the validator cycle instead of stopping the process, and a stored
+  legacy contract is quarantined rather than failing every cycle.
 
 ### Compatibility
 

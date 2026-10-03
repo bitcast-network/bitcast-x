@@ -17,9 +17,9 @@ strings are consensus-visible contracts.
   reactivated. Older validators quarantine `DX3`; they must be upgraded during the rollout.
 - Resumes are future-only. Claims and submissions must belong to the same side of the latest
   verified history boundary. Existing verified batches and positive campaign economics remain immutable.
-- Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
-  available unchanged during rollout; updated clients prefer v4 and fall back to v3 only when the
-  v4 endpoint has not yet been published. A v3 response containing the new field is invalid.
+- Campaign manifest v4 adds a required positive `max_members` cutoff. Clients read only v4; the v4
+  rollout is complete, so v3 manifests and v2 full-feed documents are rejected. A client configured
+  with the retired v3 endpoint reads the canonical v4 endpoint instead.
 - Adding the first published cutoff does not rewrite a campaign with a positive reward allocation.
   Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
@@ -65,8 +65,9 @@ strings are consensus-visible contracts.
   validators use `/v3/batches`; miner-reported positions are untrusted hints and must match the
   exact finalized extrinsic and on-chain envelope before a cursor advances.
 - `legacy_connection` campaign execution is retired after its final emission window ended on
-  2026-09-01. Historical contracts remain readable, but a live legacy campaign fails the validator
-  cycle closed. Preclaim batch history and transport compatibility are unaffected.
+  2026-09-01, and the value is no longer accepted: a live legacy campaign fails the validator cycle
+  closed, and a stored legacy contract is quarantined if read. Preclaim batch history and transport
+  compatibility are unaffected.
 - Removing a version requires published notice longer than the maximum campaign plus retention
   window and evidence that no live campaign references it.
 

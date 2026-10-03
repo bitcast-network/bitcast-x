@@ -40,33 +40,20 @@ def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "case", ["empty", "preclaim", "pending_preclaim", "legacy", "mixed", "frozen_legacy"]
-)
-async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
+@pytest.mark.parametrize("case", ["empty", "preclaim", "pending_preclaim", "invalid_feed"])
+async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     preclaim = campaign("preclaim", MiningProtocol.PRECLAIM_V2)
-    legacy = campaign("legacy", MiningProtocol.LEGACY_CONNECTION)
     records = {
         "empty": (),
         "preclaim": (preclaim,),
         "pending_preclaim": (preclaim,),
-        "legacy": (legacy,),
-        "mixed": (preclaim, legacy),
-        "frozen_legacy": (preclaim,),
+        "invalid_feed": (preclaim,),
     }[case]
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    if case in {"preclaim", "mixed", "frozen_legacy"}:
+    if case in {"preclaim", "invalid_feed"}:
         frozen = preclaim
-        if case == "frozen_legacy":
-            frozen = preclaim.model_copy(
-                update={
-                    "access": preclaim.access.model_copy(
-                        update={"mining_protocol": MiningProtocol.LEGACY_CONNECTION}
-                    )
-                }
-            )
         store.bind_campaign_protocols((frozen,))
         store.persist_reconciliation(
             snapshot_id="old",
@@ -104,6 +91,11 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
 
     async def fetch() -> CampaignFeed:
         ops.should_exit = True  # Finish after this one complete cycle.
+        if case == "invalid_feed":
+            # A feed carrying a retired campaign mode no longer parses.
+            payload = feed.model_dump(mode="json")
+            payload["campaigns"][0]["access"]["mining_protocol"] = "legacy_connection"
+            return CampaignFeed.model_validate(payload)
         return feed
 
     graph = SimpleNamespace(
@@ -168,7 +160,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
 
     assert archive.read_bytes() == b"historical archive must not be opened or modified"
     publisher.publish_preview.assert_not_awaited()
-    if case in {"legacy", "mixed", "frozen_legacy"}:
+    if case == "invalid_feed":
         reconciler.reconcile_feed.assert_not_awaited()
         publisher.publish.assert_not_awaited()
         submit.assert_not_awaited()

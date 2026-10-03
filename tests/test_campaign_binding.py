@@ -4,18 +4,16 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
-from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.rewards import TweetReward
-from bitcast_x.validator.service import ensure_supported_campaigns
 from bitcast_x.validator.store import ValidatorStore
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 HOTKEY = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
 MUTABLE_CAMPAIGN_FIELDS = (
-    "mining_protocol",
     "mechanism_id",
     "scoring_close_block",
     "exclusive_miner_hotkey",
@@ -64,14 +62,8 @@ def campaign(
 def mutate_campaign_contract(record: CampaignRecord, field: str) -> CampaignRecord:
     """Return one valid campaign whose named consensus field differs."""
 
-    if field in {
-        "mining_protocol",
-        "mechanism_id",
-        "scoring_close_block",
-        "exclusive_miner_hotkey",
-    }:
+    if field in {"mechanism_id", "scoring_close_block", "exclusive_miner_hotkey"}:
         access_updates: dict[str, object] = {
-            "mining_protocol": MiningProtocol.LEGACY_CONNECTION,
             "mechanism_id": 2,
             "scoring_close_block": 21,
             "exclusive_miner_hotkey": HOTKEY,
@@ -135,15 +127,6 @@ def freeze_positive_campaign(store: ValidatorStore, record: CampaignRecord) -> N
         ],
         decisions=[],
     )
-
-
-def test_campaign_protocol_change_is_adopted_before_results_freeze(tmp_path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.LEGACY_CONNECTION)
-    changed = campaign("same", MiningProtocol.PRECLAIM_V2)
-
-    assert store.bind_campaign_protocols((original,)) == (original,)
-    assert store.bind_campaign_protocols((changed,)) == (changed,)
 
 
 def test_campaign_exclusive_miner_change_is_adopted_before_results_freeze(tmp_path) -> None:
@@ -361,43 +344,61 @@ def test_identical_campaign_contract_can_be_observed_repeatedly(tmp_path) -> Non
     store.bind_campaign_protocols((original,))
 
 
-def test_legacy_campaign_reintroduction_rejects_the_complete_cycle() -> None:
-    snapshot = feed(
-        campaign("new", MiningProtocol.PRECLAIM_V2),
-        campaign("retired", MiningProtocol.LEGACY_CONNECTION),
-    )
-    with pytest.raises(ProtocolError, match="legacy campaign processing is retired: retired"):
-        ensure_supported_campaigns(snapshot)
+def retired_contract_json(record: CampaignRecord) -> str:
+    """Return a contract as stored by releases that still ran legacy campaigns."""
+
+    return record.model_dump_json().replace('"preclaim_v2"', '"legacy_connection"')
 
 
-def test_preclaim_and_empty_feeds_do_not_require_imported_legacy_state() -> None:
-    ensure_supported_campaigns(feed(campaign("new", MiningProtocol.PRECLAIM_V2)))
-    ensure_supported_campaigns(feed())
+def test_retired_campaign_mode_is_rejected_by_the_feed_model() -> None:
+    payload = feed(campaign("retired", MiningProtocol.PRECLAIM_V2)).model_dump(mode="json")
+    payload["campaigns"][0]["access"]["mining_protocol"] = "legacy_connection"
+
+    with pytest.raises(ValidationError, match="mining_protocol"):
+        CampaignFeed.model_validate(payload)
 
 
-def test_retired_frozen_campaign_cannot_be_reintroduced_as_preclaim(tmp_path) -> None:
+def test_retired_frozen_contract_is_quarantined_not_fatal(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    retired = campaign("retired", MiningProtocol.LEGACY_CONNECTION)
+    retired = campaign("retired", MiningProtocol.PRECLAIM_V2)
     store.bind_campaign_protocols((retired,))
     freeze_positive_campaign(store, retired)
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
+        connection.execute(
+            "UPDATE campaign_protocols SET campaign_contract_json = ?",
+            (retired_contract_json(retired),),
+        )
+        connection.execute(
+            "UPDATE reconciliations SET campaign_json = ?", (retired_contract_json(retired),)
+        )
+    current = campaign("new", MiningProtocol.PRECLAIM_V2)
 
-    replacement = campaign("retired", MiningProtocol.PRECLAIM_V2)
-    bound = store.bind_campaign_protocols((replacement,))
+    with caplog.at_level("CRITICAL"):
+        bound = store.bind_campaign_protocols((retired, current))
+        frozen = store.reconciled_campaigns()
 
-    assert bound == (retired,)
-    with pytest.raises(ProtocolError, match="legacy campaign processing is retired: retired"):
-        ensure_supported_campaigns(feed(*bound))
-    assert ValidatorStore(store.path).bind_campaign_protocols((replacement,)) == (retired,)
+    assert bound == (current,)
+    assert frozen == []
+    assert "quarantined campaign with unreadable frozen contract campaign=retired" in caplog.text
 
 
 def test_archived_legacy_binding_does_not_block_current_campaigns(tmp_path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    retired = campaign("retired", MiningProtocol.LEGACY_CONNECTION)
-    store.bind_campaign_protocols((retired,))
+    retired = campaign("retired", MiningProtocol.PRECLAIM_V2)
+    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
+        connection.execute(
+            """
+            INSERT INTO campaign_protocols(
+                campaign_id, mining_protocol, exclusive_miner_hotkey, campaign_contract_json
+            ) VALUES ('retired', 'legacy_connection', NULL, ?)
+            """,
+            (retired_contract_json(retired),),
+        )
     current = campaign("new", MiningProtocol.PRECLAIM_V2)
-    bound = store.bind_campaign_protocols((current,))
-    assert bound == (current,)
-    ensure_supported_campaigns(feed(*bound))
+
+    assert store.bind_campaign_protocols((current,)) == (current,)
     with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
         assert connection.execute(
             "SELECT mining_protocol FROM campaign_protocols WHERE campaign_id = ?",

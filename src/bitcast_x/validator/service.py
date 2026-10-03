@@ -12,7 +12,7 @@ from bittensor.result import BittensorError
 
 from bitcast_x import __version__
 from bitcast_x.brief_filter import LlmBriefFilter
-from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient
+from bitcast_x.campaigns import CampaignFeedClient
 from bitcast_x.chain import BittensorChain
 from bitcast_x.config import Settings
 from bitcast_x.errors import (
@@ -24,7 +24,6 @@ from bitcast_x.errors import (
 from bitcast_x.logging import configure_loki_logging, shutdown_loki_logging
 from bitcast_x.miner.service import load_wallet
 from bitcast_x.ops import RuntimeHealth, create_ops_app
-from bitcast_x.protocol import MiningProtocol
 from bitcast_x.publishing import DataPublisher
 from bitcast_x.qualification import (
     HistoricalQualificationChecker,
@@ -45,18 +44,6 @@ from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import DesearchProvider
 
 LOGGER = logging.getLogger(__name__)
-
-
-def ensure_supported_campaigns(feed: CampaignFeed) -> None:
-    """Reject retired campaign modes before calculating or publishing any rewards."""
-
-    unsupported = sorted(
-        campaign.access.campaign_id
-        for campaign in feed.campaigns
-        if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2
-    )
-    if unsupported:
-        raise ProtocolError("legacy campaign processing is retired: " + ", ".join(unsupported))
 
 
 def ensure_production_outputs_configured(settings: Settings) -> None:
@@ -293,11 +280,14 @@ class ValidatorService:
                     outcomes = await ingestor.reconcile_all(endpoints, block=finalized_block)
                     attributions = []
                     if campaign_client is not None and reconciler is not None:
-                        feed = await campaign_client.fetch()
-                        ensure_supported_campaigns(feed)
+                        try:
+                            feed = await campaign_client.fetch()
+                        except ValueError as exc:
+                            # A malformed or unsupported feed, such as one carrying a
+                            # retired campaign mode, fails this cycle closed.
+                            raise ProtocolError(f"campaign feed rejected: {exc}") from exc
                         bound_campaigns = store.bind_campaign_protocols(feed.campaigns)
                         feed = feed.model_copy(update={"campaigns": bound_campaigns})
-                        ensure_supported_campaigns(feed)
                         if qualification_schedule is None:
                             raise ProtocolError("qualification schedule is unavailable")
                         ensure_preclaim_economics_qualified(

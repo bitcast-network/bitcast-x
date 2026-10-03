@@ -302,7 +302,9 @@ featured identity freezes with the campaign's rewards.
 The last `legacy_connection` campaign completed emissions on 2026-09-01. The validator no longer
 collects legacy tweets, replays legacy snapshots, emits legacy referrals, or combines legacy
 weights with preclaim rewards. All weight construction uses the preclaim reward vector, including
-its normal burn behavior. A legacy campaign in the live feed fails the cycle closed.
+its normal burn behavior. `legacy_connection` is no longer a valid `mining_protocol`: a feed that
+carries it fails validation and the cycle fails closed. A stored contract that still names it is
+quarantined if it is ever read, without affecting other campaigns.
 
 Historical records retain their original protocol identifiers. Existing signed preclaim histories,
 creator-binding activation rules, and batch wire compatibility remain in force. Preserve archived

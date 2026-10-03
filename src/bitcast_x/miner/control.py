@@ -116,8 +116,7 @@ class MinerControlService:
         return [
             campaign.model_dump(mode="json")
             for campaign in campaigns
-            if campaign.access.mining_protocol.value == "preclaim_v2"
-            and (not selected or bool(set(campaign.pools).intersection(selected)))
+            if (not selected or bool(set(campaign.pools).intersection(selected)))
             and (
                 campaign.access.exclusive_miner_hotkey is None
                 or campaign.access.exclusive_miner_hotkey == self.sdk.engine.miner_hotkey

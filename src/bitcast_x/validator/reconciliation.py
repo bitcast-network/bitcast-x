@@ -21,7 +21,6 @@ from bitcast_x.protocol import (
     ClaimEvent,
     CommitmentPosition,
     DraftReveal,
-    MiningProtocol,
     SubmissionEvent,
 )
 from bitcast_x.validator.store import ValidatorStore
@@ -454,8 +453,6 @@ class CampaignReconciler:
         *,
         through_block: int | None,
     ) -> AttributionResult:
-        if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-            return self._reject(tweet.tweet_id, campaign, AttributionReason.CAMPAIGN_INELIGIBLE)
         claims_by_id = {
             (item.miner_hotkey, item.claim.claim_id, item.history_start): item for item in claims
         }

@@ -1145,8 +1145,6 @@ class ValidatorStore:
     def reconciled_campaigns(self) -> list["CampaignRecord"]:
         """Return campaigns retained by a positive, immutable reward allocation."""
 
-        from bitcast_x.campaigns import CampaignRecord
-
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT campaign_id, campaign_json FROM reconciliations ORDER BY campaign_id"
@@ -1156,7 +1154,17 @@ class ValidatorStore:
                 for row in rows
                 if _campaign_has_frozen_results(connection, str(row["campaign_id"]))
             ]
-        return [CampaignRecord.model_validate_json(row["campaign_json"]) for row in frozen_rows]
+        campaigns: list[CampaignRecord] = []
+        for row in frozen_rows:
+            campaign = _load_frozen_campaign(str(row["campaign_json"]), str(row["campaign_id"]))
+            if campaign is None:
+                LOGGER.critical(
+                    "quarantined campaign with unreadable frozen contract campaign=%s",
+                    row["campaign_id"],
+                )
+                continue
+            campaigns.append(campaign)
+        return campaigns
 
     def scored_reconciliation(
         self, snapshot_id: str, campaign_id: str

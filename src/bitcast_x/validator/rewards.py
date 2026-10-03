@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ReconciliationUnavailableError
-from bitcast_x.protocol import AttributionResult, MiningProtocol
+from bitcast_x.protocol import AttributionResult
 from bitcast_x.rewards import (
     FeaturedTweetCandidate,
     RewardCampaign,
@@ -150,8 +150,6 @@ class RewardCoordinator:
         completed_campaign_ids: set[str] = set()
         self._completed_campaign_ids = frozenset()
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
             campaign_id = campaign.access.campaign_id
             existing = (
                 self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
@@ -208,8 +206,6 @@ class RewardCoordinator:
         records.update({item.access.campaign_id: item for item in feed.campaigns})
         active_records: list[CampaignRecord] = []
         for campaign in records.values():
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
             start = campaign.emission_start_block
             end = campaign.emission_end_block
             if start is None or end is None or not start <= block <= end:
@@ -330,8 +326,6 @@ class RewardCoordinator:
         records.update({item.access.campaign_id: item for item in feed.campaigns})
         pending: list[str] = []
         for campaign in records.values():
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
             start = campaign.emission_start_block
             end = campaign.emission_end_block
             if start is None or end is None or not start <= block <= end:

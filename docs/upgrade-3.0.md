@@ -21,6 +21,7 @@ integration has stopped using these interfaces.
 | Python scorer integrations | `AttributionScorer(engagement_merger=...)` and `score(tweet_evidence=...)` | Remove legacy evidence-merging and fallback hooks. The preclaim preview `cached_evidence` argument remains supported. |
 | Python chain integrations | `BittensorChain.legacy_daily_miner_alpha` | Remove legacy alpha-pricing calls; preclaim economics do not use this calculation. |
 | Configuration integrations | `Settings.legacy_*` fields and `config.LEGACY_CONNECTION_TWEET_IDS` | Remove attribute and constant references. Old environment keys are ignored by settings parsing, but no longer control behavior. |
+| Python protocol and feed integrations | `MiningProtocol.LEGACY_CONNECTION`, `validator.service.ensure_supported_campaigns`, `CampaignFeedClient.cached()`, `EcosystemMap.max_referral_amount`, and v3 manifest / v2 full-feed parsing | Use `preclaim_v2` and the v4 manifest. An invalid or retired feed raises a validation error, which the validator reports as a rejected cycle. |
 
 The retired environment keys are `BITCAST_X_LEGACY_CONNECTIONS_PATH`,
 `BITCAST_X_LEGACY_SNAPSHOTS_PATH`, `BITCAST_X_LEGACY_TWEET_STORE_PATH`,
@@ -29,8 +30,9 @@ The retired environment keys are `BITCAST_X_LEGACY_CONNECTIONS_PATH`,
 
 ## Upgrade behavior and retained compatibility
 
-A fetched legacy campaign, or a legacy contract restored by frozen campaign binding, aborts the
-complete validator cycle before campaign reconciliation, scoring, publication and weight submission.
+A fetched legacy campaign fails feed validation and aborts the complete validator cycle before
+campaign reconciliation, scoring, publication and weight submission. A frozen legacy contract
+restored from the database is quarantined, so it cannot block unrelated preclaim campaigns.
 The node can still ingest finalized miner batches before rejecting that feed. It records a
 consensus error and retains durable history. Restore the correct preclaim-only feed; do not relabel
 an old frozen campaign as preclaim or delete its state to bypass the check. Existing unrelated
@@ -38,8 +40,8 @@ preclaim campaigns receive no new economic outputs from a rejected cycle.
 
 The retirement leaves the public miner `/api/v1` application contract, canonical hashes, signed
 batch transport and preclaim scoring/reward rules intact. `DX2`, `DX3`, `/v2/batches` and `/v3/batches`
-remain supported for preclaim history. `MiningProtocol.LEGACY_CONNECTION` remains decodable for
-historical records; it no longer enables execution.
+remain supported for preclaim history. `MiningProtocol.LEGACY_CONNECTION` is removed; stored
+legacy rows are left in place for audit and are never executed.
 
 There is no database schema migration in this change: miner schema 3 and validator schema 6 remain
 in use. Preserve the complete state directory and wallets, including committed batches, pending
