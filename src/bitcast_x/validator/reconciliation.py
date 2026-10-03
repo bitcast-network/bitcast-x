@@ -16,6 +16,7 @@ from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.matcher import MatchCandidate, choose_match, normalize_match_text
 from bitcast_x.protocol import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
+    MAX_ACTIVE_CLAIMS,
     AttributionReason,
     AttributionResult,
     ClaimEvent,
@@ -619,7 +620,7 @@ class CampaignReconciler:
             ),
             key=lambda item: item.order,
         )
-        return {(item.miner_hotkey, item.claim.claim_id) for item in active[-5:]}
+        return {(item.miner_hotkey, item.claim.claim_id) for item in active[-MAX_ACTIVE_CLAIMS:]}
 
     async def _qualified(self, hotkey: str, block: int) -> bool:
         key = (hotkey, block)

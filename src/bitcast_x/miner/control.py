@@ -13,6 +13,7 @@ from bitcast_x.errors import ProtocolError
 from bitcast_x.miner.engine import MinerSdk
 from bitcast_x.miner.results import MinerResultsClient
 from bitcast_x.miner.store import EventStatus, OperationMetadata
+from bitcast_x.protocol import MAX_ACTIVE_CLAIMS
 
 GRACE_SUBMISSION_COMMIT_TIMEOUT_SECONDS = 30.0
 
@@ -390,7 +391,7 @@ class MinerControlService:
             "usability": {
                 "status": usability,
                 "safe_to_post": status == EventStatus.SAFE_TO_POST.value,
-                "maximum_active_claims": 5,
+                "maximum_active_claims": MAX_ACTIVE_CLAIMS,
                 "evicted_by_claim_id": receipt["evicted_by_claim_id"],
                 "consumed_by_submission_id": receipt["consumed_by_submission_id"],
             },

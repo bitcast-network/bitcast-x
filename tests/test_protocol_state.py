@@ -8,10 +8,7 @@ from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     BatchChainVerifier,
     ClaimEvent,
-    ClaimLedger,
-    ClaimRecord,
     CommitmentEnvelope,
-    CommitmentPosition,
     CommittedBatch,
 )
 
@@ -85,45 +82,3 @@ def test_batch_chain_does_not_advance_on_gap() -> None:
 
     assert verifier.last_sequence == 0
     assert verifier.last_batch_hash is None
-
-
-def test_sixth_claim_evicts_oldest_and_winner_is_consumed() -> None:
-    ledger = ClaimLedger()
-    for number in range(1, 7):
-        evicted = ledger.add(
-            ClaimRecord(
-                claim=claim(number),
-                position=CommitmentPosition(block=100 + number, extrinsic_index=0),
-                event_index=0,
-            )
-        )
-
-    assert evicted == f"{1:032x}"
-    assert [record.claim.claim_id for record in ledger.active("campaign", "123")] == [
-        f"{number:032x}" for number in range(2, 7)
-    ]
-    assert ledger.status(f"{1:032x}") == "evicted"
-
-    ledger.consume(f"{4:032x}")
-
-    assert ledger.status(f"{4:032x}") == "consumed"
-    assert len(ledger.active("campaign", "123")) == 4
-
-
-def test_claim_id_reuse_with_different_position_fails() -> None:
-    ledger = ClaimLedger()
-    first = ClaimRecord(
-        claim=claim(1),
-        position=CommitmentPosition(block=1, extrinsic_index=0),
-        event_index=0,
-    )
-    ledger.add(first)
-
-    with pytest.raises(ProtocolError, match="reused"):
-        ledger.add(
-            ClaimRecord(
-                claim=first.claim,
-                position=CommitmentPosition(block=2, extrinsic_index=0),
-                event_index=0,
-            )
-        )

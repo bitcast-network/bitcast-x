@@ -19,18 +19,17 @@ from bitcast_x.protocol.models import (
     ProtocolEvent,
     SubmissionEvent,
 )
-from bitcast_x.protocol.state import BatchChainVerifier, ClaimLedger, ClaimRecord
+from bitcast_x.protocol.state import MAX_ACTIVE_CLAIMS, BatchChainVerifier
 
 __all__ = [
     "CREATOR_BINDING_ACTIVATION_BLOCK",
+    "MAX_ACTIVE_CLAIMS",
     "AttributionReason",
     "AttributionResult",
     "BatchContent",
     "BatchChainVerifier",
     "CampaignAccess",
     "ClaimEvent",
-    "ClaimLedger",
-    "ClaimRecord",
     "CommittedBatch",
     "CommitmentEnvelope",
     "CommitmentPosition",

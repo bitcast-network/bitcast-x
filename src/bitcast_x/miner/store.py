@@ -15,6 +15,7 @@ from pydantic import TypeAdapter
 
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
+    MAX_ACTIVE_CLAIMS,
     ClaimEvent,
     CommitmentPosition,
     CommittedBatch,
@@ -874,7 +875,7 @@ class MinerStore:
                     """,
                     (event.campaign_id, event.creator_x_id),
                 ).fetchall()
-                for evicted in active[:-5]:
+                for evicted in active[:-MAX_ACTIVE_CLAIMS]:
                     claim_id = str(evicted["claim_id"])
                     connection.execute(
                         "DELETE FROM active_claims WHERE claim_id = ?",
