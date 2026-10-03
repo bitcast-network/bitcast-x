@@ -4,8 +4,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,7 +19,7 @@ from bitcast_x.protocol import (
     CommittedBatch,
 )
 from bitcast_x.protocol.models import AttributionResult
-from bitcast_x.sqlite import apply_migrations
+from bitcast_x.sqlite import apply_migrations, session, transaction
 
 LOGGER = logging.getLogger(__name__)
 
@@ -61,6 +60,9 @@ def _campaign_field_diffs(
 def _same_campaign_contract(first: str, second: str) -> bool:
     """Compare two stored campaign contracts as parsed records."""
 
+    if first == second:
+        # Contracts are stored as model dumps, so identical text is the common case.
+        return True
     from bitcast_x.campaigns import CampaignRecord
 
     try:
@@ -253,28 +255,11 @@ class ValidatorStore:
             raise FileNotFoundError(f"unreadable validator database disappeared: {self.path}")
         return tuple(moved)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        return connection
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return session(self.path)
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.commit()
-            except BaseException:
-                if connection.in_transaction:
-                    connection.rollback()
-                raise
-            finally:
-                connection.close()
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return transaction(self.path, self._lock)
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
@@ -1198,7 +1183,11 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-            if row is None or not _campaign_has_frozen_results(connection, campaign_id):
+            if row is None:
+                return None
+            if not _rewards_have_positive_allocation(
+                str(row["rewards_json"])
+            ) and not _campaign_has_frozen_results(connection, campaign_id):
                 return None
         if not _same_campaign_contract(row["campaign_json"], campaign_json):
             raise ProtocolError(f"campaign {campaign_id} changed after reward assignment")

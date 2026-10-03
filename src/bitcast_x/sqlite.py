@@ -1,10 +1,53 @@
-"""Small forward-only SQLite migration and online-backup utilities."""
+"""Shared SQLite connections, forward-only migrations and online backups."""
 
 import sqlite3
-from collections.abc import Sequence
+import threading
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 from bitcast_x.errors import ProtocolError
+
+
+def connect(path: Path) -> sqlite3.Connection:
+    """Open an autocommit connection with the durability settings every store uses."""
+
+    connection = sqlite3.connect(path, timeout=30, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA synchronous = FULL")
+    return connection
+
+
+@contextmanager
+def session(path: Path) -> Iterator[sqlite3.Connection]:
+    """Yield a connection for reads and self-contained writes, then close it."""
+
+    connection = connect(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
+@contextmanager
+def transaction(path: Path, lock: threading.RLock) -> Iterator[sqlite3.Connection]:
+    """Run one serialized ``BEGIN IMMEDIATE`` transaction, rolling back on failure."""
+
+    with lock:
+        connection = connect(path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield connection
+            connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
 
 
 def apply_migrations(connection: sqlite3.Connection, migrations: Sequence[str]) -> None:
