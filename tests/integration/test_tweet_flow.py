@@ -432,7 +432,14 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
         preview_store=PreviewStore(tmp_path / "preview-cache"),
-    ).publish(feed, scored, rewards, block=35, hotkey_to_uid={miner_hotkey: 7})
+    ).publish(
+        feed,
+        scored,
+        rewards,
+        block=35,
+        hotkey_to_uid={miner_hotkey: 7},
+        completed_campaign_ids=coordinator.completed_campaign_ids,
+    )
 
     assert len(attributions) == 1
     assert attributions[0].accepted is True

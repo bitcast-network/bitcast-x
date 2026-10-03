@@ -103,6 +103,27 @@ def preview_performance_rewards(
     ]
 
 
+def active_emission_campaigns(
+    store: ValidatorStore, feed: CampaignFeed, block: int
+) -> list[CampaignRecord]:
+    """Return campaigns whose emission window contains ``block``.
+
+    Frozen campaigns come first (by ID), overlaid by the feed's records in feed
+    order. That order fixes the float summation order of the weight vector, so
+    callers that need another order sort the result themselves.
+    """
+
+    records = {item.access.campaign_id: item for item in store.reconciled_campaigns()}
+    records.update({item.access.campaign_id: item for item in feed.campaigns})
+    return [
+        campaign
+        for campaign in records.values()
+        if campaign.emission_start_block is not None
+        and campaign.emission_end_block is not None
+        and campaign.emission_start_block <= block <= campaign.emission_end_block
+    ]
+
+
 class RewardCoordinator:
     """Bridge frozen attribution into seven-day productive miner weights."""
 
@@ -202,19 +223,9 @@ class RewardCoordinator:
         by_campaign: dict[str, list[ScoredAttribution]] = {}
         for item in scored:
             by_campaign.setdefault(item.attribution.campaign_id, []).append(item)
-        records = {item.access.campaign_id: item for item in self.store.reconciled_campaigns()}
-        records.update({item.access.campaign_id: item for item in feed.campaigns})
-        active_records: list[CampaignRecord] = []
-        for campaign in records.values():
-            start = campaign.emission_start_block
-            end = campaign.emission_end_block
-            if start is None or end is None or not start <= block <= end:
-                continue
-            active_records.append(campaign)
-
         frozen_floors: list[TweetReward] = []
         pending: list[tuple[CampaignRecord, RewardCampaign]] = []
-        for campaign in active_records:
+        for campaign in active_emission_campaigns(self.store, feed, block):
             campaign_id = campaign.access.campaign_id
             campaign_json = campaign.model_dump_json()
             frozen = self.store.campaign_rewards(campaign_id, campaign_json)
@@ -228,12 +239,7 @@ class RewardCoordinator:
                     else None
                 )
                 if stored_scores is None:
-                    completed = (
-                        campaign_id in self._completed_campaign_ids
-                        if self._completed_campaign_ids is not None
-                        else self.store.campaign_reconciled(campaign_id)
-                    )
-                    if not completed:
+                    if not self._completed(campaign_id):
                         continue
                     stored_scores = []
                 by_campaign[campaign_id] = stored_scores
@@ -322,24 +328,24 @@ class RewardCoordinator:
     ) -> tuple[str, ...]:
         """Return active campaigns whose final economics are not frozen yet."""
 
-        records = {item.access.campaign_id: item for item in self.store.reconciled_campaigns()}
-        records.update({item.access.campaign_id: item for item in feed.campaigns})
-        pending: list[str] = []
-        for campaign in records.values():
-            start = campaign.emission_start_block
-            end = campaign.emission_end_block
-            if start is None or end is None or not start <= block <= end:
-                continue
-            campaign_id = campaign.access.campaign_id
-            frozen = self.store.campaign_rewards(campaign_id, campaign.model_dump_json())
-            completed = (
-                campaign_id in self._completed_campaign_ids
-                if self._completed_campaign_ids is not None
-                else self.store.campaign_reconciled(campaign_id)
+        return tuple(
+            sorted(
+                campaign.access.campaign_id
+                for campaign in active_emission_campaigns(self.store, feed, block)
+                if not self._completed(campaign.access.campaign_id)
+                and self.store.campaign_rewards(
+                    campaign.access.campaign_id, campaign.model_dump_json()
+                )
+                is None
             )
-            if frozen is None and not completed:
-                pending.append(campaign.access.campaign_id)
-        return tuple(sorted(pending))
+        )
+
+    def _completed(self, campaign_id: str) -> bool:
+        """Return whether the campaign was scored in this cycle (or, before any, stored)."""
+
+        if self._completed_campaign_ids is None:
+            return self.store.campaign_reconciled(campaign_id)
+        return campaign_id in self._completed_campaign_ids
 
 
 def _reward_tweet(

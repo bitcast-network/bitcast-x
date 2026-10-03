@@ -15,6 +15,7 @@ from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
 from bitcast_x.rewards import RewardDecision, TweetReward, featured_selection_pool
 from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.rewards import (
+    active_emission_campaigns,
     featured_tweet_selection_due,
     preview_featured_candidate,
     preview_performance_rewards,
@@ -146,7 +147,7 @@ class ShadowResultPublisher:
         *,
         block: int,
         hotkey_to_uid: dict[str, int],
-        completed_campaign_ids: Collection[str] | None = None,
+        completed_campaign_ids: Collection[str],
     ) -> int:
         """Publish active final results and replaceable zero-value status updates."""
 
@@ -157,14 +158,11 @@ class ShadowResultPublisher:
         for reward in rewards:
             rewards_by_campaign[reward.campaign_id].append(reward)
         published = 0
-        records = {item.access.campaign_id: item for item in self.store.reconciled_campaigns()}
-        records.update({item.access.campaign_id: item for item in feed.campaigns})
-        for campaign in sorted(records.values(), key=lambda item: item.access.campaign_id):
-            start = campaign.emission_start_block
-            end = campaign.emission_end_block
+        for campaign in sorted(
+            active_emission_campaigns(self.store, feed, block),
+            key=lambda item: item.access.campaign_id,
+        ):
             campaign_id = campaign.access.campaign_id
-            if start is None or end is None or not start <= block <= end:
-                continue
             if self.store.publication_succeeded(campaign_id):
                 continue
             campaign_rewards = rewards_by_campaign.get(campaign_id, [])
@@ -173,11 +171,7 @@ class ShadowResultPublisher:
                 campaign.model_dump_json(),
             )
             if frozen_economics is None:
-                completed = (
-                    campaign_id in completed_campaign_ids
-                    if completed_campaign_ids is not None
-                    else self.store.campaign_reconciled(campaign_id)
-                )
+                completed = campaign_id in completed_campaign_ids
                 attributions = (
                     self.store.reconciliation(
                         feed.snapshot_id,

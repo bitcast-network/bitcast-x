@@ -1282,7 +1282,14 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
         preview_store=PreviewStore(tmp_path / "preview-cache"),
-    ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
+    ).publish(
+        snapshot,
+        scored,
+        floors,
+        block=35,
+        hotkey_to_uid={MINER: 7},
+        completed_campaign_ids=coordinator.completed_campaign_ids,
+    )
 
     assert [item.campaign_id for item in attributions] == ["campaign-a", "campaign-b"]
     campaign_a_results = store.reconciliation(
@@ -1644,7 +1651,14 @@ async def test_verified_history_reaches_frozen_weights_and_shadow_publication(
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
         preview_store=PreviewStore(tmp_path / "preview-cache"),
-    ).publish(snapshot, scored, floors, block=35, hotkey_to_uid={MINER: 7})
+    ).publish(
+        snapshot,
+        scored,
+        floors,
+        block=35,
+        hotkey_to_uid={MINER: 7},
+        completed_campaign_ids=coordinator.completed_campaign_ids,
+    )
 
     assert attributions[0].accepted is True
     assert scored[0].score == 20.0
