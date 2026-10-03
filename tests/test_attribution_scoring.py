@@ -66,11 +66,6 @@ class ParticipantX(FakeX):
         )
 
 
-class UnavailableTweetX(FakeX):
-    async def fetch_tweet_by_id(self, _tweet_id: str) -> TweetFetch:
-        return TweetFetch(tweet=None, provider_available=False)
-
-
 class PassingBriefFilter:
     async def evaluate(self, _campaign: CampaignRecord, _tweet: Tweet) -> BriefEvaluation:
         return BriefEvaluation(
@@ -92,6 +87,16 @@ class SelectivelyUnavailableBriefFilter(PassingBriefFilter):
         if tweet.tweet_id == "998":
             raise ReconciliationUnavailableError("provider unavailable")
         return await super().evaluate(campaign, tweet)
+
+
+def accepted(tweet_id: str, campaign_id: str = "campaign") -> AttributionResult:
+    return AttributionResult(
+        tweet_id=tweet_id,
+        campaign_id=campaign_id,
+        accepted=True,
+        reason=AttributionReason.ACCEPTED,
+        miner_hotkey=MINER,
+    )
 
 
 def feed() -> CampaignFeed:
@@ -143,15 +148,7 @@ def feed() -> CampaignFeed:
 
 @pytest.mark.asyncio
 async def test_uses_max_tweet_time_and_current_influence_and_excludes_self() -> None:
-    attribution = AttributionResult(
-        tweet_id="999",
-        campaign_id="campaign",
-        accepted=True,
-        reason=AttributionReason.ACCEPTED,
-        miner_hotkey=MINER,
-    )
-
-    result = (await AttributionScorer(FakeX()).score(feed(), [attribution]))[0]
+    result = (await AttributionScorer(FakeX()).score(feed(), [accepted("999")]))[0]
 
     assert result.author_influence == 999.0
     assert result.score == 2003.75
@@ -165,16 +162,7 @@ async def test_same_tweet_across_campaigns_uses_one_frozen_provider_observation(
         update={"access": snapshot.campaigns[0].access.model_copy(update={"campaign_id": "second"})}
     )
     snapshot = snapshot.model_copy(update={"campaigns": (*snapshot.campaigns, second)})
-    attributions = [
-        AttributionResult(
-            tweet_id="999",
-            campaign_id=campaign_id,
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for campaign_id in ("campaign", "second")
-    ]
+    attributions = [accepted("999"), accepted("999", campaign_id="second")]
     provider = FakeX()
 
     results = await AttributionScorer(provider).score(snapshot, attributions)
@@ -189,16 +177,7 @@ async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     snapshot = feed()
     old_map = snapshot.ecosystem_maps[0].model_copy(update={"eligible_creator_x_ids": ("1", "2")})
     snapshot = snapshot.model_copy(update={"ecosystem_maps": (old_map, snapshot.ecosystem_maps[1])})
-    attributions = [
-        AttributionResult(
-            tweet_id=tweet_id,
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for tweet_id in ("999", "998")
-    ]
+    attributions = [accepted("999"), accepted("998")]
 
     results = await AttributionScorer(
         ParticipantX(),
@@ -211,44 +190,34 @@ async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     assert [detail.username for detail in alice.details] == ["carol"]
 
 
+@pytest.mark.parametrize(
+    ("provider", "brief_filter", "error"),
+    [
+        pytest.param(
+            SelectivelyUnavailableEngagementX(),
+            None,
+            "scoring evidence unavailable",
+            id="engagements-unavailable",
+        ),
+        pytest.param(
+            FakeX(),
+            SelectivelyUnavailableBriefFilter(),
+            "provider unavailable",
+            id="brief-check-unavailable",
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_preview_scoring_defers_only_tweet_with_unavailable_engagements() -> None:
-    attributions = [
-        AttributionResult(
-            tweet_id=tweet_id,
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for tweet_id in ("998", "999")
-    ]
-    scorer = AttributionScorer(SelectivelyUnavailableEngagementX())
+async def test_preview_scoring_defers_only_the_tweet_with_unavailable_evidence(
+    provider: FakeX,
+    brief_filter: PassingBriefFilter | None,
+    error: str,
+) -> None:
+    attributions = [accepted("998"), accepted("999")]
+    scorer = AttributionScorer(provider, brief_filter=brief_filter)
 
-    with pytest.raises(ReconciliationUnavailableError, match="scoring evidence unavailable"):
+    with pytest.raises(ReconciliationUnavailableError, match=error):
         await scorer.score(feed(), attributions)
-
-    results = await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
-
-    assert [item.attribution.tweet_id for item in results] == ["999"]
-
-
-@pytest.mark.asyncio
-async def test_preview_scoring_defers_only_tweet_with_unavailable_brief_check() -> None:
-    attributions = [
-        AttributionResult(
-            tweet_id=tweet_id,
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for tweet_id in ("998", "999")
-    ]
-    scorer = AttributionScorer(
-        FakeX(),
-        brief_filter=SelectivelyUnavailableBriefFilter(),
-    )
 
     results = await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
 

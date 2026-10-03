@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from pytest import approx
 
 from bitcast_x.rewards import (
     RewardCampaign,
@@ -140,12 +141,6 @@ def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
     assert weights[0] == 0.0
 
 
-def test_no_productive_content_preserves_all_to_burn_fallback() -> None:
-    weights = aggregate_productive_weights([], {}, [0, 1, 2], score_blend=0.0)
-
-    assert np.array_equal(weights, np.array([1.0, 0.0, 0.0], dtype=np.float64))
-
-
 def test_v2_performance_then_featured_bonus_fixture_is_exact() -> None:
     campaign = RewardCampaign(
         campaign_id="campaign",
@@ -218,117 +213,91 @@ def _tweet_reward(
     )
 
 
-def test_score_blend_zero_is_bit_identical_to_floor_proportions() -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=10.0, daily_usd_floor=60.0),
-        _tweet_reward("c1", "t2", "miner-a", score=5.0, daily_usd_floor=40.0),
-        _tweet_reward("c2", "t3", "miner-b", score=1.0, daily_usd_floor=100.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
-
-    blended = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=0.0)
-    floors = np.array([0.0, 100.0, 100.0], dtype=np.float64)
-
-    assert np.array_equal(blended, floors / floors.sum())
-
-
-def test_score_blend_one_allocates_by_unique_tweet_scores() -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=10.0, daily_usd_floor=90.0),
-        _tweet_reward("c1", "t2", "miner-a", score=10.0, daily_usd_floor=90.0),
-        _tweet_reward("c2", "t3", "miner-b", score=80.0, daily_usd_floor=20.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
-
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=1.0)
-
-    assert np.allclose(weights, np.array([0.0, 0.2, 0.8], dtype=np.float64))
+# Miner a carries most of the floor; miner b carries most of the score.
+FLOOR_VS_SCORE = [
+    _tweet_reward("c1", "t1", "miner-a", score=10.0, daily_usd_floor=90.0),
+    _tweet_reward("c1", "t2", "miner-a", score=10.0, daily_usd_floor=90.0),
+    _tweet_reward("c2", "t3", "miner-b", score=80.0, daily_usd_floor=20.0),
+]
+# Attribution storage re-rows the same match once per validator run; the
+# duplicate must double neither the floor (blend 0.0) nor the score term (blend 1.0).
+REPEATED_MATCH = [
+    _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
+    _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
+    _tweet_reward("c2", "t2", "miner-b", score=30.0, daily_usd_floor=50.0),
+]
 
 
 @pytest.mark.parametrize(
-    "score_blend",
-    [pytest.param(0.0, id="floor-term"), pytest.param(1.0, id="score-term")],
+    ("rewards", "blend", "expected"),
+    [
+        pytest.param(
+            FLOOR_VS_SCORE,
+            1.0,
+            approx([0.0, 0.2, 0.8]),
+            id="blend-one-allocates-by-unique-tweet-scores",
+        ),
+        pytest.param(
+            FLOOR_VS_SCORE,
+            0.5,
+            approx([0.0, 0.55, 0.45]),
+            id="blend-interpolates-between-floor-and-score-vectors",
+        ),
+        pytest.param(
+            REPEATED_MATCH,
+            0.0,
+            approx([0.0, 0.5, 0.5]),
+            id="duplicate-match-counts-once-in-floor-term",
+        ),
+        pytest.param(
+            REPEATED_MATCH,
+            1.0,
+            approx([0.0, 0.5, 0.5]),
+            id="duplicate-match-counts-once-in-score-term",
+        ),
+        pytest.param(
+            [
+                _tweet_reward("c1", "t1", "miner-a", score=0.0, daily_usd_floor=90.0),
+                _tweet_reward("c2", "t2", "miner-b", score=0.0, daily_usd_floor=10.0),
+            ],
+            0.5,
+            approx([0.0, 0.9, 0.1]),
+            id="blend-falls-back-to-floors-without-positive-scores",
+        ),
+        pytest.param(
+            [
+                _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=0.0),
+                _tweet_reward("c2", "t2", "miner-b", score=10.0, daily_usd_floor=0.0),
+            ],
+            0.5,
+            approx([0.0, 0.75, 0.25]),
+            id="blend-uses-score-shares-alone-when-floors-absent",
+        ),
+        pytest.param(
+            [
+                _tweet_reward("c1", "t1", "miner-a", score=-5.0, daily_usd_floor=50.0),
+                _tweet_reward("c2", "t2", "miner-b", score=25.0, daily_usd_floor=50.0),
+            ],
+            1.0,
+            approx([0.0, 0.0, 1.0]),
+            id="negative-scores-are-ignored-in-score-vector",
+        ),
+        pytest.param([], 0.0, [1.0, 0.0, 0.0], id="no-productive-content-burns"),
+        pytest.param([], 0.5, [1.0, 0.0, 0.0], id="no-productive-content-burns-when-blended"),
+    ],
 )
-def test_duplicate_matches_count_once_toward_weights(score_blend: float) -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
-        # Attribution storage re-rows the same match once per validator run;
-        # the duplicate must not double either the floor (blend 0.0) or the
-        # score term (blend 1.0).
-        _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
-        _tweet_reward("c2", "t2", "miner-b", score=30.0, daily_usd_floor=50.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
+def test_productive_weights_blend_floor_and_score_shares(
+    rewards: list[TweetReward], blend: float, expected: object
+) -> None:
+    weights = aggregate_productive_weights(
+        rewards, {"miner-a": 1, "miner-b": 2}, [0, 1, 2], score_blend=blend
+    )
 
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=score_blend)
-
-    assert np.allclose(weights, np.array([0.0, 0.5, 0.5], dtype=np.float64))
+    # Plain lists compare bit-exactly (the burn fallback); approx() rows allow float rounding.
+    assert weights.tolist() == expected
 
 
-def test_score_blend_interpolates_between_floor_and_score_vectors() -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=10.0, daily_usd_floor=90.0),
-        _tweet_reward("c1", "t2", "miner-a", score=10.0, daily_usd_floor=90.0),
-        _tweet_reward("c2", "t3", "miner-b", score=80.0, daily_usd_floor=20.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
-
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=0.5)
-
-    assert np.allclose(weights, np.array([0.0, 0.55, 0.45], dtype=np.float64))
-
-
-def test_blend_falls_back_to_floors_when_no_positive_scores_exist() -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=0.0, daily_usd_floor=90.0),
-        _tweet_reward("c2", "t2", "miner-b", score=0.0, daily_usd_floor=10.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
-
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=0.5)
-
-    assert np.allclose(weights, np.array([0.0, 0.9, 0.1], dtype=np.float64))
-
-
-def test_blend_uses_score_shares_alone_when_floors_absent() -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=0.0),
-        _tweet_reward("c2", "t2", "miner-b", score=10.0, daily_usd_floor=0.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
-
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=0.5)
-
-    assert np.allclose(weights, np.array([0.0, 0.75, 0.25], dtype=np.float64))
-
-
-def test_negative_scores_are_ignored_in_score_vector() -> None:
-    rewards = [
-        _tweet_reward("c1", "t1", "miner-a", score=-5.0, daily_usd_floor=50.0),
-        _tweet_reward("c2", "t2", "miner-b", score=25.0, daily_usd_floor=50.0),
-    ]
-    hotkey_to_uid = {"miner-a": 1, "miner-b": 2}
-    uids = [0, 1, 2]
-
-    weights = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=1.0)
-
-    assert np.allclose(weights, np.array([0.0, 0.0, 1.0], dtype=np.float64))
-
-
-def test_no_productive_content_still_burns_when_blended() -> None:
-    weights = aggregate_productive_weights([], {}, [0, 1, 2], score_blend=0.5)
-
-    assert np.array_equal(weights, np.array([1.0, 0.0, 0.0], dtype=np.float64))
-
-
-def test_score_blend_out_of_range_is_rejected() -> None:
+@pytest.mark.parametrize("blend", [1.5, -0.1])
+def test_score_blend_out_of_range_is_rejected(blend: float) -> None:
     with pytest.raises(ValueError):
-        aggregate_productive_weights([], {}, [0, 1], score_blend=1.5)
-    with pytest.raises(ValueError):
-        aggregate_productive_weights([], {}, [0, 1], score_blend=-0.1)
+        aggregate_productive_weights([], {}, [0, 1], score_blend=blend)

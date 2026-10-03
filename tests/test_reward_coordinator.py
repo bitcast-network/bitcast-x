@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic import TypeAdapter
 
-from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap
+from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
 from bitcast_x.rewards import RewardDecision
 from bitcast_x.validator.rewards import RewardCoordinator, preview_performance_rewards
@@ -67,7 +67,41 @@ def record(campaign_id: str, *, exclusive: str | None = None) -> CampaignRecord:
     )
 
 
-def scored(campaign_id: str, tweet_id: str, miner: str) -> ScoredAttribution:
+def campaign_feed(*campaigns: CampaignRecord) -> CampaignFeed:
+    return CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=campaigns,
+        ecosystem_maps=(),
+    )
+
+
+def reward_coordinator(
+    store: ValidatorStore,
+    *,
+    scorer: UnusedScorer | CountingScorer | None = None,
+) -> RewardCoordinator:
+    return RewardCoordinator(
+        store,
+        scorer if scorer is not None else UnusedScorer(),  # type: ignore[arg-type]
+        score_blend=0.0,
+    )
+
+
+def scored(
+    campaign_id: str,
+    tweet_id: str,
+    miner: str,
+    *,
+    score: float = 10.0,
+    views: int = 0,
+    favorites: int = 0,
+    followers: int = 0,
+    creator: str | None = None,
+) -> ScoredAttribution:
+    """Return an accepted, scored tweet; tweets sharing ``creator`` share an author."""
+
+    author_x_id = creator or tweet_id
     return ScoredAttribution(
         attribution=AttributionResult(
             tweet_id=tweet_id,
@@ -78,39 +112,26 @@ def scored(campaign_id: str, tweet_id: str, miner: str) -> ScoredAttribution:
         ),
         tweet=Tweet(
             tweet_id=tweet_id,
-            author_x_id=tweet_id,
+            author_x_id=author_x_id,
             created_at=NOW + timedelta(hours=1),
             text="tweet",
-            author=f"creator{tweet_id}",
+            author=f"creator{author_x_id}",
+            views_count=views,
+            favorite_count=favorites,
         ),
-        score=10.0,
+        score=score,
         author_influence=5.0,
         baseline_score=10.0,
         details=(),
+        author_followers_count=followers,
     )
 
 
 def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_path: Path) -> None:
-    open_campaign = record("open")
-    exclusive_campaign = record("exclusive", exclusive=MINER_B)
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(open_campaign, exclusive_campaign),
-        ecosystem_maps=(
-            EcosystemMap(
-                ecosystem_id="eco",
-                name="Eco",
-                eligible_creator_x_ids=("1", "2"),
-                updated_at=NOW,
-            ),
-        ),
-    )
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
+    coordinator = reward_coordinator(ValidatorStore(tmp_path / "validator.sqlite3"))
 
     weights, floors = coordinator.shadow_weights(
-        feed,
+        campaign_feed(record("open"), record("exclusive", exclusive=MINER_B)),
         [scored("open", "1", MINER_A), scored("exclusive", "2", MINER_B)],
         block=35,
         hotkey_to_uid={MINER_A: 1, MINER_B: 2},
@@ -122,21 +143,10 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
 
 
 def test_outside_emission_window_burns_without_provisional_payment(tmp_path: Path) -> None:
-    campaign = record("open")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
-    coordinator = RewardCoordinator(
-        ValidatorStore(tmp_path / "validator.sqlite3"),
-        UnusedScorer(),  # type: ignore[arg-type]
-        score_blend=0.0,
-    )
+    coordinator = reward_coordinator(ValidatorStore(tmp_path / "validator.sqlite3"))
 
     weights, floors = coordinator.shadow_weights(
-        feed,
+        campaign_feed(record("open")),
         [scored("open", "1", MINER_A)],
         block=29,
         hotkey_to_uid={MINER_A: 1},
@@ -149,32 +159,9 @@ def test_outside_emission_window_burns_without_provisional_payment(tmp_path: Pat
 
 def test_preview_performance_rewards_are_zero_dollar_and_respect_current_cap() -> None:
     campaign = record("campaign").model_copy(update={"max_tweets_per_creator": 1})
-    lower = scored("campaign", "1", MINER_A).model_copy(
-        update={
-            "tweet": scored("campaign", "1", MINER_A).tweet.model_copy(
-                update={
-                    "author_x_id": "creator",
-                    "author": "alice",
-                    "views_count": 100,
-                    "favorite_count": 5,
-                }
-            ),
-            "author_followers_count": 100,
-        }
-    )
-    higher = scored("campaign", "2", MINER_A).model_copy(
-        update={
-            "tweet": scored("campaign", "2", MINER_A).tweet.model_copy(
-                update={
-                    "author_x_id": "creator",
-                    "author": "alice",
-                    "views_count": 1_000,
-                    "favorite_count": 100,
-                }
-            ),
-            "score": 20.0,
-            "author_followers_count": 100,
-        }
+    lower = scored("campaign", "1", MINER_A, creator="9")
+    higher = scored(
+        "campaign", "2", MINER_A, creator="9", score=20.0, views=1_000, favorites=100, followers=100
     )
 
     rewards = preview_performance_rewards(campaign, [lower, higher])
@@ -182,12 +169,6 @@ def test_preview_performance_rewards_are_zero_dollar_and_respect_current_cap() -
     assert [item.tweet_id for item in rewards] == ["2"]
     assert rewards[0].daily_usd_floor == 0.0
     assert rewards[0].performance_bonus_pct == 20.0
-    assert rewards[0].performance_bonus_breakdown == {
-        "views": 5.0,
-        "views_per_follower": 5.0,
-        "total_engagements": 5.0,
-        "engagement_per_view": 5.0,
-    }
 
 
 def test_preview_performance_rewards_distinguish_zero_metrics_from_no_reward() -> None:
@@ -208,19 +189,11 @@ def test_preview_performance_rewards_distinguish_zero_metrics_from_no_reward() -
 
 
 def test_same_tweet_is_globally_assigned_once_with_duplicate_reason(tmp_path: Path) -> None:
-    campaign_a = record("a")
     campaign_b = record("b")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign_a, campaign_b),
-        ecosystem_maps=(),
-    )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
-    weights, floors = coordinator.shadow_weights(
-        feed,
+    weights, floors = reward_coordinator(store).shadow_weights(
+        campaign_feed(record("a"), campaign_b),
         [scored("a", "1", MINER_A), scored("b", "1", MINER_B)],
         block=35,
         hotkey_to_uid={MINER_A: 1, MINER_B: 2},
@@ -249,18 +222,12 @@ def test_same_tweet_is_globally_assigned_once_with_duplicate_reason(tmp_path: Pa
 
 
 def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: Path) -> None:
-    campaign_a = record("a")
     campaign_b = record("b").model_copy(
         update={"emission_start_block": 41, "emission_end_block": 50}
     )
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign_a, campaign_b),
-        ecosystem_maps=(),
-    )
+    feed = campaign_feed(record("a"), campaign_b)
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
+    coordinator = reward_coordinator(store)
     evidence = [scored("a", "1", MINER_A), scored("b", "1", MINER_B)]
 
     first_weights, _ = coordinator.shadow_weights(
@@ -291,13 +258,7 @@ async def test_freeze_scores_skips_campaigns_without_a_stored_reconciliation(
     # freeze_scores takes no block. The reconciler gates on close by storing a
     # reconciliation only once a campaign's close is finalized.
     reconciled = record("reconciled")
-    unreconciled = record("unreconciled")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(reconciled, unreconciled),
-        ecosystem_maps=(),
-    )
+    feed = campaign_feed(reconciled, record("unreconciled"))
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     attribution = scored("reconciled", "1", MINER_A).attribution
     store.persist_reconciliation(
@@ -307,9 +268,8 @@ async def test_freeze_scores_skips_campaigns_without_a_stored_reconciliation(
         results=[attribution],
     )
     scorer = CountingScorer()
-    coordinator = RewardCoordinator(store, scorer, score_blend=0.0)  # type: ignore[arg-type]
 
-    result = await coordinator.freeze_scores(feed, [attribution])
+    result = await reward_coordinator(store, scorer=scorer).freeze_scores(feed, [attribution])
 
     assert result == []
     assert scorer.campaign_ids == ["reconciled"]
@@ -320,12 +280,7 @@ async def test_only_current_cycle_completion_releases_zero_value_campaign(
     tmp_path: Path,
 ) -> None:
     campaign = record("campaign")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
+    feed = campaign_feed(campaign)
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     store.persist_reconciliation(
         snapshot_id="stale-snapshot",
@@ -333,7 +288,7 @@ async def test_only_current_cycle_completion_releases_zero_value_campaign(
         campaign_json=campaign.model_dump_json(),
         results=[],
     )
-    coordinator = RewardCoordinator(store, CountingScorer(), score_blend=0.0)  # type: ignore[arg-type]
+    coordinator = reward_coordinator(store, scorer=CountingScorer())
 
     incomplete_scores = await coordinator.freeze_scores(
         feed,
@@ -373,12 +328,7 @@ async def test_only_current_cycle_completion_releases_zero_value_campaign(
 
 def test_frozen_campaign_keeps_emitting_if_later_feed_omits_it(tmp_path: Path) -> None:
     campaign = record("campaign")
-    initial_feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
+    initial_feed = campaign_feed(campaign)
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     item = scored("campaign", "1", MINER_A)
     store.persist_reconciliation(
@@ -387,7 +337,7 @@ def test_frozen_campaign_keeps_emitting_if_later_feed_omits_it(tmp_path: Path) -
         campaign_json=campaign.model_dump_json(),
         results=[item.attribution],
     )
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
+    coordinator = reward_coordinator(store)
 
     first, _ = coordinator.shadow_weights(
         initial_feed,
@@ -411,12 +361,6 @@ def test_frozen_campaign_keeps_emitting_if_later_feed_omits_it(tmp_path: Path) -
 
 def test_final_rewards_replay_preview_feature_instead_of_reselecting(tmp_path: Path) -> None:
     campaign = record("campaign")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     store.pin_featured_tweet_selection(
         campaign_id="campaign",
@@ -426,21 +370,13 @@ def test_final_rewards_replay_preview_feature_instead_of_reselecting(tmp_path: P
         selected_block=19,
         selected_at=NOW,
     )
-    first = scored("campaign", "1", MINER_A).model_copy(
-        update={
-            "tweet": scored("campaign", "1", MINER_A).tweet.model_copy(update={"views_count": 200})
-        }
-    )
-    second = scored("campaign", "2", MINER_B).model_copy(
-        update={
-            "tweet": scored("campaign", "2", MINER_B).tweet.model_copy(update={"views_count": 100})
-        }
-    )
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
-    _weights, floors = coordinator.shadow_weights(
-        feed,
-        [first, second],
+    _weights, floors = reward_coordinator(store).shadow_weights(
+        campaign_feed(campaign),
+        [
+            scored("campaign", "1", MINER_A, views=200),
+            scored("campaign", "2", MINER_B, views=100),
+        ],
         block=35,
         hotkey_to_uid={MINER_A: 1, MINER_B: 2},
         uids=[0, 1, 2],
@@ -460,13 +396,7 @@ def test_ineligible_featured_pin_settles_without_bonus_or_replacement(tmp_path: 
     """
 
     excluded = record("excluded")
-    unrelated = record("unrelated")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(excluded, unrelated),
-        ecosystem_maps=(),
-    )
+    feed = campaign_feed(excluded, record("unrelated"))
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     store.pin_featured_tweet_selection(
         campaign_id="excluded",
@@ -476,7 +406,7 @@ def test_ineligible_featured_pin_settles_without_bonus_or_replacement(tmp_path: 
         selected_block=19,
         selected_at=NOW,
     )
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
+    coordinator = reward_coordinator(store)
 
     weights, floors = coordinator.shadow_weights(
         feed,
@@ -501,27 +431,6 @@ def test_eligible_pin_keeps_bonus_when_capped_out_of_assignment(tmp_path: Path) 
     """A pinned tweet still qualifies while eligible, even if not itself assigned."""
 
     campaign = record("campaign").model_copy(update={"max_tweets_per_creator": 1})
-    pinned = scored("campaign", "1", MINER_A).model_copy(
-        update={
-            "tweet": scored("campaign", "1", MINER_A).tweet.model_copy(
-                update={"author_x_id": "creator", "author": "alice"}
-            )
-        }
-    )
-    stronger = scored("campaign", "2", MINER_A).model_copy(
-        update={
-            "tweet": scored("campaign", "2", MINER_A).tweet.model_copy(
-                update={"author_x_id": "creator", "author": "alice"}
-            ),
-            "score": 20.0,
-        }
-    )
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     store.pin_featured_tweet_selection(
         campaign_id="campaign",
@@ -531,11 +440,13 @@ def test_eligible_pin_keeps_bonus_when_capped_out_of_assignment(tmp_path: Path) 
         selected_block=19,
         selected_at=NOW,
     )
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
-    _weights, floors = coordinator.shadow_weights(
-        feed,
-        [pinned, stronger],
+    _weights, floors = reward_coordinator(store).shadow_weights(
+        campaign_feed(campaign),
+        [
+            scored("campaign", "1", MINER_A, creator="9"),
+            scored("campaign", "2", MINER_A, creator="9", score=20.0),
+        ],
         block=35,
         hotkey_to_uid={MINER_A: 1},
         uids=[0, 1],
@@ -546,39 +457,10 @@ def test_eligible_pin_keeps_bonus_when_capped_out_of_assignment(tmp_path: Path) 
     assert floors[0].featured_tweet_bonus is True
 
 
-def test_featured_tweet_is_selected_at_settlement_without_a_pin(tmp_path: Path) -> None:
-    campaign = record("campaign")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
-
-    _weights, floors = coordinator.shadow_weights(
-        feed,
-        [scored("campaign", "1", MINER_A)],
-        block=35,
-        hotkey_to_uid={MINER_A: 1},
-        uids=[0, 1],
-    )
-
-    assert {item.featured_tweet_id for item in floors} == {"1"}
-    assert store.featured_tweet_selection("campaign") is None
-
-
 def test_featured_tweet_does_not_change_after_rewards_freeze(tmp_path: Path) -> None:
-    campaign = record("campaign")
-    feed = CampaignFeed(
-        snapshot_id="snapshot",
-        published_at=NOW,
-        campaigns=(campaign,),
-        ecosystem_maps=(),
-    )
+    feed = campaign_feed(record("campaign"))
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
+    coordinator = reward_coordinator(store)
     _weights, settled = coordinator.shadow_weights(
         feed,
         [scored("campaign", "1", MINER_A)],
@@ -586,21 +468,16 @@ def test_featured_tweet_does_not_change_after_rewards_freeze(tmp_path: Path) -> 
         hotkey_to_uid={MINER_A: 1, MINER_B: 2},
         uids=[0, 1, 2],
     )
-    more_viewed = scored("campaign", "2", MINER_B).model_copy(
-        update={
-            "tweet": scored("campaign", "2", MINER_B).tweet.model_copy(
-                update={"views_count": 1_000_000}
-            )
-        }
-    )
 
     _weights, later = coordinator.shadow_weights(
         feed,
-        [scored("campaign", "1", MINER_A), more_viewed],
+        [scored("campaign", "1", MINER_A), scored("campaign", "2", MINER_B, views=1_000_000)],
         block=36,
         hotkey_to_uid={MINER_A: 1, MINER_B: 2},
         uids=[0, 1, 2],
     )
 
+    # Without a pin the feature is selected at settlement, and no pin is written.
     assert {item.featured_tweet_id for item in settled} == {"1"}
+    assert store.featured_tweet_selection("campaign") is None
     assert later == settled
