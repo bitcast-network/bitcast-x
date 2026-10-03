@@ -2,10 +2,12 @@
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import bittensor as bt
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from bitcast_x import __version__
 from bitcast_x.errors import ResponseTooLargeError
@@ -15,11 +17,14 @@ from bitcast_x.transport import (
     LEGACY_BATCHES_PATH,
     BatchPageRequest,
     BatchPageResponse,
+    BatchProvider,
     LegacyBatchPageRequest,
     PositionedBatch,
     SignedMinerClient,
     create_miner_app,
 )
+
+MINER_URL = "http://miner.test"
 
 
 def create_wallet(path: Path, name: str) -> bt.Wallet:
@@ -29,6 +34,86 @@ def create_wallet(path: Path, name: str) -> bt.Wallet:
     wallet.create_new_coldkey(use_password=False, suppress=True)
     wallet.create_new_hotkey(use_password=False, suppress=True)
     return wallet
+
+
+async def allow_all(_hotkey: str) -> bool:
+    return True
+
+
+async def refuse(request: BatchPageRequest, caller_hotkey: str) -> BatchPageResponse:
+    raise AssertionError("provider must not run")
+
+
+def empty_page(miner: bt.Wallet, served: list[str] | None = None) -> BatchProvider:
+    """Serve empty pages that echo the cursor, optionally recording each caller."""
+
+    async def provide(request: BatchPageRequest, caller_hotkey: str) -> BatchPageResponse:
+        if served is not None:
+            served.append(caller_hotkey)
+        return BatchPageResponse(
+            miner_hotkey=miner.hotkey.ss58_address,
+            batches=[],
+            next_sequence=request.after_sequence,
+            has_more=False,
+        )
+
+    return provide
+
+
+def one_batch_page(miner: bt.Wallet) -> BatchPageResponse:
+    return BatchPageResponse(
+        miner_hotkey=miner.hotkey.ss58_address,
+        batches=[
+            PositionedBatch(
+                batch={"sequence": 1},
+                position=CommitmentPosition(block=10, extrinsic_index=2),
+            )
+        ],
+        next_sequence=1,
+        has_more=False,
+    )
+
+
+def make_app(miner: bt.Wallet, **overrides: Any) -> FastAPI:
+    """Build a miner app that authorizes everyone and must not reach its provider."""
+
+    options: dict[str, Any] = {"provider": refuse, "authorize_validator": allow_all}
+    return create_miner_app(miner_hotkey=miner.hotkey.ss58_address, **(options | overrides))
+
+
+def asgi_client(app: FastAPI) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=MINER_URL)
+
+
+def signed_client(wallet: bt.Wallet, miner: bt.Wallet, app: FastAPI) -> SignedMinerClient:
+    return SignedMinerClient(
+        wallet,
+        miner_hotkey=miner.hotkey.ss58_address,
+        base_url=MINER_URL,
+        transport=httpx.ASGITransport(app=app),
+    )
+
+
+def sign(wallet: bt.Wallet, receiver: bt.Wallet, path: str, body: bytes) -> dict[str, str]:
+    headers: dict[str, str] = bt.http_auth.sign(
+        wallet,
+        method="POST",
+        path=path,
+        body=body,
+        receiver_ss58=receiver.hotkey.ss58_address,
+    )
+    return headers
+
+
+async def signed_post(
+    app: FastAPI, wallet: bt.Wallet, receiver: bt.Wallet, path: str, body: bytes
+) -> httpx.Response:
+    async with asgi_client(app) as client:
+        return await client.post(path, headers=sign(wallet, receiver, path, body), content=body)
+
+
+def first_page_body() -> bytes:
+    return BatchPageRequest(after_sequence=0).model_dump_json().encode()
 
 
 @pytest.mark.asyncio
@@ -42,28 +127,10 @@ async def test_signed_batch_page_round_trip(tmp_path: Path) -> None:
     async def provide(request: BatchPageRequest, caller_hotkey: str) -> BatchPageResponse:
         assert caller_hotkey == validator.hotkey.ss58_address
         assert request.after_sequence == 0
-        return BatchPageResponse(
-            miner_hotkey=miner.hotkey.ss58_address,
-            batches=[
-                PositionedBatch(
-                    batch={"sequence": 1},
-                    position=CommitmentPosition(block=10, extrinsic_index=2),
-                )
-            ],
-            next_sequence=1,
-            has_more=False,
-        )
+        return one_batch_page(miner)
 
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
-    )
-    client = SignedMinerClient(
-        validator,
-        miner_hotkey=miner.hotkey.ss58_address,
-        base_url="http://miner.test",
-        transport=httpx.ASGITransport(app=app),
+    client = signed_client(
+        validator, miner, make_app(miner, provider=provide, authorize_validator=authorize)
     )
     try:
         response = await client.fetch_batches(BatchPageRequest(after_sequence=0, max_batches=10))
@@ -80,36 +147,16 @@ async def test_v2_overlap_endpoint_strips_positions(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
 
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        return BatchPageResponse(
-            miner_hotkey=miner.hotkey.ss58_address,
-            batches=[
-                PositionedBatch(
-                    batch={"sequence": 1},
-                    position=CommitmentPosition(block=10, extrinsic_index=2),
-                )
-            ],
-            next_sequence=1,
-            has_more=False,
-        )
+    async def provide(request: BatchPageRequest, caller_hotkey: str) -> BatchPageResponse:
+        return one_batch_page(miner)
 
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=lambda _hotkey: asyncio.sleep(0, result=True),
-    )
-    body = LegacyBatchPageRequest(after_sequence=0).model_dump_json().encode()
-    headers = bt.http_auth.sign(
+    response = await signed_post(
+        make_app(miner, provider=provide),
         validator,
-        method="POST",
-        path=LEGACY_BATCHES_PATH,
-        body=body,
-        receiver_ss58=miner.hotkey.ss58_address,
+        miner,
+        LEGACY_BATCHES_PATH,
+        LegacyBatchPageRequest(after_sequence=0).model_dump_json().encode(),
     )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://miner.test"
-    ) as client:
-        response = await client.post(LEGACY_BATCHES_PATH, headers=headers, content=body)
 
     assert response.status_code == 200
     assert response.json()["protocol_version"] == 2
@@ -120,33 +167,11 @@ async def test_v2_overlap_endpoint_strips_positions(tmp_path: Path) -> None:
 async def test_replayed_signed_request_is_rejected(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
+    app = make_app(miner, provider=empty_page(miner))
+    body = first_page_body()
+    headers = sign(validator, miner, BATCHES_PATH, body)
 
-    async def authorize(_hotkey: str) -> bool:
-        return True
-
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        return BatchPageResponse(
-            miner_hotkey=miner.hotkey.ss58_address,
-            batches=[],
-            next_sequence=0,
-            has_more=False,
-        )
-
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
-    )
-    body = BatchPageRequest(after_sequence=0).model_dump_json().encode()
-    headers = bt.http_auth.sign(
-        validator,
-        method="POST",
-        path=BATCHES_PATH,
-        body=body,
-        receiver_ss58=miner.hotkey.ss58_address,
-    )
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://miner.test") as client:
+    async with asgi_client(app) as client:
         first = await client.post(BATCHES_PATH, headers=headers, content=body)
         replay = await client.post(BATCHES_PATH, headers=headers, content=body)
 
@@ -161,29 +186,9 @@ async def test_wrong_receiver_is_rejected(tmp_path: Path) -> None:
     other_miner = create_wallet(tmp_path, "other-miner")
     validator = create_wallet(tmp_path, "validator")
 
-    async def authorize(_hotkey: str) -> bool:
-        return True
-
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        raise AssertionError("provider must not run for unauthenticated traffic")
-
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
+    response = await signed_post(
+        make_app(miner), validator, other_miner, BATCHES_PATH, first_page_body()
     )
-    body = BatchPageRequest(after_sequence=0).model_dump_json().encode()
-    headers = bt.http_auth.sign(
-        validator,
-        method="POST",
-        path=BATCHES_PATH,
-        body=body,
-        receiver_ss58=other_miner.hotkey.ss58_address,
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://miner.test"
-    ) as client:
-        response = await client.post(BATCHES_PATH, headers=headers, content=body)
 
     assert response.status_code == 401
 
@@ -200,26 +205,13 @@ async def test_authenticated_validator_without_authorization_is_forbidden(
         checked.append(hotkey)
         return False
 
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        raise AssertionError("provider must not run for unauthorized validators")
-
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
-    )
-    body = BatchPageRequest(after_sequence=0).model_dump_json().encode()
-    headers = bt.http_auth.sign(
+    response = await signed_post(
+        make_app(miner, authorize_validator=authorize),
         validator,
-        method="POST",
-        path=BATCHES_PATH,
-        body=body,
-        receiver_ss58=miner.hotkey.ss58_address,
+        miner,
+        BATCHES_PATH,
+        first_page_body(),
     )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://miner.test"
-    ) as client:
-        response = await client.post(BATCHES_PATH, headers=headers, content=body)
 
     assert response.status_code == 403
     assert response.json() == {"detail": "validator is not authorized"}
@@ -228,19 +220,7 @@ async def test_authenticated_validator_without_authorization_is_forbidden(
 
 @pytest.mark.asyncio
 async def test_malformed_content_length_is_rejected_without_server_error(tmp_path: Path) -> None:
-    miner = create_wallet(tmp_path, "miner")
-
-    async def authorize(_hotkey: str) -> bool:
-        return True
-
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        raise AssertionError("provider must not run")
-
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
-    )
+    app = make_app(create_wallet(tmp_path, "miner"))
     scope = {
         "type": "http",
         "http_version": "1.1",
@@ -274,27 +254,13 @@ async def test_malformed_content_length_is_rejected_without_server_error(tmp_pat
 
 @pytest.mark.asyncio
 async def test_miner_readiness_waits_for_endpoint_advertisement(tmp_path: Path) -> None:
-    miner = create_wallet(tmp_path, "miner")
     advertised = False
-
-    async def authorize(_hotkey: str) -> bool:
-        return True
-
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        raise AssertionError("batch provider is not used")
 
     async def readiness() -> bool:
         return advertised
 
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
-        readiness=readiness,
-    )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://miner.test"
-    ) as client:
+    app = make_app(create_wallet(tmp_path, "miner"), readiness=readiness)
+    async with asgi_client(app) as client:
         starting = await client.get("/ready")
         advertised = True
         ready = await client.get("/ready")
@@ -307,23 +273,15 @@ async def test_miner_readiness_waits_for_endpoint_advertisement(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_oversized_request_is_rejected_before_authentication(tmp_path: Path) -> None:
-    miner = create_wallet(tmp_path, "miner")
-
     async def authorize(_hotkey: str) -> bool:
         raise AssertionError("authorization must not run")
 
-    async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
-        raise AssertionError("provider must not run")
-
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
+    app = make_app(
+        create_wallet(tmp_path, "miner"),
         authorize_validator=authorize,
         max_request_bytes=10,
     )
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://miner.test"
-    ) as client:
+    async with asgi_client(app) as client:
         response = await client.post(BATCHES_PATH, content=b"x" * 11)
 
     assert response.status_code == 413
@@ -340,7 +298,7 @@ async def test_oversized_miner_response_is_rejected_without_parsing(tmp_path: Pa
     client = SignedMinerClient(
         validator,
         miner_hotkey=miner.hotkey.ss58_address,
-        base_url="http://miner.test",
+        base_url=MINER_URL,
         max_response_bytes=100,
         transport=httpx.MockTransport(handler),
     )
@@ -370,35 +328,9 @@ async def test_concurrent_signed_traffic_is_rate_limited_per_validator_hotkey(
     other_validator = create_wallet(tmp_path, "other-validator")
     limit, excess = 5, 3
     served: list[str] = []
-
-    async def authorize(hotkey: str) -> bool:
-        return hotkey in {validator.hotkey.ss58_address, other_validator.hotkey.ss58_address}
-
-    async def provide(request: BatchPageRequest, caller: str) -> BatchPageResponse:
-        served.append(caller)
-        await asyncio.sleep(0)
-        return BatchPageResponse(
-            miner_hotkey=miner.hotkey.ss58_address,
-            batches=[],
-            next_sequence=request.after_sequence,
-            has_more=False,
-        )
-
-    app = create_miner_app(
-        miner_hotkey=miner.hotkey.ss58_address,
-        provider=provide,
-        authorize_validator=authorize,
-        requests_per_minute=limit,
-    )
-    client, other_client = (
-        SignedMinerClient(
-            wallet,
-            miner_hotkey=miner.hotkey.ss58_address,
-            base_url="http://miner.test",
-            transport=httpx.ASGITransport(app=app),
-        )
-        for wallet in (validator, other_validator)
-    )
+    app = make_app(miner, provider=empty_page(miner, served), requests_per_minute=limit)
+    client = signed_client(validator, miner, app)
+    other_client = signed_client(other_validator, miner, app)
     try:
         results = await asyncio.gather(
             *(
