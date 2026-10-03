@@ -1232,7 +1232,7 @@ async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: P
         provider,
         FakeQualification(),
     ).reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
+    coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
 
     scored = await coordinator.freeze_scores(snapshot, attributions)
     weights, floors = coordinator.shadow_weights(
@@ -1266,7 +1266,7 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
     reconciler = CampaignReconciler(store, provider, FakeQualification())
 
     attributions = await reconciler.reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
+    coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
     scored = await coordinator.freeze_scores(snapshot, attributions)
     weights, floors = coordinator.shadow_weights(
         snapshot,
@@ -1339,7 +1339,7 @@ async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> No
         provider,
         FakeQualification(),
     ).reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
+    coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
 
     scored = await coordinator.freeze_scores(snapshot, attributions)
     coordinator.shadow_weights(
@@ -1628,7 +1628,7 @@ async def test_verified_history_reaches_frozen_weights_and_shadow_publication(
         provider,
         FakeQualification(),
     ).reconcile_feed(snapshot, finalized_block=30)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider))
+    coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
 
     scored = await coordinator.freeze_scores(snapshot, attributions)
     weights, floors = coordinator.shadow_weights(
@@ -1692,7 +1692,7 @@ async def test_independent_restarted_validators_produce_identical_full_shadow_re
             provider,
             FakeQualification(),
         ).reconcile_feed(snapshot, finalized_block=30)
-        coordinator = RewardCoordinator(store, AttributionScorer(provider))
+        coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
         scored = await coordinator.freeze_scores(snapshot, attributions)
         weights, _floors = coordinator.shadow_weights(
             snapshot,

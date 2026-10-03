@@ -103,7 +103,7 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
         ),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     weights, floors = coordinator.shadow_weights(
         feed,
@@ -128,6 +128,7 @@ def test_outside_emission_window_burns_without_provisional_payment(tmp_path: Pat
     coordinator = RewardCoordinator(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         UnusedScorer(),  # type: ignore[arg-type]
+        score_blend=0.0,
     )
 
     weights, floors = coordinator.shadow_weights(
@@ -212,7 +213,7 @@ def test_same_tweet_is_globally_assigned_once_with_duplicate_reason(tmp_path: Pa
         ecosystem_maps=(),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     weights, floors = coordinator.shadow_weights(
         feed,
@@ -240,7 +241,7 @@ def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: 
         ecosystem_maps=(),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
     evidence = [scored("a", "1", MINER_A), scored("b", "1", MINER_B)]
 
     first_weights, _ = coordinator.shadow_weights(
@@ -289,7 +290,7 @@ async def test_freeze_scores_skips_campaigns_before_scoring_close(tmp_path: Path
         results=[attribution],
     )
     scorer = CountingScorer()
-    coordinator = RewardCoordinator(store, scorer)  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, scorer, score_blend=0.0)  # type: ignore[arg-type]
 
     result = await coordinator.freeze_scores(feed, [attribution])
 
@@ -315,7 +316,7 @@ async def test_only_current_cycle_completion_releases_zero_value_campaign(
         campaign_json=campaign.model_dump_json(),
         results=[],
     )
-    coordinator = RewardCoordinator(store, CountingScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, CountingScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     incomplete_scores = await coordinator.freeze_scores(
         feed,
@@ -369,7 +370,7 @@ def test_frozen_campaign_keeps_emitting_if_later_feed_omits_it(tmp_path: Path) -
         campaign_json=campaign.model_dump_json(),
         results=[item.attribution],
     )
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     first, _ = coordinator.shadow_weights(
         initial_feed,
@@ -418,7 +419,7 @@ def test_final_rewards_replay_preview_feature_instead_of_reselecting(tmp_path: P
             "tweet": scored("campaign", "2", MINER_B).tweet.model_copy(update={"views_count": 100})
         }
     )
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     _weights, floors = coordinator.shadow_weights(
         feed,
@@ -458,7 +459,7 @@ def test_ineligible_featured_pin_settles_without_bonus_or_replacement(tmp_path: 
         selected_block=19,
         selected_at=NOW,
     )
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     weights, floors = coordinator.shadow_weights(
         feed,
@@ -513,7 +514,7 @@ def test_eligible_pin_keeps_bonus_when_capped_out_of_assignment(tmp_path: Path) 
         selected_block=19,
         selected_at=NOW,
     )
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     _weights, floors = coordinator.shadow_weights(
         feed,
@@ -537,7 +538,7 @@ def test_featured_tweet_is_selected_at_settlement_without_a_pin(tmp_path: Path) 
         ecosystem_maps=(),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
 
     _weights, floors = coordinator.shadow_weights(
         feed,
@@ -560,7 +561,7 @@ def test_featured_tweet_does_not_change_after_rewards_freeze(tmp_path: Path) -> 
         ecosystem_maps=(),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+    coordinator = RewardCoordinator(store, UnusedScorer(), score_blend=0.0)  # type: ignore[arg-type]
     _weights, settled = coordinator.shadow_weights(
         feed,
         [scored("campaign", "1", MINER_A)],

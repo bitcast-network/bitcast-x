@@ -118,7 +118,7 @@ def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
 
     hotkey_uid = {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7}
     floors = calculate_tweet_floors(campaigns, assign_tweets_with_reasons(campaigns).assigned)
-    weights = aggregate_productive_weights(floors, hotkey_uid, [0, 3, 4, 5, 7, 9])
+    weights = aggregate_productive_weights(floors, hotkey_uid, [0, 3, 4, 5, 7, 9], score_blend=0.0)
     totals: dict[int, float] = {3: 0.0, 4: 0.0, 5: 0.0, 7: 0.0}
     for reward in floors:
         totals[hotkey_uid[reward.miner_hotkey]] += reward.daily_usd_floor
@@ -141,7 +141,7 @@ def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
 
 
 def test_no_productive_content_preserves_all_to_burn_fallback() -> None:
-    weights = aggregate_productive_weights([], {}, [0, 1, 2])
+    weights = aggregate_productive_weights([], {}, [0, 1, 2], score_blend=0.0)
 
     assert np.array_equal(weights, np.array([1.0, 0.0, 0.0], dtype=np.float64))
 
@@ -228,10 +228,9 @@ def test_score_blend_zero_is_bit_identical_to_floor_proportions() -> None:
     uids = [0, 1, 2]
 
     blended = aggregate_productive_weights(rewards, hotkey_to_uid, uids, score_blend=0.0)
-    proportional = aggregate_productive_weights(rewards, hotkey_to_uid, uids)
+    floors = np.array([0.0, 100.0, 100.0], dtype=np.float64)
 
-    assert np.array_equal(blended, proportional)
-    assert np.isclose(blended.sum(), 1.0)
+    assert np.array_equal(blended, floors / floors.sum())
 
 
 def test_score_blend_one_allocates_by_unique_tweet_scores() -> None:

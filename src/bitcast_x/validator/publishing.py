@@ -12,7 +12,7 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import AttributionReason, AttributionResult
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
-from bitcast_x.rewards import RewardDecision, TweetReward
+from bitcast_x.rewards import RewardDecision, TweetReward, featured_selection_pool
 from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.rewards import (
     featured_tweet_selection_due,
@@ -491,12 +491,17 @@ def _featured_selection(
         selected_at = featured_selection.selected_at
         selection_pool = list(featured_selection.selection_pool)
     else:
-        ranked = sorted(
-            (scored_by_key[(campaign_id, item.tweet_id)] for item in rewards),
-            key=lambda item: (-item.tweet.views_count, item.tweet.tweet_id),
-        )[:5]
-        selected_at = max(item.tweet.created_at for item in ranked)
-        selection_pool = sorted(item.tweet.tweet_id for item in ranked)
+        selection_pool = list(
+            featured_selection_pool(
+                {
+                    item.tweet_id: scored_by_key[(campaign_id, item.tweet_id)].tweet.views_count
+                    for item in rewards
+                }
+            )
+        )
+        selected_at = max(
+            scored_by_key[(campaign_id, tweet_id)].tweet.created_at for tweet_id in selection_pool
+        )
     return {
         "brief_id": campaign_id,
         "tweet_id": featured_id,

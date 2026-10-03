@@ -111,7 +111,7 @@ class RewardCoordinator:
         store: ValidatorStore,
         scorer: AttributionScorer,
         *,
-        score_blend: float = 0.0,
+        score_blend: float,
     ) -> None:
         self.store = store
         self._scorer = scorer

@@ -19,10 +19,14 @@ from bitcast_x.protocol import (
     MiningProtocol,
 )
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
-from bitcast_x.rewards import RewardDecision, TweetReward
+from bitcast_x.rewards import RewardDecision, TweetReward, featured_selection_pool
 from bitcast_x.scoring import EngagementContribution
 from bitcast_x.validator.preview import PreviewStore
-from bitcast_x.validator.publishing import ShadowResultPublisher, create_brief_tweets_payload
+from bitcast_x.validator.publishing import (
+    ShadowResultPublisher,
+    _featured_selection,
+    create_brief_tweets_payload,
+)
 from bitcast_x.validator.scoring import ScoredAttribution
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet
@@ -779,3 +783,35 @@ def test_rewarded_tweet_requires_matching_registered_miner() -> None:
             {},
             timestamp=NOW,
         )
+
+
+def test_unpinned_featured_pool_is_published_in_settlement_rank_order() -> None:
+    views = {"1": 10, "2": 30, "3": 20}
+    scored_by_key: dict[tuple[str, str], ScoredAttribution] = {}
+    rewards: list[TweetReward] = []
+    for tweet_id, count in views.items():
+        scored_by_key[("campaign", tweet_id)] = scored().model_copy(
+            update={
+                "attribution": scored().attribution.model_copy(update={"tweet_id": tweet_id}),
+                "tweet": scored().tweet.model_copy(
+                    update={"tweet_id": tweet_id, "views_count": count}
+                ),
+            }
+        )
+        rewards.append(
+            TweetReward(
+                campaign_id="campaign",
+                tweet_id=tweet_id,
+                creator_x_id="1",
+                miner_hotkey=MINER,
+                score=1.0,
+                daily_usd_floor=1.0,
+                featured_tweet_bonus=tweet_id == "2",
+                featured_tweet_id="2",
+            )
+        )
+
+    featured = _featured_selection("campaign", rewards, scored_by_key)
+
+    assert featured is not None
+    assert featured["selection_pool"] == list(featured_selection_pool(views)) == ["2", "3", "1"]

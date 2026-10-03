@@ -1,6 +1,7 @@
 """Finalized seven-day campaign floor and unlimited residual-emission scaling."""
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -12,6 +13,9 @@ from bitcast_x.protocol import AttributionReason
 
 REWARD_SMOOTHING_EXPONENT = 0.65
 EMISSIONS_PERIOD_DAYS = 7
+PERFORMANCE_BONUS_PER_METRIC = 0.05
+FEATURED_MULTIPLIER = 1.05
+FEATURED_TOP_N = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,11 +106,10 @@ class FeaturedTweetCandidate:
 def estimate_payouts(
     daily_budget: float,
     tweets: tuple[RewardTweet, ...],
-    smoothing_exponent: float = REWARD_SMOOTHING_EXPONENT,
 ) -> list[float]:
     """Mirror v2's pre-dedup proportional power-law split."""
 
-    smoothed = [max(tweet.score, 0.0) ** smoothing_exponent for tweet in tweets]
+    smoothed = [max(tweet.score, 0.0) ** REWARD_SMOOTHING_EXPONENT for tweet in tweets]
     total = sum(smoothed)
     if total <= 0:
         return [0.0] * len(tweets)
@@ -211,36 +214,35 @@ def calculate_tweet_floors(
     return output
 
 
+def featured_selection_pool(views_by_tweet: Mapping[str, int]) -> tuple[str, ...]:
+    """Return the most-viewed tweet IDs eligible for the featured draw, in rank order."""
+
+    ranked = sorted(views_by_tweet, key=lambda tweet_id: (-views_by_tweet[tweet_id], tweet_id))
+    return tuple(ranked[:FEATURED_TOP_N])
+
+
 def select_v2_featured_tweet(
     campaign: RewardCampaign,
     assigned_tweet_ids: set[str],
-    *,
-    featured_top_n: int = 5,
 ) -> FeaturedTweetCandidate | None:
     """Select one tweet deterministically from the most-viewed assigned tweets."""
 
-    if featured_top_n < 1:
-        raise ValueError("featured_top_n must be positive")
-    selected = [tweet for tweet in campaign.tweets if tweet.tweet_id in assigned_tweet_ids]
-    if not selected:
-        return None
-    ranked = sorted(
-        selected,
-        key=lambda item: (-item.views_count, item.tweet_id),
-    )[:featured_top_n]
-    identifiers = sorted(item.tweet_id for item in ranked)
-    featured = ranked[hashlib.sha256(",".join(identifiers).encode()).digest()[0] % len(ranked)]
-    return FeaturedTweetCandidate(
-        tweet_id=featured.tweet_id,
-        selection_pool=tuple(item.tweet_id for item in ranked),
+    pool = featured_selection_pool(
+        {
+            tweet.tweet_id: tweet.views_count
+            for tweet in campaign.tweets
+            if tweet.tweet_id in assigned_tweet_ids
+        }
     )
+    if not pool:
+        return None
+    digest = hashlib.sha256(",".join(sorted(pool)).encode()).digest()
+    return FeaturedTweetCandidate(tweet_id=pool[digest[0] % len(pool)], selection_pool=pool)
 
 
 def apply_v2_performance_bonus(
     campaign: RewardCampaign,
     assigned_tweet_ids: set[str],
-    *,
-    max_bonus_per_metric: float = 0.05,
 ) -> RewardCampaign:
     """Apply v2's four relative performance bonuses to an assigned subset."""
 
@@ -256,7 +258,7 @@ def apply_v2_performance_bonus(
         breakdown: dict[str, float] = {}
         for name in names:
             maximum = maxima[name]
-            bonus = metric[name] / maximum * max_bonus_per_metric if maximum > 0 else 0.0
+            bonus = metric[name] / maximum * PERFORMANCE_BONUS_PER_METRIC if maximum > 0 else 0.0
             breakdown[name] = round(bonus * 100, 2)
             total_bonus += bonus
         adjusted[tweet.tweet_id] = replace(
@@ -265,11 +267,8 @@ def apply_v2_performance_bonus(
             performance_bonus_pct=round(total_bonus * 100, 2),
             performance_bonus_breakdown=breakdown,
         )
-    return RewardCampaign(
-        campaign_id=campaign.campaign_id,
-        reward_pool_usd=campaign.reward_pool_usd,
-        max_tweets_per_creator=campaign.max_tweets_per_creator,
-        tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets),
+    return replace(
+        campaign, tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets)
     )
 
 
@@ -277,8 +276,6 @@ def apply_v2_featured_bonus(
     campaign: RewardCampaign,
     assigned_tweet_ids: set[str],
     featured_tweet_id: str,
-    *,
-    featured_multiplier: float = 1.05,
 ) -> RewardCampaign:
     """Apply v2's featured bonus using an already selected, pinned tweet ID."""
 
@@ -296,15 +293,12 @@ def apply_v2_featured_bonus(
         receives_bonus = tweet.author_username.casefold() in bonus_accounts
         adjusted[tweet.tweet_id] = replace(
             tweet,
-            score=tweet.score * featured_multiplier if receives_bonus else tweet.score,
+            score=tweet.score * FEATURED_MULTIPLIER if receives_bonus else tweet.score,
             featured_tweet_bonus=receives_bonus,
             featured_tweet_id=featured_tweet_id,
         )
-    return RewardCampaign(
-        campaign_id=campaign.campaign_id,
-        reward_pool_usd=campaign.reward_pool_usd,
-        max_tweets_per_creator=campaign.max_tweets_per_creator,
-        tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets),
+    return replace(
+        campaign, tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets)
     )
 
 
@@ -330,17 +324,17 @@ def aggregate_productive_weights(
     hotkey_to_uid: dict[str, int],
     uids: list[int],
     *,
-    score_blend: float = 0.0,
+    score_blend: float,
 ) -> NDArray[np.float64]:
     """Allocate emissions across productive miners by floor and score shares.
 
     Weights are the convex blend of the floor-proportional vector and the
     deduplicated tweet-score vector: ``1 - score_blend`` weight on floors plus
-    ``score_blend`` weight on unique per-tweet scores. ``0.0`` (the default)
-    preserves exact floor-proportional allocation; ``1.0`` allocates purely on
-    content value, independent of the campaign budget each miner carries. When
-    no positive scores exist the floor vector stands alone, so blended modes
-    never burn productive miners over missing score signal.
+    ``score_blend`` weight on unique per-tweet scores. ``0.0`` is exact
+    floor-proportional allocation; ``1.0`` (the production setting) allocates
+    purely on content value, independent of the campaign budget each miner
+    carries. When no positive scores exist the floor vector stands alone, so
+    blended modes never burn productive miners over missing score signal.
     """
 
     if not 0.0 <= score_blend <= 1.0:
@@ -364,18 +358,13 @@ def aggregate_productive_weights(
             scores[index] += max(reward.score, 0.0)
     floor_shares = _normalized_shares(floors)
     score_shares = _normalized_shares(scores)
-    if floor_shares is None and score_shares is None:
-        return _burn(uids)
     if score_blend <= 0.0 or score_shares is None:
         if floor_shares is not None:
             return floor_shares
         return _burn(uids)
     floor_component = floor_shares if floor_shares is not None else np.zeros_like(score_shares)
     blended = (1.0 - score_blend) * floor_component + score_blend * score_shares
-    blended_total = blended.sum()
-    if blended_total <= 0:
-        return _burn(uids)
-    return cast(NDArray[np.float64], blended / blended_total)
+    return cast(NDArray[np.float64], blended / blended.sum())
 
 
 def _normalized_shares(values: NDArray[np.float64]) -> NDArray[np.float64] | None:
