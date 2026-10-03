@@ -20,22 +20,20 @@ async def reset_loki() -> None:
     await shutdown_loki_logging()
 
 
-def test_loki_is_disabled_without_complete_configuration() -> None:
-    settings = Settings(
-        loki_url="https://example.test",
-        loki_username="tenant",
-        loki_token=None,
-    )
+@pytest.mark.parametrize(
+    "configured",
+    (
+        pytest.param({}, id="default"),
+        pytest.param(
+            {"loki_url": "https://example.test", "loki_username": "tenant"}, id="no-token"
+        ),
+    ),
+)
+def test_loki_is_disabled_without_complete_configuration(configured: dict[str, str]) -> None:
+    settings = Settings(_env_file=None, **configured)
 
     assert configure_loki_logging(settings, labels={"neuron": "validator"}) is False
     assert logging_module._loki_handler is None
-
-
-def test_loki_forwarding_is_disabled_by_default() -> None:
-    settings = Settings(_env_file=None)
-
-    assert (settings.loki_url, settings.loki_username, settings.loki_token) == (None, None, None)
-    assert configure_loki_logging(settings, labels={"neuron": "validator"}) is False
 
 
 @pytest.mark.asyncio

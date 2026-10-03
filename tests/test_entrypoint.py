@@ -7,113 +7,73 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+ROOT = Path(__file__).parents[1]
 EXPECTED_HOTKEY = "5DAZk8VdarYaEeUByitfm34Fgor7sgBXDmhj2Q2tepMKQ9fv"
 
 
-def encoded_keyfile(address: str) -> str:
-    """Return an encoded synthetic keyfile without real private material."""
+def keyfile(address: str) -> str:
+    """Return a synthetic keyfile without real private material."""
 
-    payload = json.dumps({"ss58Address": address, "secretSeed": "synthetic-test-only"})
-    return base64.b64encode(payload.encode()).decode()
+    return json.dumps({"ss58Address": address, "secretSeed": "synthetic-test-only"})
 
 
-def entrypoint_environment(tmp_path: Path, address: str) -> dict[str, str]:
-    """Build an isolated entrypoint environment and harmless application stub."""
+def injected_hotkey(address: str) -> dict[str, str]:
+    """Return the secret-injection environment for a hotkey with ``address``."""
 
-    executable = tmp_path / "bitcast-x"
-    executable.write_text("#!/bin/sh\nprintf 'started:%s' \"$*\"\n")
-    executable.chmod(0o755)
     return {
-        "PATH": f"{tmp_path}:{Path(sys.executable).parent}:{os.environ['PATH']}",
-        "WALLET_PATH": str(tmp_path / "wallets"),
-        "HOTKEY_DATA": encoded_keyfile(address),
+        "HOTKEY_DATA": base64.b64encode(keyfile(address).encode()).decode(),
         "BITCAST_X_EXPECTED_HOTKEY": EXPECTED_HOTKEY,
     }
 
 
-def test_entrypoint_starts_when_hotkey_matches_expected_uid(tmp_path: Path) -> None:
-    result = subprocess.run(
-        ["/bin/sh", "./entrypoint.sh", "--probe"],
-        cwd=Path(__file__).parents[1],
-        env=entrypoint_environment(tmp_path, EXPECTED_HOTKEY),
+def run_entrypoint(
+    tmp_path: Path, args: tuple[str, ...], env: dict[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Run the entrypoint with an isolated wallet path and a harmless application stub."""
+
+    executable = tmp_path / "bitcast-x"
+    executable.write_text("#!/bin/sh\nprintf 'started:%s' \"$*\"\n")
+    executable.chmod(0o755)
+    return subprocess.run(  # noqa: S603 - fixed script, synthetic environment
+        ["/bin/sh", "./entrypoint.sh", *args],
+        cwd=ROOT,
+        env={
+            "PATH": f"{tmp_path}:{Path(sys.executable).parent}:{os.environ['PATH']}",
+            "WALLET_PATH": str(tmp_path / "wallets"),
+            **env,
+        },
         capture_output=True,
         text=True,
         check=False,
     )
+
+
+def test_entrypoint_starts_when_hotkey_matches_expected_uid(tmp_path: Path) -> None:
+    result = run_entrypoint(tmp_path, ("--probe",), injected_hotkey(EXPECTED_HOTKEY))
 
     assert result.returncode == 0
     assert result.stdout.endswith("started:--probe")
 
 
-def test_entrypoint_help_does_not_require_or_write_hotkey(tmp_path: Path) -> None:
-    executable = tmp_path / "bitcast-x"
-    executable.write_text("#!/bin/sh\nprintf 'started:%s' \"$*\"\n")
-    executable.chmod(0o755)
-    wallet_path = tmp_path / "wallets"
-
-    result = subprocess.run(
-        ["/bin/sh", "./entrypoint.sh", "--help"],
-        cwd=Path(__file__).parents[1],
-        env={
-            "PATH": f"{tmp_path}:{Path(sys.executable).parent}:{os.environ['PATH']}",
-            "WALLET_PATH": str(wallet_path),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+@pytest.mark.parametrize("flag", ("--help", "--version"))
+def test_entrypoint_informational_flags_do_not_require_or_write_hotkey(
+    tmp_path: Path, flag: str
+) -> None:
+    result = run_entrypoint(tmp_path, (flag,), {})
 
     assert result.returncode == 0
-    assert result.stdout == "started:--help"
-    assert not wallet_path.exists()
-
-
-def test_entrypoint_version_does_not_require_or_write_hotkey(tmp_path: Path) -> None:
-    executable = tmp_path / "bitcast-x"
-    executable.write_text("#!/bin/sh\nprintf 'started:%s' \"$*\"\n")
-    executable.chmod(0o755)
-    wallet_path = tmp_path / "wallets"
-
-    result = subprocess.run(
-        ["/bin/sh", "./entrypoint.sh", "--version"],
-        cwd=Path(__file__).parents[1],
-        env={
-            "PATH": f"{tmp_path}:{Path(sys.executable).parent}:{os.environ['PATH']}",
-            "WALLET_PATH": str(wallet_path),
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0
-    assert result.stdout == "started:--version"
-    assert not wallet_path.exists()
+    assert result.stdout == f"started:{flag}"
+    assert not (tmp_path / "wallets").exists()
 
 
 def test_entrypoint_uses_existing_mounted_hotkey_without_secret(tmp_path: Path) -> None:
-    executable = tmp_path / "bitcast-x"
-    executable.write_text("#!/bin/sh\nprintf 'started:%s' \"$*\"\n")
-    executable.chmod(0o755)
-    wallet_path = tmp_path / "wallets"
-    hotkey = wallet_path / "default" / "hotkeys" / "default"
+    hotkey = tmp_path / "wallets" / "default" / "hotkeys" / "default"
     hotkey.parent.mkdir(parents=True)
-    hotkey.write_text(
-        json.dumps({"ss58Address": EXPECTED_HOTKEY, "secretSeed": "synthetic-test-only"})
-    )
+    hotkey.write_text(keyfile(EXPECTED_HOTKEY))
 
-    result = subprocess.run(
-        ["/bin/sh", "./entrypoint.sh", "--probe"],
-        cwd=Path(__file__).parents[1],
-        env={
-            "PATH": f"{tmp_path}:{Path(sys.executable).parent}:{os.environ['PATH']}",
-            "WALLET_PATH": str(wallet_path),
-            "BITCAST_X_EXPECTED_HOTKEY": EXPECTED_HOTKEY,
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    result = run_entrypoint(tmp_path, ("--probe",), {"BITCAST_X_EXPECTED_HOTKEY": EXPECTED_HOTKEY})
 
     assert result.returncode == 0
     assert "Using mounted wallet hotkey" in result.stdout
@@ -121,16 +81,8 @@ def test_entrypoint_uses_existing_mounted_hotkey_without_secret(tmp_path: Path) 
 
 
 def test_entrypoint_rejects_wrong_hotkey_before_start(tmp_path: Path) -> None:
-    result = subprocess.run(
-        ["/bin/sh", "./entrypoint.sh"],
-        cwd=Path(__file__).parents[1],
-        env=entrypoint_environment(
-            tmp_path,
-            "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA",
-        ),
-        capture_output=True,
-        text=True,
-        check=False,
+    result = run_entrypoint(
+        tmp_path, (), injected_hotkey("5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA")
     )
 
     assert result.returncode != 0

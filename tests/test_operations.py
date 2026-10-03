@@ -132,11 +132,11 @@ def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path)
         connection.close()
 
 
-def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Path) -> None:
+def test_featured_pin_survives_retry_and_restart_and_first_pin_wins(tmp_path: Path) -> None:
     path = tmp_path / "validator.sqlite3"
     store = ValidatorStore(path)
     now = datetime(2026, 8, 13, tzinfo=UTC)
-    original = CampaignRecord(
+    campaign_json = CampaignRecord(
         access=CampaignAccess(
             campaign_id="featured",
             mechanism_id=1,
@@ -151,10 +151,7 @@ def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Pat
         reward_pool_usd="700",
         emission_start_block=30,
         emission_end_block=40,
-    )
-    campaign_json = original.model_dump_json()
-    store.bind_campaign_protocols((original,))
-
+    ).model_dump_json()
     selected = store.pin_featured_tweet_selection(
         campaign_id="featured",
         campaign_json=campaign_json,
@@ -163,21 +160,17 @@ def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Pat
         selected_block=19,
         selected_at=now,
     )
-    store.persist_reconciliation(
-        snapshot_id="first",
-        campaign_id="featured",
-        campaign_json=campaign_json,
-        results=[],
-    )
-    store.persist_reconciliation(
-        snapshot_id="recovered",
-        campaign_id="featured",
-        campaign_json=campaign_json,
-        results=[],
-    )
+    # The second zero-value reconciliation takes the retry path, which clears
+    # downstream state; the featured pin must not be part of it.
+    for snapshot_id in ("first", "recovered"):
+        store.persist_reconciliation(
+            snapshot_id=snapshot_id,
+            campaign_id="featured",
+            campaign_json=campaign_json,
+            results=[],
+        )
 
-    reopened = ValidatorStore(path)
-    replayed = reopened.pin_featured_tweet_selection(
+    replayed = ValidatorStore(path).pin_featured_tweet_selection(
         campaign_id="featured",
         campaign_json=campaign_json,
         tweet_id="2",
@@ -185,19 +178,8 @@ def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Pat
         selected_block=20,
         selected_at=now + timedelta(minutes=1),
     )
-    assert replayed == selected
-    assert reopened.reconciliation("recovered", "featured", campaign_json) == []
 
-    connection = sqlite3.connect(path)
-    try:
-        tables = {
-            str(row[0])
-            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-        }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 6
-        assert "featured_tweet_selections" in tables
-    finally:
-        connection.close()
+    assert replayed == selected
 
 
 def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -> None:

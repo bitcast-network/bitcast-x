@@ -1,6 +1,7 @@
 """Campaign contracts remain pinned across feed changes and protocol retirement."""
 
 import sqlite3
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -32,21 +33,17 @@ MUTABLE_CAMPAIGN_FIELDS = (
     "cap",
     "emission_start_block",
     "emission_end_block",
+    "max_members",
 )
 
 
-def campaign(
-    campaign_id: str,
-    protocol: MiningProtocol,
-    exclusive_miner_hotkey: str | None = None,
-) -> CampaignRecord:
+def campaign(campaign_id: str) -> CampaignRecord:
     return CampaignRecord(
         access=CampaignAccess(
             campaign_id=campaign_id,
             mechanism_id=1,
-            mining_protocol=protocol,
+            mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=20,
-            exclusive_miner_hotkey=exclusive_miner_hotkey,
         ),
         display=campaign_id,
         brief="brief",
@@ -87,6 +84,7 @@ def mutate_campaign_contract(record: CampaignRecord, field: str) -> CampaignReco
         "cap": 0.5,
         "emission_start_block": 31,
         "emission_end_block": 41,
+        "max_members": 2,
     }
     return record.model_copy(update={field: updates[field]})
 
@@ -129,20 +127,11 @@ def freeze_positive_campaign(store: ValidatorStore, record: CampaignRecord) -> N
     )
 
 
-def test_campaign_exclusive_miner_change_is_adopted_before_results_freeze(tmp_path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2, HOTKEY)
-    changed = campaign("same", MiningProtocol.PRECLAIM_V2, "5" + "F" * 47)
-
-    assert store.bind_campaign_protocols((original,)) == (original,)
-    assert store.bind_campaign_protocols((changed,)) == (changed,)
-
-
 def test_zero_value_v3_campaign_reopens_after_contract_edit(tmp_path) -> None:
     """Reproduce the quarantined campaign's empty V3 state and recover it in place."""
 
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("083_bittensor", MiningProtocol.PRECLAIM_V2)
+    original = campaign("083_bittensor")
     changed = original.model_copy(update={"tag": "@@Bitcast_network"})
     store.bind_campaign_protocols((original,))
     store.persist_reconciliation(
@@ -195,7 +184,7 @@ def test_complete_campaign_contract_adopts_latest_feed_before_results_freeze(
     tmp_path, field: str
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2)
+    original = campaign("same")
     changed = mutate_campaign_contract(original, field)
 
     assert store.bind_campaign_protocols((original,)) == (original,)
@@ -208,14 +197,17 @@ def test_complete_campaign_contract_uses_frozen_version_after_results_freeze(
     tmp_path, caplog: pytest.LogCaptureFixture, field: str
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2)
-    store.bind_campaign_protocols((original,))
+    original = campaign("same")
+    unrelated = campaign("unrelated")
+    store.bind_campaign_protocols((original, unrelated))
     freeze_positive_campaign(store, original)
 
     with caplog.at_level("ERROR"):
-        bound = store.bind_campaign_protocols((mutate_campaign_contract(original, field),))
+        bound = store.bind_campaign_protocols(
+            (mutate_campaign_contract(original, field), unrelated)
+        )
 
-    assert bound == (original,)
+    assert bound == (original, unrelated)
     assert "using frozen contract campaign=same" in caplog.text
 
 
@@ -226,7 +218,7 @@ def test_featured_pin_does_not_freeze_campaign_contract(tmp_path) -> None:
     featured tweet was pinned, and every cycle rejected the edit.
     """
 
-    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 350})
+    original = campaign("same").model_copy(update={"max_members": 350})
     changed = original.model_copy(update={"max_members": 750})
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     store.bind_campaign_protocols((original,))
@@ -249,99 +241,11 @@ def test_featured_pin_does_not_freeze_campaign_contract(tmp_path) -> None:
         ).fetchone()[0]
     assert pin_contract == changed.model_dump_json()
 
-
-def test_settled_rewards_freeze_contract_adopted_after_featured_pin(tmp_path) -> None:
-    """Settled economics freeze whichever contract was in force at settlement."""
-
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 350})
-    store.bind_campaign_protocols((original,))
-    store.pin_featured_tweet_selection(
-        campaign_id="same",
-        campaign_json=original.model_dump_json(),
-        tweet_id="1",
-        selection_pool=("1", "2"),
-        selected_block=5,
-        selected_at=NOW,
+    # Settled economics freeze whichever contract was in force at settlement.
+    freeze_positive_campaign(store, changed)
+    assert store.bind_campaign_protocols((changed.model_copy(update={"max_members": 1000}),)) == (
+        changed,
     )
-    edited = original.model_copy(update={"max_members": 999})
-    assert store.bind_campaign_protocols((edited,)) == (edited,)
-    freeze_positive_campaign(store, edited)
-
-    assert store.bind_campaign_protocols((edited.model_copy(update={"max_members": 1000}),)) == (
-        edited,
-    )
-
-
-def test_frozen_campaign_mutation_does_not_stall_unrelated_campaigns(tmp_path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
-    unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
-    store.bind_campaign_protocols((frozen, unaffected))
-    freeze_positive_campaign(store, frozen)
-
-    bound = store.bind_campaign_protocols((mutate_campaign_contract(frozen, "brief"), unaffected))
-
-    assert bound == (frozen, unaffected)
-
-
-def test_unreadable_frozen_campaign_contract_quarantines_only_that_campaign(
-    tmp_path, caplog: pytest.LogCaptureFixture
-) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    frozen = campaign("frozen", MiningProtocol.PRECLAIM_V2)
-    unaffected = campaign("unaffected", MiningProtocol.PRECLAIM_V2)
-    store.bind_campaign_protocols((frozen, unaffected))
-    freeze_positive_campaign(store, frozen)
-    with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
-        connection.execute(
-            """
-            UPDATE campaign_protocols
-            SET campaign_contract_json = 'unreadable'
-            WHERE campaign_id = 'frozen'
-            """
-        )
-
-    with caplog.at_level("CRITICAL"):
-        bound = store.bind_campaign_protocols(
-            (mutate_campaign_contract(frozen, "brief"), unaffected)
-        )
-
-    assert bound == (unaffected,)
-    assert "quarantined campaign with unreadable frozen contract campaign=frozen" in caplog.text
-
-
-def test_rank_cutoff_upgrade_preserves_already_frozen_campaign_results(tmp_path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2)
-    ranked = original.model_copy(update={"max_members": 150})
-    store.bind_campaign_protocols((original,))
-    store.persist_reconciliation(
-        snapshot_id="frozen",
-        campaign_id="same",
-        campaign_json=original.model_dump_json(),
-        results=[],
-    )
-
-    assert store.bind_campaign_protocols((ranked,)) == (ranked,)
-
-
-def test_published_rank_cutoff_cannot_change_after_results_freeze(tmp_path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2).model_copy(update={"max_members": 150})
-    changed = original.model_copy(update={"max_members": 151})
-    store.bind_campaign_protocols((original,))
-    freeze_positive_campaign(store, original)
-
-    assert store.bind_campaign_protocols((changed,)) == (original,)
-
-
-def test_identical_campaign_contract_can_be_observed_repeatedly(tmp_path) -> None:
-    store = ValidatorStore(tmp_path / "validator.sqlite3")
-    original = campaign("same", MiningProtocol.PRECLAIM_V2)
-
-    store.bind_campaign_protocols((original,))
-    store.bind_campaign_protocols((original,))
 
 
 def retired_contract_json(record: CampaignRecord) -> str:
@@ -351,42 +255,51 @@ def retired_contract_json(record: CampaignRecord) -> str:
 
 
 def test_retired_campaign_mode_is_rejected_by_the_feed_model() -> None:
-    payload = feed(campaign("retired", MiningProtocol.PRECLAIM_V2)).model_dump(mode="json")
+    payload = feed(campaign("retired")).model_dump(mode="json")
     payload["campaigns"][0]["access"]["mining_protocol"] = "legacy_connection"
 
     with pytest.raises(ValidationError, match="mining_protocol"):
         CampaignFeed.model_validate(payload)
 
 
-def test_retired_frozen_contract_is_quarantined_not_fatal(
-    tmp_path, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    "stored_contract",
+    (
+        pytest.param(lambda _record: "unreadable", id="unreadable"),
+        pytest.param(retired_contract_json, id="retired-mode"),
+    ),
+)
+def test_unreadable_frozen_contract_is_quarantined_not_fatal(
+    tmp_path, caplog: pytest.LogCaptureFixture, stored_contract: Callable[[CampaignRecord], str]
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    retired = campaign("retired", MiningProtocol.PRECLAIM_V2)
-    store.bind_campaign_protocols((retired,))
-    freeze_positive_campaign(store, retired)
+    frozen = campaign("frozen")
+    unaffected = campaign("unaffected")
+    store.bind_campaign_protocols((frozen, unaffected))
+    freeze_positive_campaign(store, frozen)
     with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
         connection.execute(
-            "UPDATE campaign_protocols SET campaign_contract_json = ?",
-            (retired_contract_json(retired),),
+            "UPDATE campaign_protocols SET campaign_contract_json = ? WHERE campaign_id = ?",
+            (stored_contract(frozen), "frozen"),
         )
         connection.execute(
-            "UPDATE reconciliations SET campaign_json = ?", (retired_contract_json(retired),)
+            "UPDATE reconciliations SET campaign_json = ? WHERE campaign_id = ?",
+            (stored_contract(frozen), "frozen"),
         )
-    current = campaign("new", MiningProtocol.PRECLAIM_V2)
+    current = campaign("new")
 
     with caplog.at_level("CRITICAL"):
-        bound = store.bind_campaign_protocols((retired, current))
-        frozen = store.reconciled_campaigns()
+        bound = store.bind_campaign_protocols((frozen, unaffected, current))
+        reconciled = store.reconciled_campaigns()
 
-    assert bound == (current,)
-    assert frozen == []
-    assert "quarantined campaign with unreadable frozen contract campaign=retired" in caplog.text
+    assert bound == (unaffected, current)
+    assert reconciled == []
+    assert "quarantined campaign with unreadable frozen contract campaign=frozen" in caplog.text
 
 
 def test_archived_legacy_binding_does_not_block_current_campaigns(tmp_path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    retired = campaign("retired", MiningProtocol.PRECLAIM_V2)
+    retired = campaign("retired")
     with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:
         connection.execute(
             """
@@ -396,7 +309,7 @@ def test_archived_legacy_binding_does_not_block_current_campaigns(tmp_path) -> N
             """,
             (retired_contract_json(retired),),
         )
-    current = campaign("new", MiningProtocol.PRECLAIM_V2)
+    current = campaign("new")
 
     assert store.bind_campaign_protocols((current,)) == (current,)
     with sqlite3.connect(tmp_path / "validator.sqlite3") as connection:

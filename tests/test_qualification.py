@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from bitcast_x.qualification import (
     PUBLIC_FINNEY_QUALIFICATION_SCHEDULE,
+    PUBLIC_QUALIFICATION_OWNER_HOTKEY,
     QualificationConfig,
     QualificationReader,
     QualificationSchedule,
@@ -54,6 +55,8 @@ def test_public_finney_schedule_ships_with_both_qualification_paths() -> None:
     before = PUBLIC_FINNEY_QUALIFICATION_SCHEDULE.at(8_873_999)
     active = PUBLIC_FINNEY_QUALIFICATION_SCHEDULE.at(8_874_000)
 
+    assert PUBLIC_QUALIFICATION_OWNER_HOTKEY == "5DAoDtMxVqtMu2Nd5E7QhPEGXDMgrySvE1b3rRT5ARDhfNNK"
+    assert before.owner_hotkey == active.owner_hotkey == PUBLIC_QUALIFICATION_OWNER_HOTKEY
     assert before.version == 1
     assert before.minimum_self_stake_alpha is None
     assert active.version == 2
@@ -126,63 +129,56 @@ async def test_qualifies_exact_threshold_without_float_rounding() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aggregate_stake_on_miner_hotkey_is_an_alternative_path() -> None:
-    policy = config().model_copy(update={"minimum_self_stake_alpha": Decimal("250.5")})
+@pytest.mark.parametrize(
+    ("minimum_conviction_alpha", "chain", "expected"),
+    [
+        pytest.param(
+            "250.5",
+            FakeChain(MINER, 0, self_stake_rao=250_500_000_000),
+            (True, "eligible", "self_stake", Decimal("250.5")),
+            id="alternative-to-owner-lock",
+        ),
+        pytest.param(
+            "250.5",
+            FakeChain(MINER, 0, self_stake_rao=250_499_999_999),
+            (False, "neither_qualification_path_met", None, Decimal("250.499999999")),
+            id="both-paths-below-minimum",
+        ),
+        pytest.param(
+            "0",
+            FakeChain(None, 0, self_stake_rao=250_500_000_000),
+            (True, "eligible", "self_stake", Decimal("250.5")),
+            id="self-stake-only-without-owner-lock",
+        ),
+        pytest.param(
+            "0",
+            FakeChain(None, 0),
+            (False, "self_stake_below_minimum", None, Decimal("0")),
+            id="self-stake-only-below-minimum",
+        ),
+    ],
+)
+async def test_aggregate_miner_hotkey_self_stake_qualification(
+    minimum_conviction_alpha: str,
+    chain: FakeChain,
+    expected: tuple[bool, str, str | None, Decimal],
+) -> None:
+    policy = QualificationConfig(
+        owner_hotkey=OWNER,
+        minimum_conviction_alpha=Decimal(minimum_conviction_alpha),
+        minimum_self_stake_alpha=Decimal("250.5"),
+        effective_block=90,
+    )
 
-    result = await QualificationReader(
-        FakeChain(MINER, 0, self_stake_rao=250_500_000_000), policy
-    ).read(MINER, block=100)
+    result = await QualificationReader(chain, policy).read(MINER, block=100)
 
-    assert result.eligible is True
-    assert result.reason == "eligible"
-    assert result.qualified_via == "self_stake"
-    assert result.self_stake_alpha == Decimal("250.5")
+    assert (
+        result.eligible,
+        result.reason,
+        result.qualified_via,
+        result.self_stake_alpha,
+    ) == expected
     assert result.required_self_stake_alpha == Decimal("250.5")
-
-
-@pytest.mark.asyncio
-async def test_aggregate_miner_hotkey_stake_below_threshold_does_not_qualify() -> None:
-    policy = config().model_copy(update={"minimum_self_stake_alpha": Decimal("250.5")})
-
-    result = await QualificationReader(
-        FakeChain(MINER, 0, self_stake_rao=250_499_999_999), policy
-    ).read(MINER, block=100)
-
-    assert result.eligible is False
-    assert result.reason == "neither_qualification_path_met"
-    assert result.qualified_via is None
-
-
-@pytest.mark.asyncio
-async def test_self_stake_only_policy_qualifies_without_an_owner_lock() -> None:
-    policy = QualificationConfig(
-        owner_hotkey=OWNER,
-        minimum_conviction_alpha=Decimal("0"),
-        minimum_self_stake_alpha=Decimal("250.5"),
-        effective_block=90,
-    )
-
-    result = await QualificationReader(
-        FakeChain(None, 0, self_stake_rao=250_500_000_000), policy
-    ).read(MINER, block=100)
-
-    assert result.eligible is True
-    assert result.qualified_via == "self_stake"
-
-
-@pytest.mark.asyncio
-async def test_self_stake_only_policy_reports_below_minimum() -> None:
-    policy = QualificationConfig(
-        owner_hotkey=OWNER,
-        minimum_conviction_alpha=Decimal("0"),
-        minimum_self_stake_alpha=Decimal("250.5"),
-        effective_block=90,
-    )
-
-    result = await QualificationReader(FakeChain(None, 0), policy).read(MINER, block=100)
-
-    assert result.eligible is False
-    assert result.reason == "self_stake_below_minimum"
 
 
 @pytest.mark.asyncio
