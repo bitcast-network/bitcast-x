@@ -333,6 +333,11 @@ class ValidatorService:
                                     if selection is not None:
                                         featured_tweet_ids.add(selection.tweet_id)
                                 preview_provider.set_featured_tweet_ids(featured_tweet_ids)
+                                preview_events = (
+                                    preview_reconciler.verified_events(finalized_block)
+                                    if preview_campaigns
+                                    else None
+                                )
                                 for campaign in preview_campaigns:
                                     try:
                                         preview_attributions = (
@@ -340,6 +345,7 @@ class ValidatorService:
                                                 campaign,
                                                 feed,
                                                 through_block=finalized_block,
+                                                events=preview_events,
                                                 defer_unavailable_tweets=True,
                                             )
                                         )

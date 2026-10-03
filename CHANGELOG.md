@@ -49,8 +49,17 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - Cache the miner qualification snapshot for 60 seconds and reuse a fetched campaign during direct
   submission, reducing repeated upstream reads.
+- Final and preview reconciliation load the verified batch history once per pass, grouped by
+  campaign, instead of reloading and re-hashing the whole history for every campaign. The
+  reconciler's qualification memo is bounded so long-running previews no longer grow it per cycle.
+- Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
+  token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
 
 ### Fixed
+
+- An unreadable preview cache entry (for example after an evidence model change, or a malformed
+  timestamp) is now a cache miss that is fetched again. It previously aborted the whole validator
+  cycle before weights, or stopped the process.
 
 - A pinned featured tweet no longer freezes its campaign contract or holds back settlement. Campaign
   edits are adopted until economics settle; if an edit leaves the pinned tweet ineligible, that

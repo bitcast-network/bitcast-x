@@ -26,7 +26,7 @@ from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
 from bitcast_x.validator.scoring import AttributionScorer
-from bitcast_x.validator.store import ValidatorStore
+from bitcast_x.validator.store import ValidatorStore, VerifiedBatchRecord
 from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -305,6 +305,34 @@ def miner_claim_history(
         history.append((block, next_batch, NOW + timedelta(minutes=20, seconds=sequence)))
         batch = next_batch
     return history
+
+
+@pytest.mark.asyncio
+async def test_feed_reconciliation_loads_verified_history_once(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    loads: list[int | None] = []
+    load_history = store.verified_batches
+
+    def counted(*, through_block: int | None = None) -> list[VerifiedBatchRecord]:
+        loads.append(through_block)
+        return load_history(through_block=through_block)
+
+    store.verified_batches = counted  # type: ignore[method-assign]
+    other = campaign().model_copy(
+        update={"access": campaign().access.model_copy(update={"campaign_id": "other"})}
+    )
+    snapshot = feed(campaign()).model_copy(update={"campaigns": (campaign(), other)})
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        FakeQualification(),
+    )
+
+    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+
+    assert loads == [20]
+    assert [item.campaign_id for item in results if item.accepted] == ["campaign"]
+    assert reconciler.completed_campaign_ids == {"campaign", "other"}
 
 
 @pytest.mark.asyncio

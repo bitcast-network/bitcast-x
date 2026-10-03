@@ -31,13 +31,11 @@ def test_loki_is_disabled_without_complete_configuration() -> None:
     assert logging_module._loki_handler is None
 
 
-def test_loki_has_zero_configuration_write_defaults() -> None:
-    settings = Settings()
+def test_loki_forwarding_is_disabled_by_default() -> None:
+    settings = Settings(_env_file=None)
 
-    assert settings.loki_url == "https://logs-prod-042.grafana.net"
-    assert settings.loki_username == "1693344"
-    assert settings.loki_token is not None
-    assert settings.loki_token.get_secret_value()
+    assert (settings.loki_url, settings.loki_username, settings.loki_token) == (None, None, None)
+    assert configure_loki_logging(settings, labels={"neuron": "validator"}) is False
 
 
 @pytest.mark.asyncio

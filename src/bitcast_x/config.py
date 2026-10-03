@@ -95,14 +95,10 @@ class Settings(BaseSettings):
     ops_port: int = Field(default=8096, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_format: Literal["json", "text"] = "json"
-    # Shared write-only Loki credentials keep decentralized operators zero-config.
-    # Override any value through BITCAST_X_LOKI_* or set the URL empty to disable.
-    loki_url: str | None = "https://logs-prod-042.grafana.net"
-    loki_username: str | None = "1693344"
-    loki_token: SecretStr | None = Field(
-        default=SecretStr("REPLACE_WITH_PUBLIC_WRITE_ONLY_LOKI_TOKEN"),
-        repr=False,
-    )
+    # Optional Grafana Loki forwarding: set all three BITCAST_X_LOKI_* values to enable.
+    loki_url: str | None = None
+    loki_username: str | None = None
+    loki_token: SecretStr | None = Field(default=None, repr=False)
     auto_update: bool = False
     auto_update_ref: str = "origin/main"
     auto_update_interval_seconds: float = Field(default=900.0, ge=60.0)
