@@ -42,7 +42,6 @@ class FakeClient:
         return self.result
 
 
-@pytest.mark.asyncio
 async def test_submit_commitment_uses_v11_raw_call_and_hotkey() -> None:
     client = FakeClient(SimpleNamespace(success=True))
     chain = BittensorChain(client, netuid=93)
@@ -67,7 +66,6 @@ async def test_submit_commitment_uses_v11_raw_call_and_hotkey() -> None:
     }
 
 
-@pytest.mark.asyncio
 async def test_submit_commitment_exposes_structured_chain_failure() -> None:
     result = SimpleNamespace(
         success=False,
@@ -81,7 +79,6 @@ async def test_submit_commitment_exposes_structured_chain_failure() -> None:
         await chain.submit_commitment(object(), envelope)
 
 
-@pytest.mark.asyncio
 async def test_set_weights_uses_v11_conforming_intent_and_mechanism() -> None:
     client = FakeClient(SimpleNamespace(success=True))
     chain = BittensorChain(client, netuid=93, mechanism_id=1)
@@ -123,7 +120,6 @@ def stale_nonce_result() -> SimpleNamespace:
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("results", "error", "attempts", "sleeps"),
     [
@@ -178,7 +174,6 @@ async def test_set_weights_rebuilds_only_bounded_stale_nonce_failures(
     assert sleep.await_count == sleeps
 
 
-@pytest.mark.asyncio
 async def test_last_weight_update_reads_mechanism_specific_storage() -> None:
     client = FakeClient([0, 0, 123])
     chain = BittensorChain(client, netuid=93, mechanism_id=1)
@@ -187,7 +182,6 @@ async def test_last_weight_update_reads_mechanism_specific_storage() -> None:
     assert client.queried[1] == [4096 + 93]
 
 
-@pytest.mark.asyncio
 async def test_last_weight_update_fails_closed_on_missing_uid() -> None:
     chain = BittensorChain(FakeClient([0]), netuid=93, mechanism_id=1)
     with pytest.raises(ChainOperationError, match="last-update storage"):
@@ -222,7 +216,6 @@ class QualificationClient:
         return {"conviction": {"bits": 15_000_000_000_000 << 64}}
 
 
-@pytest.mark.asyncio
 async def test_qualification_reads_aggregate_hotkey_stake_at_historical_block() -> None:
     client = QualificationClient(lock={"hotkey": "owner"})
     chain = BittensorChain(client, netuid=93)
@@ -237,7 +230,6 @@ async def test_qualification_reads_aggregate_hotkey_stake_at_historical_block() 
     )
 
 
-@pytest.mark.asyncio
 async def test_qualification_still_reads_hotkey_stake_without_a_lock() -> None:
     client = QualificationClient(lock=None)
     chain = BittensorChain(client, netuid=93)
@@ -247,7 +239,6 @@ async def test_qualification_still_reads_hotkey_stake_without_a_lock() -> None:
     assert inputs == ("coldkey", None, 0, 15_000_000_000_000)
 
 
-@pytest.mark.asyncio
 async def test_lock_only_qualification_skips_unused_hotkey_stake_read() -> None:
     client = QualificationClient(lock={"hotkey": "owner"})
     chain = BittensorChain(client, netuid=93)
@@ -258,7 +249,6 @@ async def test_lock_only_qualification_skips_unused_hotkey_stake_read() -> None:
     assert client.stake_query is None
 
 
-@pytest.mark.asyncio
 async def test_identical_successful_overwrite_resolves_last_public_block_position() -> None:
     fixture = load_duplicate_commitment_fixture()
     chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
@@ -304,7 +294,6 @@ def _remove_system_event(fixture: dict[str, Any], index: int) -> None:
     ]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("duplicate_failed", [True, False])
 async def test_only_successful_duplicate_payloads_are_compared(duplicate_failed: bool) -> None:
     fixture = load_duplicate_commitment_fixture()
@@ -323,7 +312,6 @@ async def test_only_successful_duplicate_payloads_are_compared(duplicate_failed:
             await chain.commitments_in_block(fixture["block"])
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("malformed", [False, True])
 async def test_missing_or_malformed_dispatch_evidence_is_rejected(malformed: bool) -> None:
     fixture = load_duplicate_commitment_fixture()
@@ -338,7 +326,6 @@ async def test_missing_or_malformed_dispatch_evidence_is_rejected(malformed: boo
         await chain.commitments_in_block(fixture["block"])
 
 
-@pytest.mark.asyncio
 async def test_contradictory_flat_and_nested_event_identity_is_rejected() -> None:
     fixture = load_duplicate_commitment_fixture()
     event = _system_event(fixture, 10)
@@ -349,7 +336,6 @@ async def test_contradictory_flat_and_nested_event_identity_is_rejected() -> Non
         await chain.commitments_in_block(fixture["block"])
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("mismatch", ["block", "bytes"])
 async def test_pinned_storage_mismatch_is_rejected(mismatch: str) -> None:
     fixture = load_duplicate_commitment_fixture()
@@ -364,7 +350,6 @@ async def test_pinned_storage_mismatch_is_rejected(mismatch: str) -> None:
         await chain.commitments_in_block(fixture["block"])
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("dispatch", "observed"),
     [
@@ -395,7 +380,6 @@ async def test_lone_commitment_call_is_observed_only_after_unambiguous_success(
         assert [(item.hotkey, item.extrinsic_index) for item in observations] == observed
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("unrelated_hotkey", "unrelated_netuid"),
     [
@@ -429,7 +413,6 @@ async def test_claimed_position_ignores_synthetic_unrelated_calls(
     assert observation.extrinsic_index == INCIDENT_EXTRINSIC_INDEX
 
 
-@pytest.mark.asyncio
 async def test_unregistered_commitment_signer_is_ignored_at_finalized_block() -> None:
     fixture = load_duplicate_commitment_fixture()
     fixture["hotkey"] = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"

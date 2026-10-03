@@ -160,7 +160,6 @@ def ingestor(
     )
 
 
-@pytest.mark.asyncio
 async def test_reconciles_pages_and_recovers_cursor_after_restart(tmp_path: Path) -> None:
     first, second = batches()
     path = tmp_path / "validator.sqlite3"
@@ -182,7 +181,6 @@ async def test_reconciles_pages_and_recovers_cursor_after_restart(tmp_path: Path
     assert client.closed is True
 
 
-@pytest.mark.asyncio
 async def test_manifest_gap_quarantines_run_after_last_valid_batch(tmp_path: Path) -> None:
     first, second = batches()
     store = ValidatorStore(tmp_path / "validator.sqlite3")
@@ -212,7 +210,6 @@ async def test_manifest_gap_quarantines_run_after_last_valid_batch(tmp_path: Pat
     assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
-@pytest.mark.asyncio
 async def test_latest_recommitment_cannot_hide_changed_history(tmp_path: Path) -> None:
     first, _second = batches()
     store = ValidatorStore(tmp_path / "validator.sqlite3")
@@ -241,7 +238,6 @@ async def test_latest_recommitment_cannot_hide_changed_history(tmp_path: Path) -
     assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
-@pytest.mark.asyncio
 async def test_first_history_batch_atomically_preserves_old_batches_and_starts_future(
     tmp_path: Path,
 ) -> None:
@@ -280,7 +276,6 @@ async def test_first_history_batch_atomically_preserves_old_batches_and_starts_f
     )
 
 
-@pytest.mark.asyncio
 async def test_history_boundary_converges_validators_with_different_old_prefixes(
     tmp_path: Path,
 ) -> None:
@@ -343,7 +338,6 @@ def test_closed_history_cannot_be_reactivated(tmp_path: Path) -> None:
         store.persist_verified(reused, observation(reused, 12))
 
 
-@pytest.mark.asyncio
 async def test_new_history_rejects_boundary_before_verified_history(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     old, _ = batches()
@@ -368,7 +362,6 @@ async def test_new_history_rejects_boundary_before_verified_history(tmp_path: Pa
     assert result.error == "new history must begin after verified history"
 
 
-@pytest.mark.asyncio
 async def test_recommitted_sequence_without_exact_batch_proof_is_quarantined(
     tmp_path: Path,
 ) -> None:
@@ -401,7 +394,6 @@ async def test_recommitted_sequence_without_exact_batch_proof_is_quarantined(
     assert store.history_cursor(MINER)[1:] == (0, None)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "message"),
     [
@@ -439,7 +431,6 @@ def test_verified_positions_must_increase_with_batch_sequence(tmp_path: Path) ->
     assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
-@pytest.mark.asyncio
 async def test_temporarily_offline_miner_heals_on_later_poll(
     tmp_path: Path,
 ) -> None:
@@ -467,7 +458,6 @@ async def test_temporarily_offline_miner_heals_on_later_poll(
     assert restarted.history_cursor(MINER)[1:] == (2, second.batch_hash)
 
 
-@pytest.mark.asyncio
 async def test_one_incompatible_miner_isolated_from_other_histories(tmp_path: Path) -> None:
     first, _second = batches()
 

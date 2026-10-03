@@ -137,7 +137,6 @@ def test_retired_prompt_versions_are_unavailable(version: int) -> None:
         )
 
 
-@pytest.mark.asyncio
 async def test_optimistic_checks_short_circuit_and_replay_from_cache() -> None:
     requests = 0
 
@@ -160,7 +159,6 @@ async def test_optimistic_checks_short_circuit_and_replay_from_cache() -> None:
     assert len(cache.values) == 2
 
 
-@pytest.mark.asyncio
 async def test_concurrent_identical_prompts_make_one_provider_request() -> None:
     requests = 0
 
@@ -187,7 +185,6 @@ async def test_concurrent_identical_prompts_make_one_provider_request() -> None:
         pytest.param(3, id="every-check-unavailable"),
     ],
 )
-@pytest.mark.asyncio
 async def test_unavailable_checks_keep_campaign_unreconciled(failed_requests: int) -> None:
     # One missing optimistic check might have passed, so the remaining NO
     # verdicts cannot be frozen as a rejection; total failure is never one either.

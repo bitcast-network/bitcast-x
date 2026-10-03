@@ -116,7 +116,6 @@ def first_page_body() -> bytes:
     return BatchPageRequest(after_sequence=0).model_dump_json().encode()
 
 
-@pytest.mark.asyncio
 async def test_signed_batch_page_round_trip(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
@@ -142,7 +141,6 @@ async def test_signed_batch_page_round_trip(tmp_path: Path) -> None:
     assert response.batches[0].position.block == 10
 
 
-@pytest.mark.asyncio
 async def test_v2_overlap_endpoint_strips_positions(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
@@ -163,7 +161,6 @@ async def test_v2_overlap_endpoint_strips_positions(tmp_path: Path) -> None:
     assert response.json()["batches"] == [{"sequence": 1}]
 
 
-@pytest.mark.asyncio
 async def test_replayed_signed_request_is_rejected(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
@@ -180,7 +177,6 @@ async def test_replayed_signed_request_is_rejected(tmp_path: Path) -> None:
     assert replay.json() == {"detail": "invalid Bittensor authentication"}
 
 
-@pytest.mark.asyncio
 async def test_wrong_receiver_is_rejected(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     other_miner = create_wallet(tmp_path, "other-miner")
@@ -193,7 +189,6 @@ async def test_wrong_receiver_is_rejected(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-@pytest.mark.asyncio
 async def test_authenticated_validator_without_authorization_is_forbidden(
     tmp_path: Path,
 ) -> None:
@@ -218,7 +213,6 @@ async def test_authenticated_validator_without_authorization_is_forbidden(
     assert checked == [validator.hotkey.ss58_address]
 
 
-@pytest.mark.asyncio
 async def test_malformed_content_length_is_rejected_without_server_error(tmp_path: Path) -> None:
     app = make_app(create_wallet(tmp_path, "miner"))
     scope = {
@@ -252,7 +246,6 @@ async def test_malformed_content_length_is_rejected_without_server_error(tmp_pat
     assert start["status"] == 400
 
 
-@pytest.mark.asyncio
 async def test_miner_readiness_waits_for_endpoint_advertisement(tmp_path: Path) -> None:
     advertised = False
 
@@ -271,7 +264,6 @@ async def test_miner_readiness_waits_for_endpoint_advertisement(tmp_path: Path) 
     assert health.json()["version"] == __version__
 
 
-@pytest.mark.asyncio
 async def test_oversized_request_is_rejected_before_authentication(tmp_path: Path) -> None:
     async def authorize(_hotkey: str) -> bool:
         raise AssertionError("authorization must not run")
@@ -287,7 +279,6 @@ async def test_oversized_request_is_rejected_before_authentication(tmp_path: Pat
     assert response.status_code == 413
 
 
-@pytest.mark.asyncio
 async def test_oversized_miner_response_is_rejected_without_parsing(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
@@ -319,7 +310,6 @@ def status_of(result: BatchPageResponse | BaseException) -> int:
     return 200
 
 
-@pytest.mark.asyncio
 async def test_concurrent_signed_traffic_is_rate_limited_per_validator_hotkey(
     tmp_path: Path,
 ) -> None:

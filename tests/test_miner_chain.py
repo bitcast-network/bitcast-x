@@ -94,7 +94,6 @@ def make_submitter() -> tuple[BittensorCommitmentSubmitter, FakeChain, Commitmen
     return submitter, chain, envelope
 
 
-@pytest.mark.asyncio
 async def test_reads_live_capacity_budget() -> None:
     submitter, _chain, envelope = make_submitter()
 
@@ -105,7 +104,6 @@ async def test_reads_live_capacity_budget() -> None:
     assert budget.can_commit is True
 
 
-@pytest.mark.asyncio
 async def test_latest_uses_shared_duplicate_commitment_resolution() -> None:
     fixture = load_duplicate_commitment_fixture()
     chain = BittensorChain(FixtureClient(fixture), netuid=fixture["netuid"])
@@ -124,7 +122,6 @@ async def test_latest_uses_shared_duplicate_commitment_resolution() -> None:
     assert latest.stored_envelope.hex() == INCIDENT_PAYLOAD_HEX
 
 
-@pytest.mark.asyncio
 async def test_submit_rereads_finalized_storage() -> None:
     submitter, chain, envelope = make_submitter()
     # Storage holding other bytes tells a re-read from an echo of the submitted
@@ -139,7 +136,6 @@ async def test_submit_rereads_finalized_storage() -> None:
     assert finalized.stored_envelope == stored
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "resolved",
     [

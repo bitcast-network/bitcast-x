@@ -33,7 +33,6 @@ class Chain:
         return self._metagraph
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("metagraph", "permitted"),
     [
@@ -51,7 +50,6 @@ async def test_only_permitted_validators_are_authorized(
     assert await is_permitted_validator(chain, VALIDATOR) is permitted
 
 
-@pytest.mark.asyncio
 async def test_commit_loop_retries_after_failure_until_stopped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

@@ -261,7 +261,6 @@ def campaign_feed(now: datetime, *, exclusive_miner_hotkey: str | None = None) -
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("exclusive", [False, True], ids=["open", "exclusive"])
 async def test_tweet_flows_from_miner_api_to_published_reward(
     tmp_path: Path,

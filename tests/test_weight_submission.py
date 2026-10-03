@@ -144,7 +144,6 @@ def test_preclaim_economics_fail_closed_without_an_effective_threshold(
         check()
 
 
-@pytest.mark.asyncio
 async def test_submits_exact_vector_once_chain_cadence_is_due() -> None:
     chain = Chain(last_update=100)
     wallet = _wallet()
@@ -156,7 +155,6 @@ async def test_submits_exact_vector_once_chain_cadence_is_due() -> None:
     assert chain.submissions == [(wallet, weights, 3)]
 
 
-@pytest.mark.asyncio
 async def test_skips_until_chain_cadence_is_strictly_due() -> None:
     chain = Chain(last_update=100)
     submitted = await submit_weights_if_due(  # type: ignore[arg-type]
@@ -166,7 +164,6 @@ async def test_skips_until_chain_cadence_is_strictly_due() -> None:
     assert chain.submissions == []
 
 
-@pytest.mark.asyncio
 async def test_enabled_submission_fails_closed_for_unregistered_validator() -> None:
     with pytest.raises(ChainOperationError, match="not registered"):
         await submit_weights_if_due(  # type: ignore[arg-type]

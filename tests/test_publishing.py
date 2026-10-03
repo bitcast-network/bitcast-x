@@ -186,7 +186,6 @@ def test_signed_envelope_matches_frozen_v2_message() -> None:
     assert signed["signer"] == signed["vali_hotkey"] == MINER
 
 
-@pytest.mark.asyncio
 async def test_publisher_gzips_large_payload_and_requires_accepted_status() -> None:
     captured: dict[str, Any] = {}
 
@@ -221,7 +220,6 @@ async def test_publisher_gzips_large_payload_and_requires_accepted_status() -> N
         pytest.param(202, b"accepted", id="202-malformed-json"),
     ],
 )
-@pytest.mark.asyncio
 async def test_publisher_reports_failure_unless_ingestion_accepts(status: int, body: bytes) -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(status, content=body)
@@ -363,7 +361,6 @@ def test_payload_publishes_protocol_rejections_without_fabricating_tweet_rows() 
     }
 
 
-@pytest.mark.asyncio
 async def test_preview_publishes_zero_dollar_bonuses_and_omits_unscored_acceptances(
     tmp_path: Path,
 ) -> None:
@@ -405,7 +402,6 @@ async def test_preview_publishes_zero_dollar_bonuses_and_omits_unscored_acceptan
     assert payload["summary"]["uid_usd_targets"] == {}  # type: ignore[index]
 
 
-@pytest.mark.asyncio
 async def test_preview_is_not_republished_until_its_semantic_payload_changes(
     tmp_path: Path,
 ) -> None:
@@ -423,7 +419,6 @@ async def test_preview_is_not_republished_until_its_semantic_payload_changes(
     assert data_publisher.run_ids[0] != data_publisher.run_ids[1]
 
 
-@pytest.mark.asyncio
 async def test_preview_pins_featured_tweet_and_never_replaces_it(
     tmp_path: Path,
 ) -> None:
@@ -467,7 +462,6 @@ async def test_preview_pins_featured_tweet_and_never_replaces_it(
     assert restarted_data_publisher.payloads[1]["featured_tweet"] == first_payload["featured_tweet"]
 
 
-@pytest.mark.asyncio
 async def test_failed_preview_publication_retries_same_payload_after_one_minute(
     tmp_path: Path,
 ) -> None:

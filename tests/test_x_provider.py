@@ -23,7 +23,6 @@ async def desearch(handler: Handler, **options: Any) -> AsyncIterator[DesearchPr
         yield DesearchProvider("secret", client=client, **options)
 
 
-@pytest.mark.asyncio
 async def test_desearch_maps_immutable_author_and_v2_scoring_fields() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.params["id"] == "123"
@@ -57,7 +56,6 @@ async def test_desearch_maps_immutable_author_and_v2_scoring_fields() -> None:
     assert result.tweet.views_count == 100
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("created_at", "expected"),
     [
@@ -87,7 +85,6 @@ async def test_desearch_parses_twitter_timestamps_starting_with_t(
     assert result.tweet.created_at == expected
 
 
-@pytest.mark.asyncio
 async def test_missing_author_id_is_not_accepted_as_evidence() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -107,7 +104,6 @@ async def test_missing_author_id_is_not_accepted_as_evidence() -> None:
     assert result.tweet is None
 
 
-@pytest.mark.asyncio
 async def test_404_is_authoritative_absence_but_429_is_unavailable() -> None:
     statuses = iter([404, 429])
 
@@ -122,7 +118,6 @@ async def test_404_is_authoritative_absence_but_429_is_unavailable() -> None:
     assert unavailable.provider_available is False and unavailable.tweet is None
 
 
-@pytest.mark.asyncio
 async def test_exhausted_failure_is_cached_for_ttl_and_success_is_not_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -150,7 +145,6 @@ async def test_exhausted_failure_is_cached_for_ttl_and_success_is_not_cached(
     assert requests == 5
 
 
-@pytest.mark.asyncio
 async def test_negative_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(x_provider, "_NEGATIVE_CACHE_MAX", 8)
 
@@ -164,7 +158,6 @@ async def test_negative_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> Non
     assert list(provider._negative) == [str(index) for index in range(4, 12)]
 
 
-@pytest.mark.asyncio
 async def test_quotes_override_retweets_and_false_quote_search_hits_are_ignored() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/retweeters"):

@@ -123,7 +123,6 @@ async def set_localnet_weights_after_rate_limit(
     raise AssertionError("localnet weight rate limit did not clear within 45 seconds")
 
 
-@pytest.mark.asyncio
 async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
@@ -242,7 +241,6 @@ async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) ->
         await server_task
 
 
-@pytest.mark.asyncio
 async def test_real_creator_journey_survives_restart_and_reaches_attribution(
     tmp_path: Path,
 ) -> None:

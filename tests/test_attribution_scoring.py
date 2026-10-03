@@ -146,7 +146,6 @@ def feed() -> CampaignFeed:
     )
 
 
-@pytest.mark.asyncio
 async def test_uses_max_tweet_time_and_current_influence_and_excludes_self() -> None:
     result = (await AttributionScorer(FakeX()).score(feed(), [accepted("999")]))[0]
 
@@ -155,7 +154,6 @@ async def test_uses_max_tweet_time_and_current_influence_and_excludes_self() -> 
     assert [detail.username for detail in result.details] == ["bob", "carol"]
 
 
-@pytest.mark.asyncio
 async def test_same_tweet_across_campaigns_uses_one_frozen_provider_observation() -> None:
     snapshot = feed()
     second = snapshot.campaigns[0].model_copy(
@@ -172,7 +170,6 @@ async def test_same_tweet_across_campaigns_uses_one_frozen_provider_observation(
     assert provider.engagement_fetches == 1
 
 
-@pytest.mark.asyncio
 async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     snapshot = feed()
     old_map = snapshot.ecosystem_maps[0].model_copy(update={"eligible_creator_x_ids": ("1", "2")})
@@ -207,7 +204,6 @@ async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
         ),
     ],
 )
-@pytest.mark.asyncio
 async def test_preview_scoring_defers_only_the_tweet_with_unavailable_evidence(
     provider: FakeX,
     brief_filter: PassingBriefFilter | None,

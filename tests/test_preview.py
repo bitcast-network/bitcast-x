@@ -70,7 +70,6 @@ def test_preview_refresh_interval_uses_age_tiers(age: timedelta, expected: timed
     assert _refresh_interval(tweet, now=NOW) == expected
 
 
-@pytest.mark.asyncio
 async def test_preview_evidence_is_cached_then_refreshed_and_merged(tmp_path: Path) -> None:
     current = [NOW]
     upstream = Provider()
@@ -100,7 +99,6 @@ async def test_preview_evidence_is_cached_then_refreshed_and_merged(tmp_path: Pa
     assert refreshed_engagements.engagements == {"alice": "quote", "bob": "quote"}
 
 
-@pytest.mark.asyncio
 async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_other_old_tweets(
     tmp_path: Path,
 ) -> None:
@@ -131,7 +129,6 @@ async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_othe
     assert upstream.engagement_tweet_ids == ["101", "202", "101"]
 
 
-@pytest.mark.asyncio
 async def test_preview_outage_reuses_evidence_and_retries_once_per_minute(tmp_path: Path) -> None:
     current = [NOW]
     upstream = Provider()
@@ -157,7 +154,6 @@ async def test_preview_outage_reuses_evidence_and_retries_once_per_minute(tmp_pa
     assert upstream.tweet_fetches == 3
 
 
-@pytest.mark.asyncio
 async def test_unreadable_preview_entries_are_fetched_again(tmp_path: Path) -> None:
     store = PreviewStore(tmp_path / "preview-cache")
     # Entries written by another release: a model field this release does not

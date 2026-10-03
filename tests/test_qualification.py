@@ -113,7 +113,6 @@ def test_non_finney_network_retains_explicit_qualification_schedule() -> None:
     assert policy == explicit
 
 
-@pytest.mark.asyncio
 async def test_qualifies_exact_threshold_without_float_rounding() -> None:
     result = await QualificationReader(FakeChain(OWNER, 250_500_000_000), config()).read(
         MINER, block=100
@@ -128,7 +127,6 @@ async def test_qualifies_exact_threshold_without_float_rounding() -> None:
     assert result.required_self_stake_alpha is None
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("minimum_conviction_alpha", "chain", "expected"),
     [
@@ -181,7 +179,6 @@ async def test_aggregate_miner_hotkey_self_stake_qualification(
     assert result.required_self_stake_alpha == Decimal("250.5")
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("chain", "reason"),
     [
@@ -197,7 +194,6 @@ async def test_rejects_each_failed_qualification_condition(chain: FakeChain, rea
     assert result.reason == reason
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "chain",
     [
@@ -219,7 +215,6 @@ async def test_zero_threshold_disables_lock_target_and_owner_checks(chain: FakeC
     assert result.qualified_via is None
 
 
-@pytest.mark.asyncio
 async def test_historical_block_selects_immutable_threshold_version() -> None:
     schedule = QualificationSchedule(
         configurations=(

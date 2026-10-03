@@ -39,7 +39,6 @@ def campaign(campaign_id: str) -> CampaignRecord:
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case", ["empty", "preclaim", "pending_preclaim", "invalid_feed", "preview"]
 )

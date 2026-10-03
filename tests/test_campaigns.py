@@ -205,7 +205,6 @@ def test_campaign_rank_eligibility_unions_top_n_across_overlapping_maps() -> Non
     assert eligible_creator_ids_for_campaign(snapshot, campaign) == frozenset({"10", "20"})
 
 
-@pytest.mark.asyncio
 async def test_rejects_oversized_snapshot_without_replacing_cache(tmp_path: Path) -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"x" * 101)
@@ -220,7 +219,6 @@ async def test_rejects_oversized_snapshot_without_replacing_cache(tmp_path: Path
     assert path.exists() is False
 
 
-@pytest.mark.asyncio
 async def test_retired_v3_feed_url_reads_the_v4_manifest(tmp_path: Path) -> None:
     requests: list[str] = []
 
@@ -238,7 +236,6 @@ async def test_retired_v3_feed_url_reads_the_v4_manifest(tmp_path: Path) -> None
     assert requests == ["/api/v2/public/x/campaign-manifest-v4"]
 
 
-@pytest.mark.asyncio
 async def test_split_feed_downloads_each_map_once_then_uses_digest_cache(tmp_path: Path) -> None:
     manifest = _manifest()
     calls = {"manifest": 0, "map": 0}
@@ -274,7 +271,6 @@ async def test_split_feed_downloads_each_map_once_then_uses_digest_cache(tmp_pat
     }
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("ledger_missing", (False, True), ids=("ledger", "pre-ledger-cache"))
 async def test_rejects_changed_digest_for_an_accepted_ecosystem_run(
     tmp_path: Path, ledger_missing: bool
@@ -319,7 +315,6 @@ async def test_rejects_changed_digest_for_an_accepted_ecosystem_run(
     ]
 
 
-@pytest.mark.asyncio
 async def test_accepts_and_records_a_new_ecosystem_run(tmp_path: Path) -> None:
     first_manifest = _manifest()
     next_manifest = deepcopy(first_manifest)
@@ -349,7 +344,6 @@ async def test_accepts_and_records_a_new_ecosystem_run(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.asyncio
 async def test_split_feed_rejects_map_whose_content_does_not_match_digest(tmp_path: Path) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("campaign-manifest"):
@@ -365,7 +359,6 @@ async def test_split_feed_rejects_map_whose_content_does_not_match_digest(tmp_pa
     assert (tmp_path / "feed.json.map-bindings.json").exists() is False
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stale",
     [
@@ -394,7 +387,6 @@ async def test_does_not_reuse_an_etag_from_a_stale_cache(
     assert json.loads(path.read_text())["url"] == str(client.url)
 
 
-@pytest.mark.asyncio
 async def test_unreadable_map_cache_is_downloaded_again(tmp_path: Path) -> None:
     manifest = _manifest()
     digest = manifest["ecosystem_maps"][0]["digest"]  # type: ignore[index]
@@ -467,7 +459,6 @@ def test_rejects_ambiguous_or_unsupported_consensus_feed_values(
         CampaignFeed.model_validate(payload)
 
 
-@pytest.mark.asyncio
 async def test_campaigns_command_reads_maps_larger_than_the_protocol_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

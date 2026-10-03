@@ -389,7 +389,6 @@ async def run_rewards(
     return RewardRun(attributions, coordinator, scored, weights, floors)
 
 
-@pytest.mark.asyncio
 async def test_feed_reconciliation_loads_verified_history_once(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     loads: list[int | None] = []
@@ -417,7 +416,6 @@ async def test_feed_reconciliation_loads_verified_history_once(tmp_path: Path) -
     assert reconciler.completed_campaign_ids == {"campaign", "other"}
 
 
-@pytest.mark.asyncio
 async def test_open_campaign_attributes_independently_fetched_ordinary_edit(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     qualification = FakeQualification()
@@ -437,7 +435,6 @@ async def test_open_campaign_attributes_independently_fetched_ordinary_edit(tmp_
     assert qualification.calls == [10, 20]
 
 
-@pytest.mark.asyncio
 async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
     tmp_path: Path,
 ) -> None:
@@ -489,7 +486,6 @@ async def test_submission_cannot_reuse_a_claim_from_before_history_resume(
     assert results[0].reason is AttributionReason.CLAIM_NOT_ACTIVE
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("campaign_updates", "public_only_text", "quoted_tweet_id"),
     [
@@ -541,7 +537,6 @@ async def test_public_campaign_material_alone_does_not_prove_draft_access(
     assert result.winner_score == pytest.approx(0.55)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("eligible_blocks", "expected_calls"),
     [({20}, [10]), ({10}, [10, 20])],
@@ -569,7 +564,6 @@ async def test_open_claim_must_be_qualified_at_commitment_and_scoring_close(
     assert qualification.calls == expected_calls
 
 
-@pytest.mark.asyncio
 async def test_open_preview_can_recover_at_close_only_if_claim_was_initially_qualified(
     tmp_path: Path,
 ) -> None:
@@ -597,7 +591,6 @@ async def test_open_preview_can_recover_at_close_only_if_claim_was_initially_qua
     assert qualification.calls == [10, 15, 20]
 
 
-@pytest.mark.asyncio
 async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: Path) -> None:
     store = submission_only_history(tmp_path / "validator.sqlite3", claim_id="04" * 16)
     reconciler = CampaignReconciler(
@@ -612,7 +605,6 @@ async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: P
     assert result.reason.value == "claim_not_active"
 
 
-@pytest.mark.asyncio
 async def test_eligible_tweet_author_must_match_the_open_claim(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
@@ -641,7 +633,6 @@ async def test_eligible_tweet_author_must_match_the_open_claim(tmp_path: Path) -
     assert result.reason.value == "author_mismatch"
 
 
-@pytest.mark.asyncio
 async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path: Path) -> None:
     store = submission_only_history(tmp_path / "validator.sqlite3")
     record = campaign(exclusive=MINER)
@@ -660,7 +651,6 @@ async def test_exclusive_campaign_failure_preserves_submission_identity(tmp_path
     assert result.submission_id == "03" * 16
 
 
-@pytest.mark.asyncio
 async def test_late_submission_is_audited_without_fetching_x(tmp_path: Path) -> None:
     store = submission_only_history(
         tmp_path / "validator.sqlite3",
@@ -678,7 +668,6 @@ async def test_late_submission_is_audited_without_fetching_x(tmp_path: Path) -> 
     assert result.submission_id == "03" * 16
 
 
-@pytest.mark.asyncio
 async def test_campaign_freezes_only_after_its_reconciliation_window(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"emission_start_block": 30, "emission_end_block": 40})
@@ -696,7 +685,6 @@ async def test_campaign_freezes_only_after_its_reconciliation_window(tmp_path: P
     assert at_emission[0].accepted is True
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
         "exclusive",
@@ -793,7 +781,6 @@ async def test_exclusive_campaign_submitter_identity(
     assert qualification.calls == qualification_calls
 
 
-@pytest.mark.asyncio
 async def test_exclusive_submission_unqualified_at_commitment_cannot_be_rescued(
     tmp_path: Path,
 ) -> None:
@@ -816,7 +803,6 @@ async def test_exclusive_submission_unqualified_at_commitment_cannot_be_rescued(
     assert qualification.calls == [10]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("victim_blocks", "attacker_blocks"),
     [
@@ -868,7 +854,6 @@ async def test_claim_ids_are_namespaced_by_miner_across_order_and_retry(
     assert result.submission_id == "05" * 16
 
 
-@pytest.mark.asyncio
 async def test_consuming_claim_id_for_one_miner_does_not_consume_another_miners_claim(
     tmp_path: Path,
 ) -> None:
@@ -925,7 +910,6 @@ def claim_event(reveal: DraftReveal) -> ClaimEvent:
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("referenced_claim", "accepted"),
     [(0, False), (1, True)],
@@ -993,7 +977,6 @@ async def test_sixth_claim_evicts_the_oldest_from_the_active_set(
         assert result.claim_id is None
 
 
-@pytest.mark.asyncio
 async def test_consumed_claim_cannot_win_a_second_tweet(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     reveal = DraftReveal(claim_id="01" * 16, draft=tweet().text, nonce="02" * 32)
@@ -1124,7 +1107,6 @@ def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
     assert "rejected campaign mutation" not in caplog.text
 
 
-@pytest.mark.asyncio
 async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
@@ -1151,7 +1133,6 @@ async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.asyncio
 async def test_authoritative_tweet_absence_freezes_a_rejection(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
@@ -1207,7 +1188,6 @@ def _unavailable_998_provider() -> FakeX:
     )
 
 
-@pytest.mark.asyncio
 async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: Path) -> None:
     store = two_tweet_history(tmp_path / "validator.sqlite3")
     snapshot = feed(_exclusive_final_campaign("campaign"), influence=10.0)
@@ -1229,7 +1209,6 @@ async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: P
     assert run.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
 
 
-@pytest.mark.asyncio
 async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
@@ -1282,7 +1261,6 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
     assert campaign_a_decision["reward_status"] == "pending"
 
 
-@pytest.mark.asyncio
 async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
@@ -1310,7 +1288,6 @@ async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> No
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
 
 
-@pytest.mark.asyncio
 async def test_eligibility_remains_after_creator_drops_below_rank_cutoff(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"max_members": 1})
@@ -1358,7 +1335,6 @@ async def test_eligibility_remains_after_creator_drops_below_rank_cutoff(tmp_pat
     assert result.accepted is True
 
 
-@pytest.mark.asyncio
 async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Path) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign().model_copy(update={"max_members": 1})
@@ -1390,7 +1366,6 @@ async def test_rank_cutoff_rejects_explicit_map_member_below_top_n(tmp_path: Pat
     assert result.reason is AttributionReason.CREATOR_NOT_ELIGIBLE_FOR_CAMPAIGN
 
 
-@pytest.mark.asyncio
 async def test_missing_historical_map_leaves_tweet_pending_in_completed_campaign(
     tmp_path: Path,
 ) -> None:
@@ -1429,7 +1404,6 @@ async def test_missing_historical_map_leaves_tweet_pending_in_completed_campaign
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("history_update", "campaign_update", "tweet_update", "expected_reason"),
     [
@@ -1520,7 +1494,6 @@ async def test_v2_content_prefilters_reject_ineligible_submissions(
     assert result.reason is expected_reason
 
 
-@pytest.mark.asyncio
 async def test_campaign_freeze_survives_feed_snapshot_rotation_and_rejects_mutation(
     tmp_path: Path,
 ) -> None:
@@ -1558,7 +1531,6 @@ async def test_campaign_freeze_survives_feed_snapshot_rotation_and_rejects_mutat
         )
 
 
-@pytest.mark.asyncio
 async def test_independent_restarted_validators_produce_identical_full_shadow_reports(
     tmp_path: Path,
 ) -> None:

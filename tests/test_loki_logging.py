@@ -36,7 +36,6 @@ def test_loki_is_disabled_without_complete_configuration(configured: dict[str, s
     assert logging_module._loki_handler is None
 
 
-@pytest.mark.asyncio
 async def test_loki_batches_labels_and_pushes_records() -> None:
     handler = LokiHandler(
         url="https://example.test/",
@@ -74,7 +73,6 @@ async def test_loki_batches_labels_and_pushes_records() -> None:
     assert stream["values"][0][1] == "miner unavailable"
 
 
-@pytest.mark.asyncio
 async def test_loki_network_failure_never_escapes() -> None:
     handler = LokiHandler(
         url="https://example.test",
@@ -112,7 +110,6 @@ def test_loki_does_not_buffer_its_own_http_push_log() -> None:
     assert not handler._buffer
 
 
-@pytest.mark.asyncio
 async def test_configure_and_shutdown_attach_to_root_logger() -> None:
     settings = Settings(
         loki_url="https://example.test",
@@ -131,7 +128,6 @@ async def test_configure_and_shutdown_attach_to_root_logger() -> None:
         assert logging_module._loki_handler is None
 
 
-@pytest.mark.asyncio
 async def test_run_miner_does_not_enable_loki() -> None:
     settings = Settings(
         _env_file=None,

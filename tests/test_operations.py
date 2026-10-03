@@ -24,7 +24,6 @@ from bitcast_x.state import backup_state, inspect_state, shadow_report
 from bitcast_x.validator.store import ValidatorStore
 
 
-@pytest.mark.asyncio
 async def test_resume_history_command_needs_no_chain_connection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -45,7 +44,6 @@ async def test_resume_history_command_needs_no_chain_connection(
     assert len(str(result["history_id"])) == 64
 
 
-@pytest.mark.asyncio
 async def test_validator_readiness_and_metrics_have_fixed_cardinality() -> None:
     health = RuntimeHealth.create()
     app = create_ops_app(health)

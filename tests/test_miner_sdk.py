@@ -72,7 +72,6 @@ def build_sdk(
     return MinerSdk(engine)
 
 
-@pytest.mark.asyncio
 async def test_claim_becomes_safe_only_after_finalized_batch(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     sdk = build_sdk(tmp_path / "miner.db", submitter)
@@ -92,7 +91,6 @@ async def test_claim_becomes_safe_only_after_finalized_batch(tmp_path: Path) -> 
     assert submitter.submissions == 1
 
 
-@pytest.mark.asyncio
 async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     tmp_path: Path,
 ) -> None:
@@ -122,7 +120,6 @@ async def test_history_resume_abandons_old_pending_work_and_links_future_batch(
     assert [item.batch["sequence"] for item in page.batches] == [1]
 
 
-@pytest.mark.asyncio
 async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     sdk = build_sdk(tmp_path / "miner.db", submitter)
@@ -172,7 +169,6 @@ async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path
         sdk.record_submission_result(submission_id, EventStatus.REJECTED)
 
 
-@pytest.mark.asyncio
 async def test_page_truncates_at_complete_batch_before_response_byte_limit(
     tmp_path: Path,
 ) -> None:
@@ -200,7 +196,6 @@ async def test_page_truncates_at_complete_batch_before_response_byte_limit(
     assert len(bounded.model_dump_json().encode()) <= sdk.engine.policy.max_page_bytes
 
 
-@pytest.mark.asyncio
 async def test_page_is_pinned_to_validator_snapshot_sequence(tmp_path: Path) -> None:
     sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
     for creator in ("123", "456"):
@@ -225,7 +220,6 @@ class LostResponseSubmitter(FakeSubmitter):
         raise ChainOperationError("connection lost after finalization")
 
 
-@pytest.mark.asyncio
 async def test_restart_recovers_prepared_batch_without_duplicate_commit(tmp_path: Path) -> None:
     database = tmp_path / "miner.db"
     submitter = LostResponseSubmitter()
@@ -253,7 +247,6 @@ async def test_restart_recovers_prepared_batch_without_duplicate_commit(tmp_path
     ]
 
 
-@pytest.mark.asyncio
 async def test_capacity_exhaustion_preserves_prepared_batch(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     submitter.available = False
@@ -387,7 +380,6 @@ def test_submission_identity_is_idempotent_across_restart_and_includes_the_creat
     assert {item["creator_x_id"] for item in restarted.submissions()} == {"123", "456"}
 
 
-@pytest.mark.asyncio
 async def test_batch_limit_covers_complete_payload_and_private_reveal(tmp_path: Path) -> None:
     store = MinerStore(tmp_path / "miner.db")
     engine = MinerEngine(
@@ -415,7 +407,6 @@ async def test_batch_limit_covers_complete_payload_and_private_reveal(tmp_path: 
         await engine.commit_ready(force=True)
 
 
-@pytest.mark.asyncio
 async def test_sixth_finalized_claim_fifo_evicts_first(tmp_path: Path) -> None:
     sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
     claim_ids: list[str] = []
@@ -497,7 +488,6 @@ def _linear_selection(engine: MinerEngine, queued: list[ProtocolEvent]) -> list[
     return selected
 
 
-@pytest.mark.asyncio
 async def test_batch_selection_matches_a_linear_scan_at_every_byte_boundary(
     tmp_path: Path,
 ) -> None:
@@ -520,7 +510,6 @@ async def test_batch_selection_matches_a_linear_scan_at_every_byte_boundary(
             assert engine._select_events(queued) == _linear_selection(engine, queued)
 
 
-@pytest.mark.asyncio
 async def test_batch_selection_fails_only_on_an_unbuildable_event_it_reaches(
     tmp_path: Path,
 ) -> None:
@@ -538,7 +527,6 @@ async def test_batch_selection_fails_only_on_an_unbuildable_event_it_reaches(
         engine._select_events(queued)
 
 
-@pytest.mark.asyncio
 async def test_prepared_batches_keep_their_pinned_bytes(tmp_path: Path) -> None:
     engine = await _engine_with_mixed_queue(tmp_path / "miner.db")
     engine.policy = BatchPolicy(max_batch_bytes=1_161)
