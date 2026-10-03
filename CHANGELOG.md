@@ -78,6 +78,17 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   empty strings), and the LLM endpoint and model table. The env templates no longer pin the
   consensus-relevant LLM check settings or the weight cadence and version key; existing `.env`
   files that set them keep their values, so remove those lines to follow release defaults.
+- `run-miner-api` no longer requires `BITCAST_X_CAMPAIGN_FEED_URL`; only `bitcast-x campaigns` reads
+  the campaign feed. Miner claims fetch the central campaign once per request.
+- Miner submission no longer decodes every stored submission, and result polling skips the central
+  API when nothing is pending. Batch selection uses one store read and a binary search instead of
+  one write transaction per candidate; batch bytes are unchanged. Receipt listings parse each batch
+  once and read referenced claims in one query.
+- Miner API error codes are typed instead of derived from message text; codes, statuses and
+  messages are unchanged. `run-miner` and `run-miner-api` share one validator-permit check,
+  protocol app and commitment loop. The miner store uses the shared SQLite helpers.
+- `config/miner.env.example` states the enforced 64-character minimum for
+  `BITCAST_X_MINER_API_TOKEN`.
 - Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
   token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
 

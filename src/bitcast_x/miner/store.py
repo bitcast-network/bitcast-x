@@ -5,8 +5,8 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -24,7 +24,7 @@ from bitcast_x.protocol import (
     ProtocolEvent,
     SubmissionEvent,
 )
-from bitcast_x.sqlite import apply_migrations
+from bitcast_x.sqlite import apply_migrations, session, transaction
 
 _EVENT_ADAPTER: TypeAdapter[ProtocolEvent] = TypeAdapter(ProtocolEvent)
 
@@ -97,28 +97,11 @@ class MinerStore:
         self._lock = threading.RLock()
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        return connection
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return session(self.path)
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.commit()
-            except BaseException:
-                if connection.in_transaction:
-                    connection.rollback()
-                raise
-            finally:
-                connection.close()
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return transaction(self.path, self._lock)
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
