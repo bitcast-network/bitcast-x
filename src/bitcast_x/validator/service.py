@@ -3,7 +3,8 @@
 import asyncio
 import logging
 import time
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -12,7 +13,7 @@ from bittensor.result import BittensorError
 
 from bitcast_x import __version__
 from bitcast_x.brief_filter import LlmBriefFilter
-from bitcast_x.campaigns import CampaignFeedClient
+from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient
 from bitcast_x.chain import BittensorChain
 from bitcast_x.config import Settings
 from bitcast_x.errors import (
@@ -24,6 +25,7 @@ from bitcast_x.errors import (
 from bitcast_x.logging import configure_loki_logging, shutdown_loki_logging
 from bitcast_x.miner.service import load_wallet
 from bitcast_x.ops import RuntimeHealth, create_ops_app
+from bitcast_x.protocol import AttributionResult
 from bitcast_x.publishing import DataPublisher
 from bitcast_x.qualification import (
     QualificationReader,
@@ -50,19 +52,7 @@ def ensure_production_outputs_configured(settings: Settings) -> None:
 
     if not (settings.enable_data_publish or settings.enable_weight_submission):
         return
-    missing: list[str] = []
-    if settings.campaign_feed_url is None:
-        missing.append("BITCAST_X_CAMPAIGN_FEED_URL")
-    if not settings.desearch_api_key:
-        missing.append("BITCAST_X_DESEARCH_API_KEY")
-    if not settings.llm_api_key:
-        missing.append(
-            "BITCAST_X_CHUTES_API_KEY"
-            if settings.llm_provider == "chutes"
-            else "BITCAST_X_OPENROUTER_API_KEY"
-        )
-    if settings.qualification_policy is None:
-        missing.append("BITCAST_X_QUALIFICATION_OWNER_HOTKEY")
+    missing = settings.missing_validator_settings()
     if missing:
         raise ValueError("production validator outputs require: " + ", ".join(missing))
 
@@ -111,6 +101,20 @@ async def submit_weights_if_due(
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _Economics:
+    """Everything needed to reconcile, reward and publish campaigns each cycle."""
+
+    feed: CampaignFeedClient
+    schedule: QualificationSchedule
+    reconciler: CampaignReconciler
+    rewards: RewardCoordinator
+    preview_provider: PreviewXProvider
+    preview_reconciler: CampaignReconciler
+    preview_scorer: AttributionScorer
+    publisher: ShadowResultPublisher | None
+
+
 class ValidatorService:
     """Continuously verify miner-reported history and reconcile campaign state."""
 
@@ -127,15 +131,10 @@ class ValidatorService:
             netuid=self.settings.netuid,
             mechanism_id=self.settings.mechanism_id,
         )
-        campaign_client: CampaignFeedClient | None = None
-        x_provider: DesearchProvider | None = None
-        data_publisher: DataPublisher | None = None
-        brief_filter: LlmBriefFilter | None = None
-        preview_store: PreviewStore | None = None
-        ops_server: uvicorn.Server | None = None
-        ops_task: asyncio.Task[None] | None = None
         health = RuntimeHealth.create()
-        try:
+        async with AsyncExitStack() as stack:
+            stack.push_async_callback(shutdown_loki_logging)
+            stack.push_async_callback(chain.close)
             configure_loki_logging(
                 self.settings,
                 labels={
@@ -154,19 +153,6 @@ class ValidatorService:
                 source_revision(),
             )
             store = ValidatorStore(self.settings.state_dir / "validator.sqlite3")
-            ops_server = uvicorn.Server(
-                uvicorn.Config(
-                    create_ops_app(health),
-                    host=self.settings.ops_host,
-                    port=self.settings.ops_port,
-                    log_level=self.settings.log_level.lower(),
-                )
-            )
-            ops_task = asyncio.create_task(ops_server.serve())
-            while not ops_server.started:
-                if ops_task.done():
-                    await ops_task
-                await asyncio.sleep(0.05)
             ingestor = ValidatorIngestor(
                 chain,
                 store,
@@ -178,299 +164,299 @@ class ValidatorService:
                 max_concurrency=self.settings.validator_max_concurrency,
                 page_size=self.settings.max_batches_per_page,
             )
-            reconciler: CampaignReconciler | None = None
-            preview_provider: PreviewXProvider | None = None
-            preview_reconciler: CampaignReconciler | None = None
-            reward_coordinator: RewardCoordinator | None = None
-            preview_reward_coordinator: RewardCoordinator | None = None
-            result_publisher: ShadowResultPublisher | None = None
-            qualification_schedule: QualificationSchedule | None = None
-            if (
-                self.settings.campaign_feed_url is not None
-                and self.settings.desearch_api_key is not None
-                and self.settings.qualification_policy is not None
-                and self.settings.llm_api_key is not None
-            ):
-                campaign_client = CampaignFeedClient(
-                    self.settings.campaign_feed_url,
-                    cache_path=self.settings.state_dir / "campaign-feed.json",
-                    timeout=self.settings.request_timeout_seconds,
-                    max_response_bytes=self.settings.campaign_feed_max_response_bytes,
-                )
-                x_provider = DesearchProvider(
-                    self.settings.desearch_api_key,
-                    timeout=self.settings.request_timeout_seconds,
-                )
-                qualification_policy = self.settings.qualification_policy
-                if qualification_policy is None:
-                    raise ValueError("qualification policy is required")
-                qualification_reader = QualificationReader(chain, qualification_policy)
-                qualification_schedule = qualification_reader.schedule
-                reconciler = CampaignReconciler(store, x_provider, qualification_reader)
-                preview_store = PreviewStore(self.settings.state_dir / "preview-cache")
-                preview_provider = PreviewXProvider(x_provider, preview_store)
-                preview_reconciler = CampaignReconciler(
-                    store, preview_provider, qualification_reader
-                )
-                if self.settings.llm_provider == "chutes":
-                    llm_url = "https://llm.chutes.ai/v1/chat/completions"
-                    llm_model = "Qwen/Qwen3-32B"
-                    llm_headers: dict[str, str] = {}
-                    llm_timeout = 60.0
-                else:
-                    llm_url = "https://openrouter.ai/api/v1/chat/completions"
-                    llm_model = "qwen/qwen3-32b:nitro"
-                    llm_headers = {
-                        "HTTP-Referer": "https://bitcast.ai",
-                        "X-Title": "Bitcast Validator",
-                    }
-                    llm_timeout = 90.0
-                brief_filter = LlmBriefFilter(
-                    api_url=llm_url,
-                    api_key=self.settings.llm_api_key,
-                    model=llm_model,
-                    cache=store,
-                    num_checks=self.settings.llm_num_checks,
-                    tweet_max_length=self.settings.llm_tweet_max_length,
-                    max_response_bytes=self.settings.max_response_bytes,
-                    timeout=llm_timeout,
-                    extra_headers=llm_headers,
-                )
-                scorer = AttributionScorer(
-                    x_provider,
-                    brief_filter=brief_filter,
-                    max_concurrency=self.settings.validator_max_concurrency,
-                )
-                reward_coordinator = RewardCoordinator(
-                    store, scorer, score_blend=self.settings.weight_score_blend
-                )
-                preview_reward_coordinator = RewardCoordinator(
-                    store,
-                    AttributionScorer(
-                        preview_provider,
-                        brief_filter=brief_filter,
-                        max_concurrency=self.settings.validator_preview_max_concurrency,
-                    ),
-                    score_blend=self.settings.weight_score_blend,
-                )
-                if self.settings.enable_data_publish:
-                    data_publisher = DataPublisher(
-                        wallet,
-                        timeout=self.settings.request_timeout_seconds,
-                    )
-                    result_publisher = ShadowResultPublisher(
-                        store,
-                        data_publisher,
-                        endpoint=(
-                            f"{self.settings.data_client_url.rstrip('/')}/api/v1/brief-tweets"
-                        ),
-                        preview_store=preview_store,
-                    )
-            else:
+            economics = await self._open_economics(chain, store, wallet, stack)
+            # Registered last so shutdown marks the node unready before closing anything.
+            ops_server = await self._serve_ops(health, stack)
+            if economics is None:
                 LOGGER.warning(
                     "campaign URL, Desearch key, LLM key, or qualification owner is missing; "
                     "validator will ingest but not reconcile"
                 )
             while not ops_server.should_exit:
-                cycle_started = time.monotonic()
-                try:
-                    submission_weights: dict[int, float] | None = None
-                    finalized_block = await chain.current_block()
-                    endpoints = await ingestor.discover(block=finalized_block)
-                    outcomes = await ingestor.reconcile_all(endpoints, block=finalized_block)
-                    attributions = []
-                    if campaign_client is not None and reconciler is not None:
-                        try:
-                            feed = await campaign_client.fetch()
-                        except ValueError as exc:
-                            # A malformed or unsupported feed, such as one carrying a
-                            # retired campaign mode, fails this cycle closed.
-                            raise ProtocolError(f"campaign feed rejected: {exc}") from exc
-                        bound_campaigns = store.bind_campaign_protocols(feed.campaigns)
-                        feed = feed.model_copy(update={"campaigns": bound_campaigns})
-                        if qualification_schedule is None:
-                            raise ProtocolError("qualification schedule is unavailable")
-                        ensure_preclaim_economics_qualified(
-                            qualification_schedule,
-                            block=finalized_block,
-                            preclaim_active=bool(feed.campaigns),
-                            data_publish_enabled=self.settings.enable_data_publish,
-                            weight_submission_enabled=self.settings.enable_weight_submission,
-                        )
-                        attributions = await reconciler.reconcile_feed(
-                            feed,
-                            finalized_block=finalized_block,
-                        )
-                        if reward_coordinator is not None:
-                            scored = await reward_coordinator.freeze_scores(
-                                feed,
-                                attributions,
-                                reconciled_campaign_ids=reconciler.completed_campaign_ids,
-                            )
-                            graph = await chain.metagraph(block=finalized_block)
-                            if graph is None:
-                                raise ChainOperationError("finalized metagraph is unavailable")
-                            uids = [int(neuron.uid) for neuron in graph.neurons]
-                            hotkey_to_uid = {
-                                str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons
-                            }
-                            if (
-                                result_publisher is not None
-                                and preview_provider is not None
-                                and preview_reconciler is not None
-                                and preview_reward_coordinator is not None
-                            ):
-                                preview_campaigns = [
-                                    campaign
-                                    for campaign in feed.campaigns
-                                    if finalized_block < campaign.access.scoring_close_block
-                                ]
-                                featured_tweet_ids: set[str] = set()
-                                for campaign in preview_campaigns:
-                                    selection = store.featured_tweet_selection(
-                                        campaign.access.campaign_id
-                                    )
-                                    if selection is not None:
-                                        featured_tweet_ids.add(selection.tweet_id)
-                                preview_provider.set_featured_tweet_ids(featured_tweet_ids)
-                                preview_events = (
-                                    preview_reconciler.verified_events(finalized_block)
-                                    if preview_campaigns
-                                    else None
-                                )
-                                for campaign in preview_campaigns:
-                                    try:
-                                        preview_attributions = (
-                                            await preview_reconciler.reconcile_campaign(
-                                                campaign,
-                                                feed,
-                                                through_block=finalized_block,
-                                                events=preview_events,
-                                                defer_unavailable_tweets=True,
-                                            )
-                                        )
-                                        preview_scores = (
-                                            await preview_reward_coordinator.preview_scores(
-                                                feed,
-                                                preview_attributions,
-                                            )
-                                        )
-                                        if preview_attributions:
-                                            await result_publisher.publish_preview(
-                                                feed,
-                                                campaign,
-                                                preview_scores,
-                                                preview_attributions,
-                                                block=finalized_block,
-                                                hotkey_to_uid=hotkey_to_uid,
-                                            )
-                                    except ReconciliationUnavailableError as exc:
-                                        LOGGER.warning(
-                                            "preview unavailable campaign=%s block=%s error=%s",
-                                            campaign.access.campaign_id,
-                                            finalized_block,
-                                            exc,
-                                        )
-                            productive_weights, floors = reward_coordinator.shadow_weights(
-                                feed,
-                                scored,
-                                block=finalized_block,
-                                hotkey_to_uid=hotkey_to_uid,
-                                uids=uids,
-                                persist=False,
-                            )
-                            pending_reward_campaigns = (
-                                reward_coordinator.pending_reward_campaign_ids(
-                                    feed,
-                                    block=finalized_block,
-                                )
-                            )
-                            if pending_reward_campaigns:
-                                LOGGER.warning(
-                                    "weight update deferred; final campaign economics "
-                                    "are incomplete campaigns=%s",
-                                    ",".join(pending_reward_campaigns),
-                                )
-                            else:
-                                submission_weights = productive_weights
-                                store.persist_shadow_weights(
-                                    finalized_block,
-                                    feed.snapshot_id,
-                                    productive_weights,
-                                )
-                            if result_publisher is not None:
-                                await result_publisher.publish(
-                                    feed,
-                                    scored,
-                                    floors,
-                                    block=finalized_block,
-                                    hotkey_to_uid=hotkey_to_uid,
-                                    completed_campaign_ids=(
-                                        reward_coordinator.completed_campaign_ids
-                                    ),
-                                )
-                            if (
-                                self.settings.enable_weight_submission
-                                and submission_weights is not None
-                            ):
-                                await submit_weights_if_due(
-                                    chain,
-                                    wallet,
-                                    graph,
-                                    submission_weights,
-                                    block=finalized_block,
-                                    epoch_blocks=self.settings.weight_epoch_blocks,
-                                    version_key=self.settings.weight_version_key,
-                                )
-                    LOGGER.info(
-                        "validator reconciliation block=%s miners=%s successful=%s "
-                        "empty=%s verified_batches=%s attributions=%s unavailable=%s "
-                        "quarantined=%s errors=%s duration_seconds=%.3f",
-                        finalized_block,
-                        len(outcomes),
-                        sum(not item.error for item in outcomes),
-                        sum(not item.error and item.batches_verified == 0 for item in outcomes),
-                        sum(item.batches_verified for item in outcomes),
-                        len(attributions),
-                        sum(not item.available for item in outcomes),
-                        sum(item.quarantined for item in outcomes),
-                        sum(bool(item.error) for item in outcomes),
-                        time.monotonic() - cycle_started,
-                    )
-                    health.success(finalized_block)
-                except ProtocolError:
-                    health.failure()
-                    LOGGER.exception(
-                        "validator consensus violation; prior durable validator state retained"
-                    )
-                except (
-                    BittensorError,
-                    ChainOperationError,
-                    ReconciliationUnavailableError,
-                    ResponseTooLargeError,
-                    httpx.HTTPError,
-                    OSError,
-                ):
-                    health.failure()
-                    LOGGER.exception("validator evidence unavailable; durable state retained")
+                await self._cycle(chain, wallet, store, ingestor, economics, health)
                 if not ops_server.should_exit:
                     await asyncio.sleep(self.settings.validator_poll_seconds)
-        finally:
+
+    async def _serve_ops(self, health: RuntimeHealth, stack: AsyncExitStack) -> uvicorn.Server:
+        """Start the ops endpoint and register its shutdown, which marks the node unready."""
+
+        server = uvicorn.Server(
+            uvicorn.Config(
+                create_ops_app(health),
+                host=self.settings.ops_host,
+                port=self.settings.ops_port,
+                log_level=self.settings.log_level.lower(),
+            )
+        )
+        task = asyncio.create_task(server.serve())
+
+        async def stop() -> None:
             health.ready = False
-            if ops_server is not None:
-                ops_server.should_exit = True
-            if ops_task is not None:
-                with suppress(asyncio.CancelledError):
-                    await ops_task
-            if campaign_client is not None:
-                await campaign_client.close()
-            if x_provider is not None:
-                await x_provider.close()
-            if data_publisher is not None:
-                await data_publisher.close()
-            if brief_filter is not None:
-                await brief_filter.close()
-            if preview_store is not None:
-                preview_store.close()
-            await chain.close()
-            await shutdown_loki_logging()
+            server.should_exit = True
+            with suppress(asyncio.CancelledError):
+                await task
+
+        stack.push_async_callback(stop)
+        while not server.started:
+            if task.done():
+                await task
+            await asyncio.sleep(0.05)
+        return server
+
+    async def _open_economics(
+        self,
+        chain: BittensorChain,
+        store: ValidatorStore,
+        wallet: Any,
+        stack: AsyncExitStack,
+    ) -> _Economics | None:
+        """Build the economics stack, or return None when its settings are incomplete."""
+
+        settings = self.settings
+        qualification_policy = settings.qualification_policy
+        if (
+            settings.missing_validator_settings()
+            or qualification_policy is None
+            or settings.desearch_api_key is None
+            or settings.llm_api_key is None
+        ):
+            return None
+        feed = CampaignFeedClient.from_settings(settings)
+        stack.push_async_callback(feed.close)
+        x_provider = DesearchProvider(
+            settings.desearch_api_key,
+            timeout=settings.request_timeout_seconds,
+        )
+        stack.push_async_callback(x_provider.close)
+        qualification = QualificationReader(chain, qualification_policy)
+        preview_store = PreviewStore(settings.state_dir / "preview-cache")
+        stack.callback(preview_store.close)
+        preview_provider = PreviewXProvider(x_provider, preview_store)
+        endpoint = settings.llm_endpoint
+        brief_filter = LlmBriefFilter(
+            api_url=endpoint.url,
+            api_key=settings.llm_api_key,
+            model=endpoint.model,
+            cache=store,
+            num_checks=settings.llm_num_checks,
+            tweet_max_length=settings.llm_tweet_max_length,
+            max_response_bytes=settings.max_response_bytes,
+            timeout=endpoint.timeout,
+            extra_headers=endpoint.headers,
+        )
+        stack.push_async_callback(brief_filter.close)
+        publisher: ShadowResultPublisher | None = None
+        if settings.enable_data_publish:
+            data_publisher = DataPublisher(wallet, timeout=settings.request_timeout_seconds)
+            stack.push_async_callback(data_publisher.close)
+            publisher = ShadowResultPublisher(
+                store,
+                data_publisher,
+                endpoint=f"{settings.data_client_url.rstrip('/')}/api/v1/brief-tweets",
+                preview_store=preview_store,
+            )
+        return _Economics(
+            feed=feed,
+            schedule=qualification.schedule,
+            reconciler=CampaignReconciler(store, x_provider, qualification),
+            rewards=RewardCoordinator(
+                store,
+                AttributionScorer(
+                    x_provider,
+                    brief_filter=brief_filter,
+                    max_concurrency=settings.validator_max_concurrency,
+                ),
+                score_blend=settings.weight_score_blend,
+            ),
+            preview_provider=preview_provider,
+            preview_reconciler=CampaignReconciler(store, preview_provider, qualification),
+            preview_scorer=AttributionScorer(
+                preview_provider,
+                brief_filter=brief_filter,
+                max_concurrency=settings.validator_preview_max_concurrency,
+            ),
+            publisher=publisher,
+        )
+
+    async def _cycle(
+        self,
+        chain: BittensorChain,
+        wallet: Any,
+        store: ValidatorStore,
+        ingestor: ValidatorIngestor,
+        economics: _Economics | None,
+        health: RuntimeHealth,
+    ) -> None:
+        """Ingest miner history, then settle and publish campaigns; never raise."""
+
+        cycle_started = time.monotonic()
+        try:
+            finalized_block = await chain.current_block()
+            endpoints = await ingestor.discover(block=finalized_block)
+            outcomes = await ingestor.reconcile_all(endpoints, block=finalized_block)
+            attributions = (
+                await self._settle(chain, wallet, store, economics, finalized_block)
+                if economics is not None
+                else []
+            )
+            LOGGER.info(
+                "validator reconciliation block=%s miners=%s successful=%s "
+                "empty=%s verified_batches=%s attributions=%s unavailable=%s "
+                "quarantined=%s errors=%s duration_seconds=%.3f",
+                finalized_block,
+                len(outcomes),
+                sum(not item.error for item in outcomes),
+                sum(not item.error and item.batches_verified == 0 for item in outcomes),
+                sum(item.batches_verified for item in outcomes),
+                len(attributions),
+                sum(not item.available for item in outcomes),
+                sum(item.quarantined for item in outcomes),
+                sum(bool(item.error) for item in outcomes),
+                time.monotonic() - cycle_started,
+            )
+            health.success(finalized_block)
+        except ProtocolError:
+            health.failure()
+            LOGGER.exception(
+                "validator consensus violation; prior durable validator state retained"
+            )
+        except (
+            BittensorError,
+            ChainOperationError,
+            ReconciliationUnavailableError,
+            ResponseTooLargeError,
+            httpx.HTTPError,
+            OSError,
+        ):
+            health.failure()
+            LOGGER.exception("validator evidence unavailable; durable state retained")
+
+    async def _settle(
+        self,
+        chain: BittensorChain,
+        wallet: Any,
+        store: ValidatorStore,
+        economics: _Economics,
+        block: int,
+    ) -> list[AttributionResult]:
+        """Reconcile and score the feed, publish results, and submit weights when due."""
+
+        try:
+            feed = await economics.feed.fetch()
+        except ValueError as exc:
+            # A malformed or unsupported feed, such as one carrying a retired
+            # campaign mode, fails this cycle closed.
+            raise ProtocolError(f"campaign feed rejected: {exc}") from exc
+        feed = feed.model_copy(update={"campaigns": store.bind_campaign_protocols(feed.campaigns)})
+        ensure_preclaim_economics_qualified(
+            economics.schedule,
+            block=block,
+            preclaim_active=bool(feed.campaigns),
+            data_publish_enabled=self.settings.enable_data_publish,
+            weight_submission_enabled=self.settings.enable_weight_submission,
+        )
+        attributions = await economics.reconciler.reconcile_feed(feed, finalized_block=block)
+        scored = await economics.rewards.freeze_scores(
+            feed,
+            attributions,
+            reconciled_campaign_ids=economics.reconciler.completed_campaign_ids,
+        )
+        graph = await chain.metagraph(block=block)
+        if graph is None:
+            raise ChainOperationError("finalized metagraph is unavailable")
+        uids = [int(neuron.uid) for neuron in graph.neurons]
+        hotkey_to_uid = {str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons}
+        if economics.publisher is not None:
+            await self._publish_previews(
+                store, economics, economics.publisher, feed, block, hotkey_to_uid
+            )
+        weights, floors = economics.rewards.shadow_weights(
+            feed,
+            scored,
+            block=block,
+            hotkey_to_uid=hotkey_to_uid,
+            uids=uids,
+            persist=False,
+        )
+        pending = economics.rewards.pending_reward_campaign_ids(feed, block=block)
+        if pending:
+            LOGGER.warning(
+                "weight update deferred; final campaign economics are incomplete campaigns=%s",
+                ",".join(pending),
+            )
+        else:
+            store.persist_shadow_weights(block, feed.snapshot_id, weights)
+        if economics.publisher is not None:
+            await economics.publisher.publish(
+                feed,
+                scored,
+                floors,
+                block=block,
+                hotkey_to_uid=hotkey_to_uid,
+                completed_campaign_ids=economics.rewards.completed_campaign_ids,
+            )
+        if self.settings.enable_weight_submission and not pending:
+            await submit_weights_if_due(
+                chain,
+                wallet,
+                graph,
+                weights,
+                block=block,
+                epoch_blocks=self.settings.weight_epoch_blocks,
+                version_key=self.settings.weight_version_key,
+            )
+        return attributions
+
+    async def _publish_previews(
+        self,
+        store: ValidatorStore,
+        economics: _Economics,
+        publisher: ShadowResultPublisher,
+        feed: CampaignFeed,
+        block: int,
+        hotkey_to_uid: dict[str, int],
+    ) -> None:
+        """Publish replaceable previews for campaigns whose scoring has not closed."""
+
+        campaigns = [
+            campaign for campaign in feed.campaigns if block < campaign.access.scoring_close_block
+        ]
+        featured_tweet_ids: set[str] = set()
+        for campaign in campaigns:
+            selection = store.featured_tweet_selection(campaign.access.campaign_id)
+            if selection is not None:
+                featured_tweet_ids.add(selection.tweet_id)
+        economics.preview_provider.set_featured_tweet_ids(featured_tweet_ids)
+        if not campaigns:
+            return
+        events = economics.preview_reconciler.verified_events(block)
+        for campaign in campaigns:
+            try:
+                attributions = await economics.preview_reconciler.reconcile_campaign(
+                    campaign,
+                    feed,
+                    through_block=block,
+                    events=events,
+                    defer_unavailable_tweets=True,
+                )
+                scores = await economics.preview_scorer.score(
+                    feed,
+                    attributions,
+                    defer_unavailable_tweets=True,
+                )
+                if attributions:
+                    await publisher.publish_preview(
+                        feed,
+                        campaign,
+                        scores,
+                        attributions,
+                        block=block,
+                        hotkey_to_uid=hotkey_to_uid,
+                    )
+            except ReconciliationUnavailableError as exc:
+                LOGGER.warning(
+                    "preview unavailable campaign=%s block=%s error=%s",
+                    campaign.access.campaign_id,
+                    block,
+                    exc,
+                )

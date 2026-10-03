@@ -8,7 +8,7 @@ import os
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -25,6 +25,9 @@ from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
 from bitcast_x.errors import ProtocolError
 from bitcast_x.http import read_bounded
 from bitcast_x.protocol import CampaignAccess
+
+if TYPE_CHECKING:
+    from bitcast_x.config import Settings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -438,6 +441,19 @@ class CampaignFeedClient:
             timeout=timeout,
             transport=transport,
             trust_env=False,
+        )
+
+    @classmethod
+    def from_settings(cls, settings: "Settings") -> "CampaignFeedClient":
+        """Build the configured feed client with its cache in the state directory."""
+
+        if settings.campaign_feed_url is None:
+            raise ValueError("BITCAST_X_CAMPAIGN_FEED_URL is not configured")
+        return cls(
+            settings.campaign_feed_url,
+            cache_path=settings.state_dir / "campaign-feed.json",
+            timeout=settings.request_timeout_seconds,
+            max_response_bytes=settings.campaign_feed_max_response_bytes,
         )
 
     async def close(self) -> None:

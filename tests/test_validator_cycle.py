@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -40,16 +40,28 @@ def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["empty", "preclaim", "pending_preclaim", "invalid_feed"])
+@pytest.mark.parametrize(
+    "case", ["empty", "preclaim", "pending_preclaim", "invalid_feed", "preview"]
+)
 async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     preclaim = campaign("preclaim", MiningProtocol.PRECLAIM_V2)
+    open_campaign = campaign("open", MiningProtocol.PRECLAIM_V2).model_copy(
+        update={
+            "access": preclaim.access.model_copy(
+                update={"campaign_id": "open", "scoring_close_block": BLOCK + 10}
+            ),
+            "emission_start_block": BLOCK + 11,
+            "emission_end_block": BLOCK + 20,
+        }
+    )
     records = {
         "empty": (),
         "preclaim": (preclaim,),
         "pending_preclaim": (preclaim,),
         "invalid_feed": (preclaim,),
+        "preview": (open_campaign,),
     }[case]
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     if case in {"preclaim", "invalid_feed"}:
@@ -116,6 +128,8 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     reconciler = SimpleNamespace(
         reconcile_feed=AsyncMock(return_value=[]),
         completed_campaign_ids=frozenset(),
+        verified_events=Mock(return_value="events"),
+        reconcile_campaign=AsyncMock(return_value=[]),
     )
     publisher = SimpleNamespace(publish=AsyncMock(), publish_preview=AsyncMock())
     submit = AsyncMock()
@@ -132,7 +146,9 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     monkeypatch.setattr(
         service,
         "CampaignFeedClient",
-        lambda *_args, **_kwargs: SimpleNamespace(fetch=fetch, close=AsyncMock()),
+        SimpleNamespace(
+            from_settings=lambda _settings: SimpleNamespace(fetch=fetch, close=AsyncMock())
+        ),
     )
     monkeypatch.setattr(service, "CampaignReconciler", lambda *_args, **_kwargs: reconciler)
     monkeypatch.setattr(
@@ -160,6 +176,16 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
 
     assert archive.read_bytes() == b"historical archive must not be opened or modified"
     publisher.publish_preview.assert_not_awaited()
+    if case == "preview":
+        reconciler.verified_events.assert_called_once_with(BLOCK)
+        assert reconciler.reconcile_campaign.await_args is not None
+        assert reconciler.reconcile_campaign.await_args.kwargs == {
+            "through_block": BLOCK,
+            "events": "events",
+            "defer_unavailable_tweets": True,
+        }
+    else:
+        reconciler.reconcile_campaign.assert_not_awaited()
     if case == "invalid_feed":
         reconciler.reconcile_feed.assert_not_awaited()
         publisher.publish.assert_not_awaited()

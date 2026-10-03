@@ -145,19 +145,6 @@ class RewardCoordinator:
 
         return self._completed_campaign_ids or frozenset()
 
-    async def preview_scores(
-        self,
-        feed: CampaignFeed,
-        attributions: list[AttributionResult],
-    ) -> list[ScoredAttribution]:
-        """Score mutable, pre-close results without freezing validator state."""
-
-        return await self._scorer.score(
-            feed,
-            attributions,
-            defer_unavailable_tweets=True,
-        )
-
     async def freeze_scores(
         self,
         feed: CampaignFeed,

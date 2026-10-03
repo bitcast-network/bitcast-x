@@ -93,14 +93,7 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         return {"hotkey": hotkey, "history_id": history_id}
 
     if arguments.command == "campaigns":
-        if settings.campaign_feed_url is None:
-            raise ValueError("BITCAST_X_CAMPAIGN_FEED_URL is not configured")
-        client = CampaignFeedClient(
-            settings.campaign_feed_url,
-            cache_path=settings.state_dir / "campaign-feed.json",
-            timeout=settings.request_timeout_seconds,
-            max_response_bytes=settings.campaign_feed_max_response_bytes,
-        )
+        client = CampaignFeedClient.from_settings(settings)
         try:
             feed = await client.fetch()
         finally:

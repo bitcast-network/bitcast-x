@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -554,7 +555,6 @@ async def test_campaigns_command_reads_maps_larger_than_the_protocol_limit(
     # Published ecosystem maps reach several MB, well past the protocol page
     # limit (max_response_bytes); the CLI must bound them by the feed limit.
     import argparse
-    import functools
 
     from bitcast_x import main
     from bitcast_x.config import Settings
@@ -567,11 +567,11 @@ async def test_campaigns_command_reads_maps_larger_than_the_protocol_limit(
             return httpx.Response(200, json=manifest)
         return httpx.Response(200, json=ecosystem_map)
 
-    monkeypatch.setattr(
-        main,
-        "CampaignFeedClient",
-        functools.partial(CampaignFeedClient, transport=httpx.MockTransport(handler)),
-    )
+    class MockedFeedClient(CampaignFeedClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(main, "CampaignFeedClient", MockedFeedClient)
     settings = Settings(
         state_dir=tmp_path,
         campaign_feed_url="https://feed.example/api/v2/public/x/campaign-manifest",

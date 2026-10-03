@@ -73,6 +73,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   previously sorted by tweet ID); the selected tweet is unchanged.
 - Oversized campaign-feed, miner and LLM responses all raise `ResponseTooLargeError` from one bounded
   reader. An oversized campaign feed previously raised a bare `ValueError`.
+- Validator settings logic lives in `config.py`: one `missing_validator_settings()` rule used by
+  the startup check, the economics on/off decision and the PM2 launcher (the copies disagreed on
+  empty strings), and the LLM endpoint and model table. The env templates no longer pin the
+  consensus-relevant LLM check settings or the weight cadence and version key; existing `.env`
+  files that set them keep their values, so remove those lines to follow release defaults.
 - Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
   token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
 

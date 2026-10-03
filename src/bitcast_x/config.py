@@ -1,7 +1,9 @@
 """Typed runtime configuration for Bitcast X v3."""
 
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
@@ -14,6 +16,35 @@ from bitcast_x.qualification import (
     QualificationSchedule,
     resolve_qualification_policy,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LlmEndpoint:
+    """Chat-completions endpoint and model a provider serves brief checks from."""
+
+    url: str
+    model: str
+    timeout: float
+    headers: MappingProxyType[str, str] = MappingProxyType({})
+
+
+# The model decides brief compliance, so it is consensus-relevant: every
+# validator on a provider must call the same model.
+LLM_ENDPOINTS: dict[str, LlmEndpoint] = {
+    "chutes": LlmEndpoint(
+        url="https://llm.chutes.ai/v1/chat/completions",
+        model="Qwen/Qwen3-32B",
+        timeout=60.0,
+    ),
+    "openrouter": LlmEndpoint(
+        url="https://openrouter.ai/api/v1/chat/completions",
+        model="qwen/qwen3-32b:nitro",
+        timeout=90.0,
+        headers=MappingProxyType(
+            {"HTTP-Referer": "https://bitcast.ai", "X-Title": "Bitcast Validator"}
+        ),
+    ),
+}
 
 
 class Settings(BaseSettings):
@@ -118,6 +149,30 @@ class Settings(BaseSettings):
         """Return the credential for the selected v2-compatible LLM provider."""
 
         return self.chutes_api_key if self.llm_provider == "chutes" else self.openrouter_api_key
+
+    @property
+    def llm_endpoint(self) -> LlmEndpoint:
+        """Return the endpoint and model for the selected LLM provider."""
+
+        return LLM_ENDPOINTS[self.llm_provider]
+
+    def missing_validator_settings(self) -> list[str]:
+        """Return the settings validator reconciliation, rewards and publishing still need."""
+
+        missing: list[str] = []
+        if not self.campaign_feed_url:
+            missing.append("BITCAST_X_CAMPAIGN_FEED_URL")
+        if not self.desearch_api_key:
+            missing.append("BITCAST_X_DESEARCH_API_KEY")
+        if not self.llm_api_key:
+            missing.append(
+                "BITCAST_X_CHUTES_API_KEY"
+                if self.llm_provider == "chutes"
+                else "BITCAST_X_OPENROUTER_API_KEY"
+            )
+        if self.qualification_policy is None:
+            missing.append("BITCAST_X_QUALIFICATION_OWNER_HOTKEY")
+        return missing
 
     @property
     def qualification_policy(self) -> QualificationConfig | QualificationSchedule | None:
