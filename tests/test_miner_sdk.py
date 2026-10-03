@@ -284,6 +284,30 @@ def test_pending_queue_applies_backpressure_before_unbounded_growth(tmp_path: Pa
         sdk.create_claim(campaign_id="campaign", creator_x_id="456", draft="second")
 
 
+def test_pending_queue_byte_bound_counts_payload_and_private_reveal(tmp_path: Path) -> None:
+    store = MinerStore(tmp_path / "miner.db")
+    first, first_reveal = _fixed_claim(1, draft_length=100)
+    second, second_reveal = _fixed_claim(2, draft_length=100)
+    first_bytes = len(first.model_dump_json().encode()) + len(
+        first_reveal.model_dump_json().encode()
+    )
+
+    store.enqueue(
+        first,
+        max_pending_events=10,
+        max_pending_bytes=2 * first_bytes - 1,
+        reveal=first_reveal,
+    )
+
+    with pytest.raises(ProtocolError, match="queue capacity is exhausted"):
+        store.enqueue(
+            second,
+            max_pending_events=10,
+            max_pending_bytes=2 * first_bytes - 1,
+            reveal=second_reveal,
+        )
+
+
 def test_duplicate_event_id_is_idempotent_but_conflicts_fail(tmp_path: Path) -> None:
     submitter = FakeSubmitter()
     sdk = build_sdk(tmp_path / "miner.db", submitter)

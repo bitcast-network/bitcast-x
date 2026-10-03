@@ -112,10 +112,10 @@ class MinerEngine:
 
         return self.store.enqueue(
             event,
-            reveal=reveal,
-            metadata=metadata,
             max_pending_events=self.policy.max_pending_events,
             max_pending_bytes=self.policy.max_pending_bytes,
+            reveal=reveal,
+            metadata=metadata,
         )
 
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:

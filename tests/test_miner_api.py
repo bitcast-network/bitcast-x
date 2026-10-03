@@ -345,6 +345,15 @@ def test_miner_api_does_not_require_the_campaign_feed(
     assert apps.protocol is None
 
 
+def test_miner_env_example_states_the_enforced_token_length() -> None:
+    template = Path("config/miner.env.example").read_text()
+
+    assert "at least 64 characters" in template
+    create_control_app(lambda: None, None, "a" * 64)  # type: ignore[arg-type,return-value]
+    with pytest.raises(ValueError, match="at least 256 bits"):
+        create_control_app(lambda: None, None, "a" * 63)  # type: ignore[arg-type,return-value]
+
+
 def test_application_api_requires_internal_bearer_token(tmp_path: Path) -> None:
     web = build_client(tmp_path)
     del web.headers["Authorization"]

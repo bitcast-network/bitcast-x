@@ -299,15 +299,15 @@ class MinerStore:
         self,
         event: ProtocolEvent,
         *,
+        max_pending_events: int,
+        max_pending_bytes: int,
         reveal: DraftReveal | None = None,
         metadata: OperationMetadata | None = None,
-        max_pending_events: int = 10_000,
-        max_pending_bytes: int = 50_000_000,
     ) -> str:
-        """Persist an event and application idempotency record atomically."""
+        """Persist an event and application idempotency record atomically.
 
-        if max_pending_events <= 0 or max_pending_bytes <= 0:
-            raise ValueError("pending queue limits must be positive")
+        The pending-queue bounds come from the engine's validated ``BatchPolicy``.
+        """
 
         event_id = _event_id(event)
         status = (
