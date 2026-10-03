@@ -264,14 +264,6 @@ class MinerSdk:
         if claim_id is not None and not self.engine.store.has_claim(claim_id):
             raise ProtocolError("submission claim_id does not belong to this miner")
 
-        existing = self.engine.store.submission_id(
-            campaign_id=campaign_id,
-            tweet_id=tweet_id,
-            claim_id=claim_id,
-            creator_x_id=creator_x_id,
-        )
-        if existing is not None:
-            return existing
         identity = "\0".join(
             (
                 self.engine.miner_hotkey,
@@ -282,6 +274,10 @@ class MinerSdk:
             )
         ).encode()
         submission_id = hashlib.sha256(identity).hexdigest()[:32]
+        # A repeated mapping resolves to its existing receipt by its deterministic
+        # id, ahead of the idempotency-key check in enqueue.
+        if self.engine.store.status(submission_id) is not None:
+            return submission_id
         submission = SubmissionEvent(
             submission_id=submission_id,
             campaign_id=campaign_id,

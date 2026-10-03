@@ -514,25 +514,19 @@ class MinerStore:
             )
         return result
 
-    def submission_id(
-        self,
-        *,
-        campaign_id: str,
-        tweet_id: str,
-        claim_id: str | None,
-        creator_x_id: str,
-    ) -> str | None:
-        """Return the oldest durable submission for an idempotency identity."""
+    def submission_ids(self, status: EventStatus) -> list[str]:
+        """Return the IDs of durable submissions currently in one status."""
 
-        for submission in reversed(self.submissions()):
-            if (
-                submission["campaign_id"] == campaign_id
-                and submission["tweet_id"] == tweet_id
-                and submission["claim_id"] == claim_id
-                and submission["creator_x_id"] == creator_x_id
-            ):
-                return str(submission["submission_id"])
-        return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id FROM events
+                WHERE kind = 'submission' AND status = ?
+                ORDER BY created_ns DESC, event_id
+                """,
+                (status.value,),
+            ).fetchall()
+        return [str(row["event_id"]) for row in rows]
 
     def record_submission_result(self, submission_id: str, status: EventStatus) -> None:
         """Persist an authenticated remote attribution result idempotently."""

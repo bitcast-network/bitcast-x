@@ -11,7 +11,14 @@ from fastapi.testclient import TestClient
 
 from bitcast_x.config import Settings
 from bitcast_x.errors import ChainOperationError
-from bitcast_x.miner import BatchPolicy, FinalizedCommitment, MinerEngine, MinerSdk, MinerStore
+from bitcast_x.miner import (
+    BatchPolicy,
+    EventStatus,
+    FinalizedCommitment,
+    MinerEngine,
+    MinerSdk,
+    MinerStore,
+)
 from bitcast_x.miner.api import create_control_app
 from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
@@ -664,6 +671,85 @@ def test_direct_submission_reports_unconfirmed_grace_commit_as_retryable(
         "message": "submission commitment was not confirmed before request timeout",
         "retryable": True,
     }
+
+
+def test_repeated_submission_mapping_returns_the_existing_receipt(tmp_path: Path) -> None:
+    web = build_client(tmp_path, results_client=DirectResults())
+    body = {"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"}
+
+    first = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json=body,
+    )
+    new_key = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0002"},
+        json=body,
+    )
+    changed_external_id = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={**body, "external_id": "changed"},
+    )
+
+    assert [first.status_code, new_key.status_code, changed_external_id.status_code] == [200] * 3
+    assert new_key.json()["submission_id"] == first.json()["submission_id"]
+    assert changed_external_id.json()["submission_id"] == first.json()["submission_id"]
+    assert len(web.get("/api/v1/submissions").json()["items"]) == 1
+
+
+def test_result_sync_records_final_results_only_for_pending_submissions(
+    tmp_path: Path,
+) -> None:
+    class FinalResults(Results):
+        def __init__(self) -> None:
+            self.reads = 0
+            self.final: dict[str, str] = {}
+
+        async def submissions(self, **_filters: object) -> list[dict[str, Any]]:
+            self.reads += 1
+            return [
+                {"submission_id": submission_id, "status": status}
+                for submission_id, status in self.final.items()
+            ]
+
+    results = FinalResults()
+    engine = MinerEngine(
+        miner_hotkey=MINER,
+        store=MinerStore(tmp_path / "miner.sqlite3"),
+        submitter=Submitter(),
+    )
+    sdk = MinerSdk(engine)
+    service = MinerControlService(
+        sdk,
+        results_client=results,  # type: ignore[arg-type]
+        commit_timeout_seconds=5,
+    )
+
+    asyncio.run(service.sync_submission_results())
+    assert results.reads == 0
+
+    attributed, rejected, unresolved = [
+        sdk.submit_tweet(campaign_id="campaign", tweet_id=tweet_id, claim_id=None, creator_x_id="1")
+        for tweet_id in ("1", "2", "3")
+    ]
+    asyncio.run(engine.commit_ready(force=True))
+    queued = sdk.submit_tweet(campaign_id="campaign", tweet_id="4", claim_id=None, creator_x_id="1")
+    results.final = {
+        attributed: "attributed",
+        rejected: "rejected",
+        unresolved: "verification_pending",
+        queued: "attributed",
+    }
+
+    asyncio.run(service.sync_submission_results())
+
+    assert results.reads == 1
+    assert sdk.submission_status(attributed) is EventStatus.ATTRIBUTED
+    assert sdk.submission_status(rejected) is EventStatus.REJECTED
+    assert sdk.submission_status(unresolved) is EventStatus.VERIFICATION_PENDING
+    assert sdk.submission_status(queued) is EventStatus.TWEET_RECEIVED
 
 
 def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path) -> None:

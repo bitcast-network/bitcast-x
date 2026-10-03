@@ -456,12 +456,12 @@ class MinerControlService:
     async def sync_submission_results(self) -> None:
         """Persist final central results for locally pending submissions."""
 
+        pending = self.sdk.engine.store.submission_ids(EventStatus.VERIFICATION_PENDING)
+        if not pending:
+            return
         central = await self.results_client.submissions()
         by_id = {str(item["submission_id"]): item for item in central}
-        for submission in self.sdk.submissions():
-            if submission["status"] != EventStatus.VERIFICATION_PENDING.value:
-                continue
-            submission_id = str(submission["submission_id"])
+        for submission_id in pending:
             result = by_id.get(submission_id)
             if result is None:
                 continue
