@@ -1,6 +1,7 @@
 """Offline HTTP tests for the generic authenticated miner API."""
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -69,6 +70,14 @@ class LateSubmitter(Submitter):
             position=CommitmentPosition(block=101, extrinsic_index=1),
             stored_envelope=envelope.encode(),
         )
+
+
+def _central_error(
+    status_code: int, path: str, headers: dict[str, str] | None = None
+) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", f"https://central.test{path}")
+    response = httpx.Response(status_code, request=request, headers=headers)
+    return httpx.HTTPStatusError("central error", request=request, response=response)
 
 
 class Results:
@@ -185,11 +194,6 @@ class Results:
             "checked_at": "2026-09-01T12:00:00Z",
         }
 
-    async def campaign_tweets(
-        self, campaign_id: str, ecosystem_ids: tuple[str, ...] = ()
-    ) -> dict[str, Any]:
-        return {"campaign_id": campaign_id, "tweets": [], "ecosystems": ecosystem_ids}
-
     async def submission(self, submission_id: str) -> dict[str, Any]:
         return {"submission_id": submission_id, "status": "verification_pending"}
 
@@ -221,47 +225,59 @@ class DirectResults(Results):
 class EvaluatingDirectResults(DirectResults):
     """Exclusive campaign accepting existing posts during submission grace."""
 
-    campaign_record = {
-        **DirectResults.campaign_record,
-        "status": "evaluating",
-        "capabilities": {
-            **DirectResults.campaign_record["capabilities"],
-            "can_check_eligibility": True,
-            "can_submit": True,
-        },
-    }
+    campaign_record = {**DirectResults.campaign_record, "status": "evaluating"}
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        result = await super().eligibility(campaign_id, creator_x_id)
+        result.update(eligible_if_published_now=False, reason="campaign_not_open")
+        return result
+
+
+class IneligibleDirectResults(DirectResults):
+    """Direct campaign whose creator is eligible in no ecosystem."""
 
     async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
         result = await super().eligibility(campaign_id, creator_x_id)
         result.update(
-            claim_eligible=False,
+            eligible=False,
             eligible_if_published_now=False,
-            reason="campaign_not_open",
+            eligible_ecosystems=[],
+            badges=[],
+            reason="creator_not_eligible",
         )
         return result
 
 
-def test_evaluating_direct_fixture_matches_pinned_bitcast_api_contract() -> None:
-    results = EvaluatingDirectResults()
+class UnavailableCampaignResults(Results):
+    """Central answers a single-campaign lookup with 503 rather than 404."""
+
+    async def campaign(self, campaign_id: str) -> dict[str, Any]:
+        raise _central_error(503, f"/api/v2/miners/x/campaigns/{campaign_id}")
+
+
+@pytest.mark.parametrize(
+    ("results", "status", "eligible_if_published_now"),
+    [
+        pytest.param(Results(), "open", True, id="preclaim"),
+        pytest.param(DirectResults(), "open", True, id="direct"),
+        pytest.param(EvaluatingDirectResults(), "evaluating", False, id="evaluating-direct"),
+    ],
+)
+def test_results_doubles_match_pinned_bitcast_api_contract(
+    results: Results, status: str, *, eligible_if_published_now: bool
+) -> None:
+    eligibility_record = asyncio.run(results.eligibility("campaign", "123"))
 
     campaign = BitcastApiMinerCampaign.model_validate(results.campaign_record)
-    eligibility = BitcastApiMinerCampaignEligibility.model_validate(
-        asyncio.run(results.eligibility("campaign", "123"))
-    )
+    eligibility = BitcastApiMinerCampaignEligibility.model_validate(eligibility_record)
 
-    assert campaign.status == "evaluating"
+    assert set(results.campaign_record) <= set(BitcastApiMinerCampaign.model_fields)
+    assert set(eligibility_record) <= set(BitcastApiMinerCampaignEligibility.model_fields)
+    assert campaign.status == status
     assert campaign.scoring_close_block == 100
     assert campaign.capabilities.can_submit is True
     assert eligibility.eligible is True
-    assert eligibility.eligible_if_published_now is False
-
-
-def _central_error(
-    status_code: int, path: str, headers: dict[str, str] | None = None
-) -> httpx.HTTPStatusError:
-    request = httpx.Request("GET", f"https://central.test{path}")
-    response = httpx.Response(status_code, request=request, headers=headers)
-    return httpx.HTTPStatusError("central error", request=request, response=response)
+    assert eligibility.eligible_if_published_now is eligible_if_published_now
 
 
 def build_client(
@@ -309,19 +325,66 @@ async def _authorized() -> bool:
     return True
 
 
-def _claim(web: TestClient, *, key: str = "claim-key-0001") -> dict[str, Any]:
-    response = web.post(
+def _post_claim(
+    web: TestClient,
+    *,
+    key: str = "claim-key-0001",
+    draft: str = "Exact draft",
+    external_id: str | None = "creator-claim-1",
+) -> httpx.Response:
+    return web.post(
         "/api/v1/claims",
         headers={"Idempotency-Key": key},
         json={
             "campaign_id": "campaign",
             "creator_x_id": "123",
-            "draft": "Exact draft",
-            "external_id": "creator-claim-1",
+            "draft": draft,
+            "external_id": external_id,
         },
     )
+
+
+def _claim(web: TestClient, **request: Any) -> dict[str, Any]:
+    """Create a claim and return the accepted claim resource."""
+
+    response = _post_claim(web, **request)
     assert response.status_code == 200, response.text
-    return response.json()
+    result: dict[str, Any] = response.json()
+    return result
+
+
+def _submit(
+    web: TestClient,
+    *,
+    claim_id: str | None = None,
+    creator_x_id: str = "123",
+    key: str = "submission-key-0001",
+    external_id: str | None = None,
+    campaign_id: str = "campaign",
+) -> httpx.Response:
+    return web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": key},
+        json={
+            "campaign_id": campaign_id,
+            "tweet_id": "999",
+            "claim_id": claim_id,
+            "creator_x_id": creator_x_id,
+            "external_id": external_id,
+        },
+    )
+
+
+def _refusal(code: str, message: str, *, retryable: bool = False) -> dict[str, object]:
+    return {"code": code, "message": message, "retryable": retryable}
+
+
+def _error_envelope(response: httpx.Response) -> tuple[int, dict[str, object]]:
+    """Return the status and error of a response whose body is only the error envelope."""
+
+    body = response.json()
+    assert list(body) == ["error"], body
+    return response.status_code, body["error"]
 
 
 def test_miner_api_does_not_require_the_campaign_feed(
@@ -360,8 +423,10 @@ def test_application_api_requires_internal_bearer_token(tmp_path: Path) -> None:
 
     response = web.get("/api/v1/campaigns")
 
-    assert response.status_code == 401
-    assert response.json()["error"]["code"] == "invalid_authentication"
+    assert _error_envelope(response) == (
+        401,
+        _refusal("invalid_authentication", "Invalid or missing credentials."),
+    )
     assert response.headers["www-authenticate"] == "Bearer"
     assert web.get("/health").status_code == 200
 
@@ -417,44 +482,6 @@ def test_openapi_pins_the_public_v1_route_and_auth_contract(tmp_path: Path) -> N
         assert idempotency["required"] is True
 
 
-def test_central_registration_errors_keep_a_stable_application_envelope(
-    tmp_path: Path,
-) -> None:
-    class RegistrationDeniedResults(Results):
-        async def campaigns(
-            self,
-            ecosystem_ids: tuple[str, ...] = (),
-        ) -> list[dict[str, Any]]:
-            del ecosystem_ids
-            raise _central_error(403, "/api/v2/miners/x/campaigns")
-
-    response = build_client(tmp_path, results_client=RegistrationDeniedResults()).get(
-        "/api/v1/campaigns"
-    )
-
-    assert response.status_code == 403
-    assert response.json() == {
-        "error": {
-            "code": "miner_not_registered",
-            "message": "The miner hotkey is not currently registered on subnet 93.",
-            "retryable": False,
-        }
-    }
-
-
-def test_campaign_lookup_only_treats_central_404_as_not_found(tmp_path: Path) -> None:
-    class UnavailableResults(Results):
-        async def campaign(self, campaign_id: str) -> dict[str, Any]:
-            raise _central_error(503, f"/api/v2/miners/x/campaigns/{campaign_id}")
-
-    web = build_client(tmp_path, results_client=UnavailableResults())
-
-    response = web.get("/api/v1/campaigns/campaign")
-
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "central_api_unavailable"
-
-
 def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> None:
     web = build_client(tmp_path, enabled_ecosystems=("tao",))
 
@@ -464,16 +491,12 @@ def test_campaigns_and_ecosystems_respect_configured_filter(tmp_path: Path) -> N
     assert campaigns[0]["campaign_id"] == "campaign"
     assert [item["ecosystem_id"] for item in ecosystems] == ["tao"]
     assert web.get("/api/v1/campaigns").headers["cache-control"] == "no-store"
-    rejected = web.get("/api/v1/campaigns?ecosystem_id=hyperliquid")
-    assert rejected.status_code == 400
-    assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"
 
 
 def test_leaderboard_is_limited_to_enabled_ecosystems(tmp_path: Path) -> None:
     web = build_client(tmp_path, enabled_ecosystems=("tao",))
 
     response = web.get("/api/v1/leaderboard?ecosystem_id=tao&limit=25&offset=50")
-    rejected = web.get("/api/v1/leaderboard?ecosystem_id=hyperliquid")
 
     assert response.status_code == 200
     assert response.json()["ecosystem_ids"] == ["tao"]
@@ -485,8 +508,6 @@ def test_leaderboard_is_limited_to_enabled_ecosystems(tmp_path: Path) -> None:
             "scores": {"tao": 0.9},
         }
     ]
-    assert rejected.status_code == 400
-    assert rejected.json()["error"]["code"] == "ecosystem_not_enabled"
 
 
 def test_eligibility_cannot_expand_beyond_enabled_ecosystems(tmp_path: Path) -> None:
@@ -517,13 +538,10 @@ def test_eligibility_cannot_expand_beyond_enabled_ecosystems(tmp_path: Path) -> 
     assert eligibility.json()["badges"] == []
     assert eligibility.json()["reason"] == "creator_not_eligible"
 
-    claim = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-key-0001"},
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
+    assert _error_envelope(_post_claim(web)) == (
+        400,
+        _refusal("creator_not_eligible", "creator is not eligible to claim this campaign"),
     )
-    assert claim.status_code == 400
-    assert claim.json()["error"]["code"] == "creator_not_eligible"
 
 
 def test_claim_and_submission_are_durable_and_recoverable(tmp_path: Path) -> None:
@@ -534,17 +552,7 @@ def test_claim_and_submission_are_durable_and_recoverable(tmp_path: Path) -> Non
     assert claim["commitment"]["block"] == 100
     assert web.get(f"/api/v1/claims/{claim['claim_id']}").json() == claim
 
-    submission = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-            "creator_x_id": "123",
-            "external_id": "creator-submission-1",
-        },
-    )
+    submission = _submit(web, claim_id=claim["claim_id"], external_id="creator-submission-1")
 
     assert submission.status_code == 200
     assert submission.json()["status"] == "tweet_received"
@@ -567,58 +575,10 @@ def test_preclaim_submission_remains_pinned_to_claim_snapshot(tmp_path: Path) ->
         "campaign_snapshot_id": "sha256-new-snapshot",
     }
 
-    submission = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-            "creator_x_id": "123",
-        },
-    )
+    submission = _submit(web, claim_id=claim["claim_id"])
 
     assert submission.status_code == 200
     assert submission.json()["campaign_snapshot_id"] == "sha256-snapshot"
-
-
-def test_direct_submission_enforces_creator_eligibility(tmp_path: Path) -> None:
-    class IneligibleDirectResults(DirectResults):
-        async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
-            result = await super().eligibility(campaign_id, creator_x_id)
-            result.update(
-                eligible=False,
-                eligible_if_published_now=False,
-                eligible_ecosystems=[],
-                badges=[],
-                reason="creator_not_eligible",
-            )
-            return result
-
-    rejected_path = tmp_path / "rejected"
-    rejected_path.mkdir()
-    rejected = build_client(rejected_path, results_client=IneligibleDirectResults())
-    response = rejected.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
-    )
-
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "creator_not_eligible"
-
-    accepted_path = tmp_path / "accepted"
-    accepted_path.mkdir()
-    accepted = build_client(accepted_path, results_client=DirectResults())
-    response = accepted.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["claim_id"] is None
-    assert response.json()["submission_commitment"]["status"] == "queued"
 
 
 def test_direct_submission_accepts_existing_post_during_evaluation_grace(
@@ -626,11 +586,7 @@ def test_direct_submission_accepts_existing_post_during_evaluation_grace(
 ) -> None:
     web = build_client(tmp_path, results_client=EvaluatingDirectResults())
 
-    response = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
-    )
+    response = _submit(web)
 
     assert response.status_code == 200
     assert response.json()["claim_id"] is None
@@ -639,72 +595,12 @@ def test_direct_submission_accepts_existing_post_during_evaluation_grace(
     assert response.json()["submission_commitment"]["block"] == 100
 
 
-def test_direct_submission_rejects_grace_commit_after_scoring_close(
-    tmp_path: Path,
-) -> None:
-    web = build_client(
-        tmp_path,
-        submitter=LateSubmitter(),
-        results_client=EvaluatingDirectResults(),
-    )
-
-    response = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
-    )
-
-    assert response.status_code == 409
-    assert response.json()["error"] == {
-        "code": "submission_deadline_passed",
-        "message": "submission deadline passed before on-chain commitment",
-        "retryable": False,
-    }
-
-
-def test_direct_submission_reports_unconfirmed_grace_commit_as_retryable(
-    tmp_path: Path,
-) -> None:
-    web = build_client(
-        tmp_path,
-        submitter=SlowSubmitter(),
-        timeout=0.01,
-        results_client=EvaluatingDirectResults(),
-    )
-
-    response = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
-    )
-
-    assert response.status_code == 503
-    assert response.json()["error"] == {
-        "code": "submission_commitment_pending",
-        "message": "submission commitment was not confirmed before request timeout",
-        "retryable": True,
-    }
-
-
 def test_repeated_submission_mapping_returns_the_existing_receipt(tmp_path: Path) -> None:
     web = build_client(tmp_path, results_client=DirectResults())
-    body = {"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"}
 
-    first = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json=body,
-    )
-    new_key = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0002"},
-        json=body,
-    )
-    changed_external_id = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={**body, "external_id": "changed"},
-    )
+    first = _submit(web)
+    new_key = _submit(web, key="submission-key-0002")
+    changed_external_id = _submit(web, external_id="changed")
 
     assert [first.status_code, new_key.status_code, changed_external_id.status_code] == [200] * 3
     assert new_key.json()["submission_id"] == first.json()["submission_id"]
@@ -825,13 +721,10 @@ def test_idempotency_replays_same_claim_and_rejects_changed_input(tmp_path: Path
     second = _claim(web)
 
     assert second["claim_id"] == first["claim_id"]
-    conflict = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-key-0001"},
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Changed"},
+    assert _error_envelope(_post_claim(web, draft="Changed")) == (
+        409,
+        _refusal("idempotency_conflict", "idempotency key was reused with different input"),
     )
-    assert conflict.status_code == 409
-    assert conflict.json()["error"]["code"] == "idempotency_conflict"
 
 
 def test_submission_requires_matching_safe_claim_and_creator(tmp_path: Path) -> None:
@@ -849,136 +742,176 @@ def test_submission_requires_matching_safe_claim_and_creator(tmp_path: Path) -> 
     web = build_client(tmp_path, results_client=TwoCampaignResults())
     claim = _claim(web)
 
-    other_creator = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-            "creator_x_id": "456",
-        },
-    )
-    other_campaign = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0002"},
-        json={
-            "campaign_id": "other-campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-            "creator_x_id": "123",
-        },
+    other_creator = _submit(web, claim_id=claim["claim_id"], creator_x_id="456")
+    other_campaign = _submit(
+        web,
+        claim_id=claim["claim_id"],
+        key="submission-key-0002",
+        campaign_id="other-campaign",
     )
 
     assert _error_envelope(other_creator) == (
         400,
-        {
-            "code": "invalid_request",
-            "message": "claim creator does not match submission creator",
-            "retryable": False,
-        },
+        _refusal("invalid_request", "claim creator does not match submission creator"),
     )
     assert _error_envelope(other_campaign) == (
         400,
-        {
-            "code": "invalid_request",
-            "message": "claim campaign does not match submission campaign",
-            "retryable": False,
-        },
+        _refusal("invalid_request", "claim campaign does not match submission campaign"),
     )
     assert web.get("/api/v1/submissions").json()["items"] == []
 
 
-def test_not_found_and_validation_errors_use_stable_envelope(tmp_path: Path) -> None:
+def test_validation_errors_use_stable_envelope_without_echoing_input(tmp_path: Path) -> None:
     web = build_client(tmp_path)
 
-    campaign = web.get("/api/v1/campaigns/missing")
-    claim = web.get("/api/v1/claims/does-not-exist")
-    submission = web.get("/api/v1/submissions/does-not-exist")
     validation = web.post(
         "/api/v1/claims",
         json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "private"},
     )
 
-    assert campaign.status_code == 404
-    assert campaign.json()["error"]["code"] == "campaign_not_found"
-    assert claim.status_code == 404
-    assert claim.json()["error"]["code"] == "claim_not_found"
-    assert submission.status_code == 404
-    assert submission.json()["error"]["code"] == "submission_not_found"
-    assert validation.status_code == 422
-    assert validation.json() == {
-        "error": {
-            "code": "invalid_request",
-            "message": "Request validation failed.",
-            "retryable": False,
-        }
-    }
+    assert _error_envelope(validation) == (
+        422,
+        _refusal("invalid_request", "Request validation failed."),
+    )
     assert "private" not in validation.text
-
-
-def _error_envelope(response: httpx.Response) -> tuple[int, dict[str, object]]:
-    return response.status_code, response.json()["error"]
 
 
 def test_every_operation_error_code_has_an_http_status() -> None:
     assert set(_ERROR_STATUS) == set(ErrorCode)
 
 
-def test_operation_refusals_keep_their_codes_statuses_and_messages(tmp_path: Path) -> None:
-    web = build_client(tmp_path)
-    missing_campaign = web.get("/api/v1/campaigns/missing/eligibility/123")
-    foreign_claim = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": "ab" * 16,
-            "creator_x_id": "123",
-        },
-    )
+def _get(path: str) -> Callable[[TestClient], httpx.Response]:
+    return lambda web: web.get(path)
 
-    assert _error_envelope(missing_campaign) == (
-        404,
-        {
-            "code": "campaign_not_found",
-            "message": "campaign is not available to this miner",
-            "retryable": False,
-        },
-    )
-    assert _error_envelope(foreign_claim) == (
-        404,
-        {
-            "code": "claim_not_found",
-            "message": "submission claim_id does not belong to this miner",
-            "retryable": False,
-        },
-    )
+
+@pytest.mark.parametrize(
+    ("options", "send", "status", "error"),
+    [
+        pytest.param(
+            {},
+            _get("/api/v1/campaigns/missing"),
+            404,
+            _refusal("campaign_not_found", "campaign not found"),
+            id="campaign-not-found",
+        ),
+        pytest.param(
+            {},
+            _get("/api/v1/campaigns/missing/eligibility/123"),
+            404,
+            _refusal("campaign_not_found", "campaign is not available to this miner"),
+            id="eligibility-for-missing-campaign",
+        ),
+        pytest.param(
+            {"results_client": UnavailableCampaignResults()},
+            _get("/api/v1/campaigns/campaign"),
+            503,
+            _refusal(
+                "central_api_unavailable",
+                "The central miner API cannot currently verify this request.",
+                retryable=True,
+            ),
+            id="campaign-lookup-only-treats-central-404-as-not-found",
+        ),
+        pytest.param(
+            {},
+            _get("/api/v1/claims/does-not-exist"),
+            404,
+            _refusal("claim_not_found", "claim not found"),
+            id="claim-not-found",
+        ),
+        pytest.param(
+            {},
+            _get("/api/v1/submissions/does-not-exist"),
+            404,
+            _refusal("submission_not_found", "submission not found"),
+            id="submission-not-found",
+        ),
+        pytest.param(
+            {},
+            lambda web: _submit(web, claim_id="ab" * 16),
+            404,
+            _refusal("claim_not_found", "submission claim_id does not belong to this miner"),
+            id="submission-with-foreign-claim",
+        ),
+        *(
+            pytest.param(
+                {"enabled_ecosystems": ("tao",)},
+                _get(f"{route}?ecosystem_id=hyperliquid"),
+                400,
+                _refusal(
+                    "ecosystem_not_enabled", "requested ecosystem is not enabled by this miner"
+                ),
+                id=f"{route.removeprefix('/api/v1/')}-outside-enabled-ecosystems",
+            )
+            for route in (
+                "/api/v1/campaigns",
+                "/api/v1/leaderboard",
+                "/api/v1/claims",
+                "/api/v1/submissions",
+            )
+        ),
+        pytest.param(
+            {"results_client": DirectResults()},
+            _post_claim,
+            400,
+            _refusal("invalid_request", "campaign does not accept claims"),
+            id="uncoded-refusal-is-invalid-request",
+        ),
+        pytest.param(
+            {"results_client": IneligibleDirectResults()},
+            _submit,
+            400,
+            _refusal("creator_not_eligible", "creator is not eligible to submit to this campaign"),
+            id="direct-submission-by-ineligible-creator",
+        ),
+        pytest.param(
+            {"submitter": LateSubmitter(), "results_client": EvaluatingDirectResults()},
+            _submit,
+            409,
+            _refusal(
+                "submission_deadline_passed",
+                "submission deadline passed before on-chain commitment",
+            ),
+            id="grace-commit-after-scoring-close",
+        ),
+        pytest.param(
+            {
+                "submitter": SlowSubmitter(),
+                "timeout": 0.01,
+                "results_client": EvaluatingDirectResults(),
+            },
+            _submit,
+            503,
+            _refusal(
+                "submission_commitment_pending",
+                "submission commitment was not confirmed before request timeout",
+                retryable=True,
+            ),
+            id="grace-commit-unconfirmed-before-timeout",
+        ),
+    ],
+)
+def test_single_request_refusals_keep_their_codes_statuses_and_messages(
+    tmp_path: Path,
+    options: dict[str, Any],
+    send: Callable[[TestClient], httpx.Response],
+    status: int,
+    error: dict[str, object],
+) -> None:
+    web = build_client(tmp_path, **options)
+
+    assert _error_envelope(send(web)) == (status, error)
 
 
 def test_unsafe_claim_submission_is_refused_with_its_code(tmp_path: Path) -> None:
     web = build_client(tmp_path, submitter=SlowSubmitter(), timeout=0.05)
     claim = _claim(web)
 
-    response = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-            "creator_x_id": "123",
-        },
-    )
+    response = _submit(web, claim_id=claim["claim_id"])
 
     assert _error_envelope(response) == (
         400,
-        {
-            "code": "claim_not_safe_to_post",
-            "message": "claim is not safe to post",
-            "retryable": False,
-        },
+        _refusal("claim_not_safe_to_post", "claim is not safe to post"),
     )
 
 
@@ -988,103 +921,86 @@ def test_full_pending_queue_is_refused_with_its_code(tmp_path: Path) -> None:
         submitter=FailingSubmitter(),
         policy=BatchPolicy(max_age_seconds=5, max_pending_events=1),
     )
-    first = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-key-0001"},
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "First"},
-    )
+    first = _post_claim(web, draft="First")
 
-    second = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-key-0002"},
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Second"},
-    )
+    second = _post_claim(web, key="claim-key-0002", draft="Second")
 
     assert first.status_code == 503
     assert _error_envelope(second) == (
         400,
-        {
-            "code": "queue_capacity_exhausted",
-            "message": "miner pending queue capacity is exhausted",
-            "retryable": False,
-        },
-    )
-
-
-def test_uncoded_protocol_refusal_is_an_invalid_request(tmp_path: Path) -> None:
-    web = build_client(tmp_path, results_client=DirectResults())
-
-    response = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-key-0001"},
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
-    )
-
-    assert _error_envelope(response) == (
-        400,
-        {
-            "code": "invalid_request",
-            "message": "campaign does not accept claims",
-            "retryable": False,
-        },
+        _refusal("queue_capacity_exhausted", "miner pending queue capacity is exhausted"),
     )
 
 
 @pytest.mark.parametrize(
     ("failure", "status", "error", "retry_after"),
     [
-        (
+        pytest.param(
+            _central_error(403, "/api/v2/miners/x/campaigns"),
+            403,
+            _refusal(
+                "miner_not_registered",
+                "The miner hotkey is not currently registered on subnet 93.",
+            ),
+            None,
+            id="registration-403",
+        ),
+        pytest.param(
             _central_error(429, "/api/v2/miners/x/campaigns", {"Retry-After": "30"}),
             429,
-            {
-                "code": "central_api_rate_limited",
-                "message": "The central miner API rate limit was reached.",
-                "retryable": True,
-            },
+            _refusal(
+                "central_api_rate_limited",
+                "The central miner API rate limit was reached.",
+                retryable=True,
+            ),
             "30",
+            id="rate-limited-429",
         ),
-        (
+        pytest.param(
             _central_error(503, "/api/v2/miners/x/campaigns", {"Retry-After": "5"}),
             503,
-            {
-                "code": "central_api_unavailable",
-                "message": "The central miner API cannot currently verify this request.",
-                "retryable": True,
-            },
+            _refusal(
+                "central_api_unavailable",
+                "The central miner API cannot currently verify this request.",
+                retryable=True,
+            ),
             "5",
+            id="unavailable-503",
         ),
-        (
+        pytest.param(
             _central_error(500, "/api/v2/miners/x/campaigns"),
             502,
-            {
-                "code": "central_api_error",
-                "message": "The central miner API returned an unexpected response.",
-                "retryable": True,
-            },
+            _refusal(
+                "central_api_error",
+                "The central miner API returned an unexpected response.",
+                retryable=True,
+            ),
             None,
+            id="server-error-500",
         ),
-        (
+        pytest.param(
             _central_error(400, "/api/v2/miners/x/campaigns"),
             502,
-            {
-                "code": "central_api_error",
-                "message": "The central miner API returned an unexpected response.",
-                "retryable": False,
-            },
+            _refusal(
+                "central_api_error",
+                "The central miner API returned an unexpected response.",
+            ),
             None,
+            id="client-error-400",
         ),
-        (
+        pytest.param(
             httpx.ConnectError(
                 "unreachable",
                 request=httpx.Request("GET", "https://central.test/api/v2/miners/x/campaigns"),
             ),
             503,
-            {
-                "code": "central_api_unavailable",
-                "message": "The central miner API is temporarily unreachable.",
-                "retryable": True,
-            },
+            _refusal(
+                "central_api_unavailable",
+                "The central miner API is temporarily unreachable.",
+                retryable=True,
+            ),
             None,
+            id="unreachable",
         ),
     ],
 )
@@ -1118,18 +1034,9 @@ def test_chain_failure_after_claim_persistence_is_retryable_and_deduplicated(
     tmp_path: Path,
 ) -> None:
     web = build_client(tmp_path, submitter=FailingSubmitter())
-    request = {
-        "campaign_id": "campaign",
-        "creator_x_id": "123",
-        "draft": "Exact draft",
-        "external_id": "creator-claim-chain-failure",
-    }
+    request = {"key": "claim-chain-failure", "external_id": "creator-claim-chain-failure"}
 
-    first = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-chain-failure"},
-        json=request,
-    )
+    first = _post_claim(web, **request)
 
     assert first.status_code == 503
     assert first.json() == {
@@ -1146,11 +1053,7 @@ def test_chain_failure_after_claim_persistence_is_retryable_and_deduplicated(
     assert len(persisted) == 1
     claim_id = persisted[0]["claim_id"]
 
-    replay = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-chain-failure"},
-        json=request,
-    )
+    replay = _post_claim(web, **request)
 
     assert replay.status_code == 503
     after_replay = web.get(
@@ -1163,14 +1066,12 @@ def test_chain_failure_after_claim_persistence_is_retryable_and_deduplicated(
 def test_unqualified_miner_cannot_create_operations(tmp_path: Path) -> None:
     web = build_client(tmp_path, qualified=False)
 
-    response = web.post(
-        "/api/v1/claims",
-        headers={"Idempotency-Key": "claim-key-0001"},
-        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
-    )
+    response = _post_claim(web)
 
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "miner_not_qualified"
+    assert _error_envelope(response) == (
+        403,
+        _refusal("miner_not_qualified", "miner is not qualified: conviction_below_minimum"),
+    )
     assert web.get("/api/v1/claims").json()["items"] == []
 
 
@@ -1178,16 +1079,7 @@ def test_finalized_events_survive_restart_for_validator_fetch(tmp_path: Path) ->
     database = tmp_path / "miner.sqlite3"
     web = build_client(tmp_path)
     claim = _claim(web)
-    submission = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-0001"},
-        json={
-            "campaign_id": "campaign",
-            "tweet_id": "999",
-            "claim_id": claim["claim_id"],
-            "creator_x_id": "123",
-        },
-    ).json()
+    submission = _submit(web, claim_id=claim["claim_id"]).json()
 
     restarted = MinerEngine(
         miner_hotkey=MINER,
@@ -1241,15 +1133,16 @@ def test_claim_fetches_campaign_once_and_fresh_eligibility(tmp_path: Path) -> No
     assert claim["usability"]["safe_to_post"] is True
 
 
-def test_direct_submission_fetches_campaign_once_and_fresh_eligibility(tmp_path: Path) -> None:
+def test_direct_submission_needs_no_claim_and_reads_campaign_and_eligibility_once(
+    tmp_path: Path,
+) -> None:
     results = CountingDirectResults()
     web = build_client(tmp_path, results_client=results)
-    response = web.post(
-        "/api/v1/submissions",
-        headers={"Idempotency-Key": "submission-key-once"},
-        json={"campaign_id": "campaign", "tweet_id": "999", "creator_x_id": "123"},
-    )
+
+    response = _submit(web)
+
     assert response.status_code == 200
+    assert response.json()["claim_id"] is None
+    assert response.json()["submission_commitment"]["status"] == "queued"
     assert results.campaign_calls == 1
     assert results.eligibility_calls == 1
-    assert response.json()["submission_commitment"]["status"] == "queued"

@@ -18,7 +18,6 @@ from bitcast_x.miner import (
 )
 from bitcast_x.protocol import (
     ClaimEvent,
-    CommitmentEnvelope,
     CommitmentPosition,
     DraftReveal,
     OnChainEnvelope,
@@ -218,34 +217,40 @@ async def test_page_is_pinned_to_validator_snapshot_sequence(tmp_path: Path) -> 
     assert page.has_more is False
 
 
+class LostResponseSubmitter(FakeSubmitter):
+    """Finalize every commitment on chain, then lose the response to the caller."""
+
+    async def submit(self, envelope: OnChainEnvelope) -> FinalizedCommitment:
+        await super().submit(envelope)
+        raise ChainOperationError("connection lost after finalization")
+
+
 @pytest.mark.asyncio
 async def test_restart_recovers_prepared_batch_without_duplicate_commit(tmp_path: Path) -> None:
     database = tmp_path / "miner.db"
-    submitter = FakeSubmitter()
+    submitter = LostResponseSubmitter()
     first_sdk = build_sdk(database, submitter)
     claim_id = first_sdk.create_claim(
         campaign_id="campaign",
         creator_x_id="123",
         draft="A private draft",
     )
-    queued = first_sdk.engine.store.queued(limit=100)
-    prepared = first_sdk.engine.store.prepare_batch(MINER, tuple(event for event, _ in queued))
-    envelope = CommitmentEnvelope(
-        sequence=prepared.sequence,
-        event_count=len(prepared.events),
-        batch_hash=bytes.fromhex(prepared.batch_hash),
-    )
-    submitter.latest_commitment = FinalizedCommitment(
-        position=CommitmentPosition(block=101, extrinsic_index=3),
-        stored_envelope=envelope.encode(),
-    )
+    with pytest.raises(ChainOperationError, match="connection lost"):
+        await first_sdk.engine.commit_ready(force=True)
+    assert first_sdk.claim_status(claim_id) is EventStatus.WAITING_FOR_COMMITMENT
 
     restarted_sdk = build_sdk(database, submitter)
     recovered = await restarted_sdk.engine.commit_ready(force=True)
+    page = await restarted_sdk.engine.batch_page(
+        BatchPageRequest(after_sequence=0, max_batches=10), caller_hotkey="validator"
+    )
 
-    assert recovered == prepared
-    assert submitter.submissions == 0
+    assert recovered is not None
+    assert submitter.submissions == 1
     assert restarted_sdk.claim_status(claim_id) is EventStatus.SAFE_TO_POST
+    assert [(item.batch["batch_hash"], item.position.block) for item in page.batches] == [
+        (recovered.batch_hash, 101)
+    ]
 
 
 @pytest.mark.asyncio
@@ -348,7 +353,9 @@ def test_submission_rejects_claim_owned_by_another_miner(tmp_path: Path) -> None
         )
 
 
-def test_submission_identity_is_idempotent_across_restart(tmp_path: Path) -> None:
+def test_submission_identity_is_idempotent_across_restart_and_includes_the_creator(
+    tmp_path: Path,
+) -> None:
     database = tmp_path / "miner.db"
     first = build_sdk(database, FakeSubmitter())
     submission_id = first.submit_tweet(
@@ -369,25 +376,15 @@ def test_submission_identity_is_idempotent_across_restart(tmp_path: Path) -> Non
     assert repeated_id == submission_id
     assert len(restarted.submissions()) == 1
 
-
-def test_submission_identity_includes_the_signed_creator(tmp_path: Path) -> None:
-    sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
-
-    first_id = sdk.submit_tweet(
-        campaign_id="campaign",
-        tweet_id="999",
-        claim_id=None,
-        creator_x_id="123",
-    )
-    second_id = sdk.submit_tweet(
+    other_creator_id = restarted.submit_tweet(
         campaign_id="campaign",
         tweet_id="999",
         claim_id=None,
         creator_x_id="456",
     )
 
-    assert second_id != first_id
-    assert {item["creator_x_id"] for item in sdk.submissions()} == {"123", "456"}
+    assert other_creator_id != submission_id
+    assert {item["creator_x_id"] for item in restarted.submissions()} == {"123", "456"}
 
 
 @pytest.mark.asyncio
