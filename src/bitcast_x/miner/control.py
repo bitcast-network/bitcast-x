@@ -12,6 +12,7 @@ import httpx
 
 from bitcast_x.errors import ProtocolError
 from bitcast_x.miner.engine import MinerSdk
+from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.results import MinerResultsClient
 from bitcast_x.miner.store import EventStatus, OperationMetadata
 from bitcast_x.protocol import MAX_ACTIVE_CLAIMS
@@ -54,7 +55,7 @@ class MinerControlService:
         status = await self.qualification_status_cached()
         if not status.get("eligible", False):
             reason = status.get("reason", "unknown")
-            raise ProtocolError(f"miner is not qualified: {reason}")
+            raise OperationError(ErrorCode.MINER_NOT_QUALIFIED, f"miner is not qualified: {reason}")
 
     async def qualification_status_cached(self) -> dict[str, Any]:
         """Qualification snapshot, cached for a bounded window.
@@ -76,7 +77,9 @@ class MinerControlService:
     def _ecosystems(self, requested: tuple[str, ...] = ()) -> tuple[str, ...]:
         configured = set(self.enabled_ecosystem_ids)
         if requested and configured and not set(requested).issubset(configured):
-            raise ProtocolError("requested ecosystem is not enabled by this miner")
+            raise OperationError(
+                ErrorCode.ECOSYSTEM_NOT_ENABLED, "requested ecosystem is not enabled by this miner"
+            )
         return requested or self.enabled_ecosystem_ids
 
     async def ecosystems(self) -> list[dict[str, Any]]:
@@ -146,10 +149,18 @@ class MinerControlService:
             return None
         return campaign
 
-    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+    async def _available_campaign(self, campaign_id: str) -> dict[str, Any]:
+        """Return a campaign this miner may operate on, or refuse the operation."""
+
         campaign = await self.campaign(campaign_id)
         if campaign is None:
-            raise ProtocolError("campaign is not available to this miner")
+            raise OperationError(
+                ErrorCode.CAMPAIGN_NOT_FOUND, "campaign is not available to this miner"
+            )
+        return campaign
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        await self._available_campaign(campaign_id)
         return await self._creator_eligibility(campaign_id, creator_x_id)
 
     async def _creator_eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
@@ -184,8 +195,7 @@ class MinerControlService:
         campaign_id: str,
         ecosystem_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        if await self.campaign(campaign_id) is None:
-            raise ProtocolError("campaign is not available to this miner")
+        await self._available_campaign(campaign_id)
         return await self.results_client.campaign_tweets(
             campaign_id,
             self._ecosystems(ecosystem_ids),
@@ -203,14 +213,14 @@ class MinerControlService:
         """Validate, persist, and commit a pre-publication claim."""
 
         await self._require_qualified()
-        campaign = await self.campaign(campaign_id)
-        if campaign is None:
-            raise ProtocolError("campaign is not available to this miner")
+        campaign = await self._available_campaign(campaign_id)
         if not campaign.get("capabilities", {}).get("can_claim", False):
             raise ProtocolError("campaign does not accept claims")
         eligibility = await self._creator_eligibility(campaign_id, creator_x_id)
         if not eligibility.get("claim_eligible", False):
-            raise ProtocolError("creator is not eligible to claim this campaign")
+            raise OperationError(
+                ErrorCode.CREATOR_NOT_ELIGIBLE, "creator is not eligible to claim this campaign"
+            )
         metadata = OperationMetadata(
             idempotency_key=idempotency_key,
             request_fingerprint=_fingerprint(
@@ -251,9 +261,7 @@ class MinerControlService:
         """Validate and durably accept a published tweet mapping."""
 
         await self._require_qualified()
-        campaign = await self.campaign(campaign_id)
-        if campaign is None:
-            raise ProtocolError("campaign is not available to this miner")
+        campaign = await self._available_campaign(campaign_id)
         if not campaign.get("capabilities", {}).get("can_submit", False):
             raise ProtocolError("campaign does not accept submissions")
         requires_claim = bool(campaign.get("capabilities", {}).get("requires_claim", True))
@@ -273,13 +281,15 @@ class MinerControlService:
         if claim_id is not None:
             claim = self.claim_status(claim_id)
             if claim is None:
-                raise ProtocolError("submission claim_id does not belong to this miner")
+                raise OperationError(
+                    ErrorCode.CLAIM_NOT_FOUND, "submission claim_id does not belong to this miner"
+                )
             if claim.get("campaign_id") != campaign_id:
                 raise ProtocolError("claim campaign does not match submission campaign")
             if claim.get("creator_x_id") != creator_x_id:
                 raise ProtocolError("claim creator does not match submission creator")
             if not claim.get("usability", {}).get("safe_to_post", False):
-                raise ProtocolError("claim is not safe to post")
+                raise OperationError(ErrorCode.CLAIM_NOT_SAFE_TO_POST, "claim is not safe to post")
             operation_snapshot_id = str(claim["campaign_snapshot_id"])
             operation_ecosystem_ids = tuple(claim.get("ecosystem_ids", []))
         else:
@@ -290,7 +300,10 @@ class MinerControlService:
             # validators separately enforce that the tweet was published by
             # campaign.closes_at.
             if not eligibility.get("eligible", False):
-                raise ProtocolError("creator is not eligible to submit to this campaign")
+                raise OperationError(
+                    ErrorCode.CREATOR_NOT_ELIGIBLE,
+                    "creator is not eligible to submit to this campaign",
+                )
 
         metadata = OperationMetadata(
             idempotency_key=idempotency_key,
@@ -318,7 +331,10 @@ class MinerControlService:
         if grace_submission:
             commitment_block = await self._await_submission_commit(submission_id)
             if scoring_close_block is None or commitment_block > scoring_close_block:
-                raise ProtocolError("submission deadline passed before on-chain commitment")
+                raise OperationError(
+                    ErrorCode.SUBMISSION_DEADLINE_PASSED,
+                    "submission deadline passed before on-chain commitment",
+                )
         submission = await self.submission_status(submission_id)
         if submission is None:
             raise ProtocolError("durable submission disappeared")
@@ -509,6 +525,8 @@ class MinerControlService:
         try:
             return await asyncio.wait_for(commit_until_finalized(), timeout=timeout)
         except TimeoutError as error:
-            raise ProtocolError(
-                "submission commitment was not confirmed before request timeout"
+            raise OperationError(
+                ErrorCode.SUBMISSION_COMMITMENT_PENDING,
+                "submission commitment was not confirmed before request timeout",
+                retryable=True,
             ) from error

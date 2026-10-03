@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from bitcast_x.errors import ChainOperationError, ProtocolError
+from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.store import EventStatus, MinerStore, OperationMetadata
 from bitcast_x.protocol import (
     ClaimEvent,
@@ -279,7 +280,9 @@ class MinerSdk:
         """Queue a completed tweet mapping and return its submission id."""
 
         if claim_id is not None and not self.engine.store.has_claim(claim_id):
-            raise ProtocolError("submission claim_id does not belong to this miner")
+            raise OperationError(
+                ErrorCode.CLAIM_NOT_FOUND, "submission claim_id does not belong to this miner"
+            )
 
         identity = "\0".join(
             (

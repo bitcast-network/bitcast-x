@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import TypeAdapter
 
 from bitcast_x.errors import ProtocolError
+from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.protocol import (
     MAX_ACTIVE_CLAIMS,
     ClaimEvent,
@@ -327,7 +328,10 @@ class MinerStore:
                 ).fetchone()
                 if idempotent is not None:
                     if idempotent["request_fingerprint"] != metadata.request_fingerprint:
-                        raise ProtocolError("idempotency key was reused with different input")
+                        raise OperationError(
+                            ErrorCode.IDEMPOTENCY_CONFLICT,
+                            "idempotency key was reused with different input",
+                        )
                     return str(idempotent["event_id"])
             existing = connection.execute(
                 "SELECT payload_json, private_reveal_json FROM events WHERE event_id = ?",
@@ -361,7 +365,9 @@ class MinerStore:
                 int(pending["event_count"]) >= max_pending_events
                 or int(pending["byte_count"]) + event_bytes > max_pending_bytes
             ):
-                raise ProtocolError("miner pending queue capacity is exhausted")
+                raise OperationError(
+                    ErrorCode.QUEUE_CAPACITY_EXHAUSTED, "miner pending queue capacity is exhausted"
+                )
             connection.execute(
                 """
                 INSERT INTO events(

@@ -19,9 +19,10 @@ from bitcast_x.miner import (
     MinerSdk,
     MinerStore,
 )
-from bitcast_x.miner.api import create_control_app
+from bitcast_x.miner.api import _ERROR_STATUS, create_control_app
 from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
+from bitcast_x.miner.errors import ErrorCode
 from bitcast_x.miner.web import build_miner_api
 from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition
 from bitcast_x.transport import BatchPageRequest, create_miner_app
@@ -255,9 +256,11 @@ def test_evaluating_direct_fixture_matches_pinned_bitcast_api_contract() -> None
     assert eligibility.eligible_if_published_now is False
 
 
-def _central_error(status_code: int, path: str) -> httpx.HTTPStatusError:
+def _central_error(
+    status_code: int, path: str, headers: dict[str, str] | None = None
+) -> httpx.HTTPStatusError:
     request = httpx.Request("GET", f"https://central.test{path}")
-    response = httpx.Response(status_code, request=request)
+    response = httpx.Response(status_code, request=request, headers=headers)
     return httpx.HTTPStatusError("central error", request=request, response=response)
 
 
@@ -270,12 +273,13 @@ def build_client(
     qualified: bool = True,
     results_client: Results | None = None,
     split_protocol: bool = False,
+    policy: BatchPolicy | None = None,
 ) -> TestClient:
     engine = MinerEngine(
         miner_hotkey=MINER,
         store=MinerStore(tmp_path / "miner.sqlite3"),
         submitter=submitter or Submitter(),
-        policy=BatchPolicy(max_age_seconds=5),
+        policy=policy or BatchPolicy(max_age_seconds=5),
     )
 
     async def qualification() -> dict[str, object]:
@@ -812,6 +816,184 @@ def test_not_found_and_validation_errors_use_stable_envelope(tmp_path: Path) -> 
         }
     }
     assert "private" not in validation.text
+
+
+def _error_envelope(response: httpx.Response) -> tuple[int, dict[str, object]]:
+    return response.status_code, response.json()["error"]
+
+
+def test_every_operation_error_code_has_an_http_status() -> None:
+    assert set(_ERROR_STATUS) == set(ErrorCode)
+
+
+def test_operation_refusals_keep_their_codes_statuses_and_messages(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+    missing_campaign = web.get("/api/v1/campaigns/missing/eligibility/123")
+    foreign_claim = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={
+            "campaign_id": "campaign",
+            "tweet_id": "999",
+            "claim_id": "ab" * 16,
+            "creator_x_id": "123",
+        },
+    )
+
+    assert _error_envelope(missing_campaign) == (
+        404,
+        {
+            "code": "campaign_not_found",
+            "message": "campaign is not available to this miner",
+            "retryable": False,
+        },
+    )
+    assert _error_envelope(foreign_claim) == (
+        404,
+        {
+            "code": "claim_not_found",
+            "message": "submission claim_id does not belong to this miner",
+            "retryable": False,
+        },
+    )
+
+
+def test_unsafe_claim_submission_is_refused_with_its_code(tmp_path: Path) -> None:
+    web = build_client(tmp_path, submitter=SlowSubmitter(), timeout=0.05)
+    claim = _claim(web)
+
+    response = web.post(
+        "/api/v1/submissions",
+        headers={"Idempotency-Key": "submission-key-0001"},
+        json={
+            "campaign_id": "campaign",
+            "tweet_id": "999",
+            "claim_id": claim["claim_id"],
+            "creator_x_id": "123",
+        },
+    )
+
+    assert _error_envelope(response) == (
+        400,
+        {
+            "code": "claim_not_safe_to_post",
+            "message": "claim is not safe to post",
+            "retryable": False,
+        },
+    )
+
+
+def test_full_pending_queue_is_refused_with_its_code(tmp_path: Path) -> None:
+    web = build_client(
+        tmp_path,
+        submitter=FailingSubmitter(),
+        policy=BatchPolicy(max_age_seconds=5, max_pending_events=1),
+    )
+    first = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-key-0001"},
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "First"},
+    )
+
+    second = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-key-0002"},
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Second"},
+    )
+
+    assert first.status_code == 503
+    assert _error_envelope(second) == (
+        400,
+        {
+            "code": "queue_capacity_exhausted",
+            "message": "miner pending queue capacity is exhausted",
+            "retryable": False,
+        },
+    )
+
+
+def test_uncoded_protocol_refusal_is_an_invalid_request(tmp_path: Path) -> None:
+    web = build_client(tmp_path, results_client=DirectResults())
+
+    response = web.post(
+        "/api/v1/claims",
+        headers={"Idempotency-Key": "claim-key-0001"},
+        json={"campaign_id": "campaign", "creator_x_id": "123", "draft": "Exact draft"},
+    )
+
+    assert _error_envelope(response) == (
+        400,
+        {
+            "code": "invalid_request",
+            "message": "campaign does not accept claims",
+            "retryable": False,
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "status", "error", "retry_after"),
+    [
+        (
+            _central_error(429, "/api/v2/miners/x/campaigns", {"Retry-After": "30"}),
+            429,
+            {
+                "code": "central_api_rate_limited",
+                "message": "The central miner API rate limit was reached.",
+                "retryable": True,
+            },
+            "30",
+        ),
+        (
+            _central_error(500, "/api/v2/miners/x/campaigns"),
+            502,
+            {
+                "code": "central_api_error",
+                "message": "The central miner API returned an unexpected response.",
+                "retryable": True,
+            },
+            None,
+        ),
+        (
+            _central_error(400, "/api/v2/miners/x/campaigns"),
+            502,
+            {
+                "code": "central_api_error",
+                "message": "The central miner API returned an unexpected response.",
+                "retryable": False,
+            },
+            None,
+        ),
+        (
+            httpx.ConnectError(
+                "unreachable",
+                request=httpx.Request("GET", "https://central.test/api/v2/miners/x/campaigns"),
+            ),
+            503,
+            {
+                "code": "central_api_unavailable",
+                "message": "The central miner API is temporarily unreachable.",
+                "retryable": True,
+            },
+            None,
+        ),
+    ],
+)
+def test_central_failures_keep_a_stable_application_envelope(
+    tmp_path: Path,
+    failure: Exception,
+    status: int,
+    error: dict[str, object],
+    retry_after: str | None,
+) -> None:
+    class FailingResults(Results):
+        async def campaigns(self, ecosystem_ids: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+            raise failure
+
+    response = build_client(tmp_path, results_client=FailingResults()).get("/api/v1/campaigns")
+
+    assert _error_envelope(response) == (status, error)
+    assert response.headers.get("retry-after") == retry_after
 
 
 def test_claim_timeout_returns_durable_pending_resource(tmp_path: Path) -> None:
