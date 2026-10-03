@@ -46,10 +46,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
-- Release featured-tweet selections that an adopted campaign edit excludes — for example a moved
-  scoring window that no longer contains the pinned tweet — instead of deferring the campaign's
-  final economics (and weight submission) for the rest of the emission window. The decision is
-  recorded in a new validator store audit table.
+- A pinned featured tweet no longer freezes its campaign contract or holds back settlement. Campaign
+  edits are adopted until economics settle; if an edit leaves the pinned tweet ineligible, that
+  campaign settles without a featured bonus instead of deferring every campaign's economics and
+  weight submission for the rest of the emission window. Replaces the pin-release logic and its
+  `store_audit_events` table; the pinned tweet is never replaced by a different one.
 - Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
   period only when the creator was historically eligible and the submission is committed no later
   than the campaign's scoring-close block.

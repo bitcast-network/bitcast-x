@@ -430,13 +430,54 @@ def test_final_rewards_replay_preview_feature_instead_of_reselecting(tmp_path: P
 
     assert {item.featured_tweet_id for item in floors} == {"1"}
     assert {item.tweet_id for item in floors if item.featured_tweet_bonus} == {"1"}
-    selection = store.featured_tweet_selection("campaign", campaign.model_dump_json())
+    selection = store.featured_tweet_selection("campaign")
     assert selection is not None and selection.tweet_id == "1"
 
 
-def test_final_rewards_wait_for_pinned_feature_evidence_then_self_heal(
-    tmp_path: Path,
-) -> None:
+def test_ineligible_featured_pin_settles_without_bonus_or_replacement(tmp_path: Path) -> None:
+    """A pin that no longer qualifies is dropped; it never stalls settlement.
+
+    Covers the 2026-10 incident: a scoring-window edit excluded the pinned
+    tweet, and settlement (with every weight submission) waited on it.
+    """
+
+    excluded = record("excluded")
+    unrelated = record("unrelated")
+    feed = CampaignFeed(
+        snapshot_id="snapshot",
+        published_at=NOW,
+        campaigns=(excluded, unrelated),
+        ecosystem_maps=(),
+    )
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    store.pin_featured_tweet_selection(
+        campaign_id="excluded",
+        campaign_json=excluded.model_dump_json(),
+        tweet_id="1",
+        selection_pool=("1", "2"),
+        selected_block=19,
+        selected_at=NOW,
+    )
+    coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
+
+    weights, floors = coordinator.shadow_weights(
+        feed,
+        [scored("excluded", "2", MINER_A), scored("unrelated", "3", MINER_B)],
+        block=35,
+        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
+        uids=[0, 1, 2],
+    )
+
+    assert weights[1] > 0 and weights[2] > 0
+    excluded_floors = [item for item in floors if item.campaign_id == "excluded"]
+    assert [item.tweet_id for item in excluded_floors] == ["2"]
+    assert not any(item.featured_tweet_bonus for item in excluded_floors)
+    assert all(item.featured_tweet_id is None for item in excluded_floors)
+    assert store.campaign_rewards("excluded", excluded.model_dump_json()) is not None
+    assert coordinator.pending_reward_campaign_ids(feed, block=35) == ()
+
+
+def test_featured_tweet_is_selected_at_settlement_without_a_pin(tmp_path: Path) -> None:
     campaign = record("campaign")
     feed = CampaignFeed(
         snapshot_id="snapshot",
@@ -445,48 +486,15 @@ def test_final_rewards_wait_for_pinned_feature_evidence_then_self_heal(
         ecosystem_maps=(),
     )
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    selected = scored("campaign", "1", MINER_A)
-    available = scored("campaign", "2", MINER_B)
-    store.persist_reconciliation(
-        snapshot_id="snapshot",
-        campaign_id="campaign",
-        campaign_json=campaign.model_dump_json(),
-        results=[available.attribution],
-    )
-    store.pin_featured_tweet_selection(
-        campaign_id="campaign",
-        campaign_json=campaign.model_dump_json(),
-        tweet_id="1",
-        selection_pool=("1",),
-        selected_block=19,
-        selected_at=NOW,
-    )
     coordinator = RewardCoordinator(store, UnusedScorer())  # type: ignore[arg-type]
 
-    weights, floors = coordinator.shadow_weights(
+    _weights, floors = coordinator.shadow_weights(
         feed,
-        [available],
+        [scored("campaign", "1", MINER_A)],
         block=35,
-        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
-        uids=[0, 1, 2],
-        persist=False,
+        hotkey_to_uid={MINER_A: 1},
+        uids=[0, 1],
     )
 
-    assert weights == {0: 1.0, 1: 0.0, 2: 0.0}
-    assert floors == []
-    assert coordinator.pending_reward_campaign_ids(feed, block=35) == ("campaign",)
-    assert store.campaign_rewards("campaign", campaign.model_dump_json()) is None
-
-    recovered_weights, recovered_floors = coordinator.shadow_weights(
-        feed,
-        [selected, available],
-        block=36,
-        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
-        uids=[0, 1, 2],
-        persist=False,
-    )
-
-    assert recovered_weights[1] > 0
-    assert recovered_weights[2] > 0
-    assert len(recovered_floors) == 2
-    assert coordinator.pending_reward_campaign_ids(feed, block=36) == ()
+    assert {item.featured_tweet_id for item in floors} == {"1"}
+    assert store.featured_tweet_selection("campaign") is None

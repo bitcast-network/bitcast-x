@@ -45,10 +45,9 @@ strings are consensus-visible contracts.
   cycle, adopt the latest complete record for the same campaign ID, and use payload-addressed
   preview run IDs for replaceable status updates. The first positive per-tweet daily USD allocation
   makes the complete campaign result immutable across restarts and feed snapshots.
-- A pinned featured tweet is a narrower pre-allocation compatibility boundary: its identity and
-  campaign contract are immutable across restarts, but preview evidence, scores, bonus recipients,
-  and zero-value publications remain replaceable until positive economics freeze. Final rewards
-  must replay the pinned identity; unavailable selected-tweet evidence defers settlement.
+- A pinned featured tweet fixes only which tweet is announced; it never freezes the campaign
+  contract or delays settlement. Final rewards apply the bonus to the pinned tweet when it still
+  qualifies and otherwise settle without one, never substituting a different tweet.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version and golden vectors. The coordinated `DX3` rollout is
   the explicit exception to an extended overlap because every current miner and validator is

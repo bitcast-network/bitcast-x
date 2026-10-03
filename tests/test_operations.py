@@ -201,7 +201,7 @@ def test_campaign_contract_migration_backfills_frozen_reconciliation(tmp_path: P
     ) == (original,)
 
 
-def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> None:
+def test_featured_selection_survives_restart_and_is_never_replaced(tmp_path: Path) -> None:
     path = tmp_path / "validator.sqlite3"
     store = ValidatorStore(path)
     now = datetime(2026, 8, 13, tzinfo=UTC)
@@ -256,10 +256,6 @@ def test_featured_selection_is_rollback_safe_pinned_state(tmp_path: Path) -> Non
     )
     assert replayed == selected
     assert reopened.reconciliation("recovered", "featured", campaign_json) == []
-    assert reopened.bind_campaign_protocols(
-        (original.model_copy(update={"brief": "mutated brief"}),)
-    ) == (original,)
-    assert reopened.bind_campaign_protocols(()) == (original,)
 
     connection = sqlite3.connect(path)
     try:

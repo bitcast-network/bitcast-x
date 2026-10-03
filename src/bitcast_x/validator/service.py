@@ -130,7 +130,6 @@ class ValidatorService:
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._last_finalized_block = 0
 
     async def run(self) -> None:
         """Run finalized ingestion with independently activated production outputs."""
@@ -168,10 +167,7 @@ class ValidatorService:
                 __version__,
                 source_revision(),
             )
-            store = ValidatorStore(
-                self.settings.state_dir / "validator.sqlite3",
-                finalized_block_provider=lambda: self._last_finalized_block,
-            )
+            store = ValidatorStore(self.settings.state_dir / "validator.sqlite3")
             ops_server = uvicorn.Server(
                 uvicorn.Config(
                     create_ops_app(health),
@@ -293,7 +289,6 @@ class ValidatorService:
                 try:
                     submission_weights: dict[int, float] | None = None
                     finalized_block = await chain.current_block()
-                    self._last_finalized_block = finalized_block
                     endpoints = await ingestor.discover(block=finalized_block)
                     outcomes = await ingestor.reconcile_all(endpoints, block=finalized_block)
                     attributions = []
@@ -322,7 +317,6 @@ class ValidatorService:
                                 attributions,
                                 reconciled_campaign_ids=reconciler.completed_campaign_ids,
                             )
-                            reward_coordinator.release_ineligible_featured_selections(feed)
                             graph = await chain.metagraph(block=finalized_block)
                             if graph is None:
                                 raise ChainOperationError("finalized metagraph is unavailable")
@@ -344,8 +338,7 @@ class ValidatorService:
                                 featured_tweet_ids: set[str] = set()
                                 for campaign in preview_campaigns:
                                     selection = store.featured_tweet_selection(
-                                        campaign.access.campaign_id,
-                                        campaign.model_dump_json(),
+                                        campaign.access.campaign_id
                                     )
                                     if selection is not None:
                                         featured_tweet_ids.add(selection.tweet_id)

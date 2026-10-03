@@ -427,7 +427,7 @@ async def test_preview_is_not_republished_until_its_semantic_payload_changes(
 
 
 @pytest.mark.asyncio
-async def test_preview_pins_featured_tweet_and_recovers_after_missing_evidence(
+async def test_preview_pins_featured_tweet_and_never_replaces_it(
     tmp_path: Path,
 ) -> None:
     selected_at = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
@@ -455,10 +455,7 @@ async def test_preview_pins_featured_tweet_and_recovers_after_missing_evidence(
         block=90,
         hotkey_to_uid={MINER: 7},
     )
-    selection = first_store.featured_tweet_selection(
-        "campaign",
-        campaign().model_dump_json(),
-    )
+    selection = first_store.featured_tweet_selection("campaign")
     assert selection is not None
     assert selection.tweet_id == "123"
     assert selection.selected_block == 90
@@ -489,7 +486,7 @@ async def test_preview_pins_featured_tweet_and_recovers_after_missing_evidence(
         reason=AttributionReason.AMBIGUOUS_MATCH,
     )
 
-    assert not await restarted_publisher.publish_preview(
+    assert await restarted_publisher.publish_preview(
         snapshot,
         campaign(),
         [],
@@ -497,7 +494,7 @@ async def test_preview_pins_featured_tweet_and_recovers_after_missing_evidence(
         block=91,
         hotkey_to_uid={MINER: 7},
     )
-    assert restarted_data_publisher.payloads == []
+    assert restarted_data_publisher.payloads[0]["featured_tweet"] is None
 
     recovered = scored().model_copy(update={"score": scored().score + 1})
     assert await restarted_publisher.publish_preview(
@@ -508,12 +505,8 @@ async def test_preview_pins_featured_tweet_and_recovers_after_missing_evidence(
         block=92,
         hotkey_to_uid={MINER: 7},
     )
-    replayed = restarted_store.featured_tweet_selection(
-        "campaign",
-        campaign().model_dump_json(),
-    )
-    assert replayed == selection
-    assert restarted_data_publisher.payloads[0]["featured_tweet"] == first_payload["featured_tweet"]
+    assert restarted_store.featured_tweet_selection("campaign") == selection
+    assert restarted_data_publisher.payloads[1]["featured_tweet"] == first_payload["featured_tweet"]
 
 
 @pytest.mark.asyncio

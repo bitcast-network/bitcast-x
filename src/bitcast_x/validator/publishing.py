@@ -65,17 +65,13 @@ class ShadowResultPublisher:
             return False
         now = self._now()
         campaign_id = campaign.access.campaign_id
-        campaign_json = campaign.model_dump_json()
-        featured_selection = self.store.featured_tweet_selection(
-            campaign_id,
-            campaign_json,
-        )
+        featured_selection = self.store.featured_tweet_selection(campaign_id)
         if featured_selection is None and featured_tweet_selection_due(campaign, now=now):
             candidate = preview_featured_candidate(campaign, scored)
             if candidate is not None:
                 featured_selection = self.store.pin_featured_tweet_selection(
                     campaign_id=campaign_id,
-                    campaign_json=campaign_json,
+                    campaign_json=campaign.model_dump_json(),
                     tweet_id=candidate.tweet_id,
                     selection_pool=candidate.selection_pool,
                     selected_block=block,
@@ -88,22 +84,6 @@ class ShadowResultPublisher:
                     block,
                     ",".join(featured_selection.selection_pool),
                 )
-        eligible_tweet_ids = {
-            item.attribution.tweet_id
-            for item in scored
-            if item.attribution.campaign_id == campaign_id
-            and item.attribution.miner_hotkey is not None
-            and item.meets_brief
-        }
-        if featured_selection is not None and featured_selection.tweet_id not in eligible_tweet_ids:
-            LOGGER.warning(
-                "preview publication deferred; pinned featured evidence is unavailable "
-                "campaign=%s tweet=%s block=%s",
-                campaign_id,
-                featured_selection.tweet_id,
-                block,
-            )
-            return False
         preview_rewards = preview_performance_rewards(
             campaign,
             scored,
@@ -247,10 +227,7 @@ class ShadowResultPublisher:
                 hotkey_to_uid,
                 attributions=attributions,
                 reward_decisions=reward_decisions,
-                featured_selection=self.store.featured_tweet_selection(
-                    campaign_id,
-                    campaign.model_dump_json(),
-                ),
+                featured_selection=self.store.featured_tweet_selection(campaign_id),
             )
             run_id = f"v3:{feed.snapshot_id}:{campaign_id}"
             success = await self._publisher.publish(
@@ -501,20 +478,7 @@ def _featured_selection(
     *,
     featured_selection: FeaturedTweetSelection | None = None,
 ) -> dict[str, object] | None:
-    reward_feature_ids = {
-        item.featured_tweet_id for item in rewards if item.featured_tweet_id is not None
-    }
-    if (
-        featured_selection is not None
-        and reward_feature_ids
-        and reward_feature_ids != {featured_selection.tweet_id}
-    ):
-        raise ProtocolError(f"featured tweet metadata changed for campaign {campaign_id}")
-    featured_id = (
-        featured_selection.tweet_id
-        if featured_selection is not None
-        else next((item.featured_tweet_id for item in rewards if item.featured_tweet_id), None)
-    )
+    featured_id = next((item.featured_tweet_id for item in rewards if item.featured_tweet_id), None)
     if featured_id is None:
         return None
     try:
@@ -523,7 +487,7 @@ def _featured_selection(
         raise ProtocolError(
             f"featured tweet {featured_id} has no publishable scoring evidence"
         ) from exc
-    if featured_selection is not None:
+    if featured_selection is not None and featured_selection.tweet_id == featured_id:
         selected_at = featured_selection.selected_at
         selection_pool = list(featured_selection.selection_pool)
     else:
