@@ -169,18 +169,20 @@ async def publish_preview(
     )
 
 
-def test_signed_envelope_matches_frozen_v2_message() -> None:
+def test_signed_envelope_matches_the_message_ingestion_rebuilds() -> None:
     hotkey = FakeHotkey()
     publisher = DataPublisher(SimpleNamespace(hotkey=hotkey))
     data = {
         "payload_type": BRIEF_TWEETS_PAYLOAD_TYPE,
         "run_id": "run",
-        "payload": {"brief_id": "campaign", "tweets": []},
+        # UID keys sort as 45 < 114 here but "114" < "45" once parsed from JSON.
+        "payload": {"brief_id": "campaign", "tweets": [], "uid_usd_targets": {45: 1.0, 114: 2.0}},
     }
 
     signed = publisher.signed_payload(data, timestamp=NOW)
 
-    expected_core = json.dumps(data["payload"], sort_keys=True)
+    received = json.loads(json.dumps(signed))
+    expected_core = json.dumps(received["payload"], sort_keys=True)
     assert hotkey.message == f"{MINER}:2026-08-05T12:00:00:{expected_core}"
     assert signed["signature"] == b"signed".hex()
     assert signed["signer"] == signed["vali_hotkey"] == MINER

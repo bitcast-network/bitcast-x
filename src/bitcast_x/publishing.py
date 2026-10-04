@@ -73,7 +73,9 @@ class DataPublisher:
         now = timestamp or datetime.now(UTC)
         wire_time = now.astimezone(UTC).replace(tzinfo=None).isoformat()
         native = json_native(data)
-        signable = native["payload"]
+        # Ingestion rebuilds this message from the parsed JSON, where every object key
+        # is a string, so sign that form: integer UID keys would sort differently.
+        signable = json.loads(json.dumps(native["payload"]))
         message = f"{signer}:{wire_time}:{json.dumps(signable, sort_keys=True)}"
         signature = self.wallet.hotkey.sign(message)
         return {
