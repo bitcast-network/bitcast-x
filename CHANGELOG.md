@@ -94,6 +94,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Both miner modes apply one endpoint-advertisement rule. The chain rate-limits serve calls (50
+  blocks on SN93), so a restart soon after the last advertisement cannot re-advertise: `run-miner`
+  used to exit and crash-loop until the limit passed, while `run-miner-api` logged the failure and
+  reported ready even when the chain advertised a different endpoint or none, leaving the miner
+  unreachable. A rejected advertisement is now accepted only when the chain already advertises
+  this exact endpoint; otherwise startup fails and the supervisor retries.
 - Retrying a miner submission with the same `Idempotency-Key` but a changed `external_id` now
   returns `409 idempotency_conflict`, as documented and as claims already did. It previously
   returned the existing submission and silently ignored the new input.

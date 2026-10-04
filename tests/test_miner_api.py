@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -406,6 +407,45 @@ def test_miner_api_does_not_require_the_campaign_feed(
     )
 
     assert apps.protocol is None
+
+
+def test_miner_api_refuses_to_start_when_validators_cannot_reach_its_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A rejected advertisement while the chain points elsewhere must not report ready."""
+
+    class Chain:
+        closed = False
+
+        async def advertise_endpoint(self, _wallet: object, *, ip: str, port: int) -> None:
+            raise ChainOperationError("endpoint advertisement failed: ServingRateLimitExceeded")
+
+        async def metagraph(self) -> SimpleNamespace:
+            return SimpleNamespace(by_hotkey={MINER: SimpleNamespace(axon="198.51.100.7:8093")}.get)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    chain = Chain()
+    monkeypatch.setattr(
+        "bitcast_x.miner.web.load_wallet",
+        lambda _settings: SimpleNamespace(hotkey=SimpleNamespace(ss58_address=MINER)),
+    )
+    monkeypatch.setattr(
+        "bitcast_x.miner.web.build_sdk", AsyncMock(return_value=(chain, SimpleNamespace()))
+    )
+    apps = build_miner_api(
+        Settings(
+            _env_file=None,
+            state_dir=tmp_path,
+            public_ip="203.0.113.10",
+            miner_api_token=INTERNAL_TOKEN,
+        )
+    )
+
+    with pytest.raises(ChainOperationError, match="ServingRateLimitExceeded"), TestClient(apps.api):
+        pass
+    assert chain.closed is True
 
 
 def test_miner_env_example_states_the_enforced_token_length() -> None:

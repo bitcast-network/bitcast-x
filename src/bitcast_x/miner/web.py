@@ -11,11 +11,11 @@ import uvicorn
 from fastapi import FastAPI
 
 from bitcast_x.config import Settings
-from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.api import create_control_app
 from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.results import MinerResultsClient
 from bitcast_x.miner.service import (
+    advertise_endpoint,
     build_sdk,
     commit_until,
     create_protocol_app,
@@ -102,12 +102,7 @@ def build_miner_api(settings: Settings) -> MinerApps:
         commit_task: asyncio.Task[None] | None = None
         results_task: asyncio.Task[None] | None = None
         try:
-            try:
-                await chain.advertise_endpoint(wallet, ip=public_ip, port=settings.port)
-            except ChainOperationError:
-                LOGGER.exception(
-                    "endpoint advertisement failed; continuing with existing on-chain endpoint"
-                )
+            await advertise_endpoint(chain, wallet, ip=public_ip, port=settings.port)
             # Both loops run until cancelled below at shutdown.
             commit_task = asyncio.create_task(commit_until(sdk.engine, settings, lambda: False))
             results_task = asyncio.create_task(results_loop())

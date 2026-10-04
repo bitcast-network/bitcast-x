@@ -74,7 +74,9 @@ helm install miner charts/bitcast-x-miner \
   --set wallet.expectedHotkey=<hotkey ss58>
 ```
 
-The pod turns Ready only after the endpoint advertisement is finalized on chain (`GET /ready`).
+The pod turns Ready only after the endpoint advertisement is finalized on chain (`GET /ready`). A
+restart inside the chain's serving rate limit reuses the advertisement only when it already points
+at this pod's endpoint; otherwise the container exits and is restarted.
 Liveness is `GET /health`: an idle miner, or one whose chain RPC is briefly unreachable, is not
 restarted. Validators retry unavailable miners, which heal on a later poll.
 

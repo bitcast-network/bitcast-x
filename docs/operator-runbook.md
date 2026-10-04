@@ -181,7 +181,9 @@ miner can use the checked `bitcast-x-miner` role in `ecosystem.config.cjs` with 
 template; the helper scripts intentionally remain validator-only.
 
 Miner liveness is `GET :8095/health`; readiness is `GET :8095/ready` and becomes 200 only after
-the endpoint advertisement finalizes. Validator liveness is `GET :8096/health`; readiness is
+the endpoint advertisement finalizes. A restart inside the chain's serving rate limit (50 blocks on
+SN93) cannot re-advertise; the miner then starts only if the chain already advertises this exact
+endpoint, and otherwise exits so its supervisor retries. Validator liveness is `GET :8096/health`; readiness is
 `GET :8096/ready` and becomes 200 after one complete finalized reconciliation cycle. Metrics are
 at `GET :8096/metrics` and contain only fixed-name process counters and the latest finalized block.
 

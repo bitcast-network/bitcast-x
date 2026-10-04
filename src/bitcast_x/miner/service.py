@@ -1,6 +1,7 @@
 """Runnable reference miner node assembled from the reusable SDK pieces."""
 
 import asyncio
+import ipaddress
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 
 from bitcast_x.chain import BittensorChain
 from bitcast_x.config import Settings
+from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.chain import BittensorCommitmentSubmitter
 from bitcast_x.miner.engine import BatchPolicy, MinerEngine, MinerSdk
 from bitcast_x.miner.store import MinerStore
@@ -107,6 +109,35 @@ async def is_permitted_validator(chain: BittensorChain, hotkey: str) -> bool:
     return neuron is not None and bool(neuron.validator_permit)
 
 
+async def advertise_endpoint(chain: BittensorChain, wallet: Any, *, ip: str, port: int) -> None:
+    """Advertise this miner's endpoint, accepting the identical one already on chain.
+
+    The chain rate-limits serve calls (50 blocks on SN93), so a restart soon after
+    the last advertisement cannot re-advertise. That is harmless when validators
+    already read this endpoint; otherwise the miner would be unreachable, so the
+    failure is raised.
+    """
+
+    try:
+        await chain.advertise_endpoint(wallet, ip=ip, port=port)
+    except ChainOperationError:
+        metagraph = await chain.metagraph()
+        neuron = (
+            metagraph.by_hotkey(str(wallet.hotkey.ss58_address)) if metagraph is not None else None
+        )
+        if neuron is None or neuron.axon != _endpoint(ip, port):
+            raise
+        LOGGER.warning("endpoint advertisement failed; chain already advertises %s", neuron.axon)
+
+
+def _endpoint(ip: str, port: int) -> str:
+    """Format an endpoint the way the metagraph reports a served axon."""
+
+    address = ipaddress.ip_address(ip)
+    host = f"[{address}]" if address.version == 6 else str(address)
+    return f"{host}:{port}"
+
+
 async def commit_until(
     engine: MinerEngine,
     settings: Settings,
@@ -158,7 +189,8 @@ class ReferenceMiner:
                 await asyncio.sleep(0.05)
             if self.settings.public_ip is None:
                 raise ValueError("BITCAST_X_PUBLIC_IP is required to advertise the miner endpoint")
-            await self.chain.advertise_endpoint(
+            await advertise_endpoint(
+                self.chain,
                 self.wallet,
                 ip=self.settings.public_ip,
                 port=self.settings.port,
