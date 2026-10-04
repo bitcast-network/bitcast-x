@@ -362,6 +362,7 @@ class ValidatorService:
         scored = await economics.rewards.freeze_scores(
             feed,
             attributions,
+            block=block,
             reconciled_campaign_ids=economics.reconciler.completed_campaign_ids,
         )
         graph = await chain.metagraph(block=block)

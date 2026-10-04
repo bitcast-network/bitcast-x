@@ -255,8 +255,8 @@ def test_earlier_campaign_reserves_tweet_across_later_emission_window(tmp_path: 
 async def test_freeze_scores_skips_campaigns_without_a_stored_reconciliation(
     tmp_path: Path,
 ) -> None:
-    # freeze_scores takes no block. The reconciler gates on close by storing a
-    # reconciliation only once a campaign's close is finalized.
+    # freeze_scores does not gate on close: the reconciler stores a reconciliation
+    # only once a campaign's close is finalized.
     reconciled = record("reconciled")
     feed = campaign_feed(reconciled, record("unreconciled"))
     store = ValidatorStore(tmp_path / "validator.sqlite3")
@@ -269,7 +269,9 @@ async def test_freeze_scores_skips_campaigns_without_a_stored_reconciliation(
     )
     scorer = CountingScorer()
 
-    result = await reward_coordinator(store, scorer=scorer).freeze_scores(feed, [attribution])
+    result = await reward_coordinator(store, scorer=scorer).freeze_scores(
+        feed, [attribution], block=30
+    )
 
     assert result == []
     assert scorer.campaign_ids == ["reconciled"]
@@ -293,6 +295,7 @@ async def test_only_current_cycle_completion_releases_zero_value_campaign(
     incomplete_scores = await coordinator.freeze_scores(
         feed,
         [],
+        block=30,
         reconciled_campaign_ids=(),
     )
     coordinator.shadow_weights(
@@ -309,6 +312,7 @@ async def test_only_current_cycle_completion_releases_zero_value_campaign(
     completed_scores = await coordinator.freeze_scores(
         feed,
         [],
+        block=30,
         reconciled_campaign_ids=("campaign",),
     )
     weights, rewards = coordinator.shadow_weights(

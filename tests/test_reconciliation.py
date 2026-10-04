@@ -3,6 +3,7 @@
 import json
 import logging
 import sqlite3
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,7 +11,13 @@ from typing import Any
 
 import pytest
 
-from bitcast_x.campaigns import CampaignFeed, CampaignRecord, EcosystemMap, SocialAccount
+from bitcast_x.campaigns import (
+    EVIDENCE_GRACE_BLOCKS,
+    CampaignFeed,
+    CampaignRecord,
+    EcosystemMap,
+    SocialAccount,
+)
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
@@ -367,17 +374,18 @@ async def run_rewards(
     provider: FakeX,
     snapshot: CampaignFeed,
     *,
+    block: int = 30,
     persist: bool = False,
 ) -> RewardRun:
-    """Reconcile at block 30, freeze scores and compute the block-35 shadow vector."""
+    """Settle at ``block`` and compute the block-35 shadow vector."""
 
     attributions = await CampaignReconciler(
         store,
         provider,
         FakeQualification(),
-    ).reconcile_feed(snapshot, finalized_block=30)
+    ).reconcile_feed(snapshot, finalized_block=block)
     coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
-    scored = await coordinator.freeze_scores(snapshot, attributions)
+    scored = await coordinator.freeze_scores(snapshot, attributions, block=block)
     weights, floors = coordinator.shadow_weights(
         snapshot,
         scored,
@@ -1111,7 +1119,9 @@ def test_legacy_null_language_placeholder_preserves_frozen_campaign_replay(
     assert "rejected campaign mutation" not in caplog.text
 
 
-async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
+async def test_provider_outage_is_pending_in_final_feed_after_the_grace_period(
+    tmp_path: Path,
+) -> None:
     store = open_history(tmp_path / "validator.sqlite3")
     record = campaign()
     snapshot = feed(record)
@@ -1121,7 +1131,9 @@ async def test_provider_outage_is_pending_in_final_feed(tmp_path: Path) -> None:
         FakeQualification(),
     )
 
-    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+    results = await reconciler.reconcile_feed(
+        snapshot, finalized_block=record.settlement_block + EVIDENCE_GRACE_BLOCKS
+    )
 
     assert len(results) == 1
     result = results[0]
@@ -1183,6 +1195,10 @@ def _two_campaign_finalization(
     return store, feed(campaign_a, campaign_b, influence=10.0), campaign_a, campaign_b
 
 
+# _exclusive_final_campaign settles from block 30.
+AFTER_GRACE = 30 + EVIDENCE_GRACE_BLOCKS
+
+
 def _unavailable_998_provider() -> FakeX:
     return FakeX(
         {
@@ -1192,11 +1208,53 @@ def _unavailable_998_provider() -> FakeX:
     )
 
 
+class _SelectiveEngagementProvider(FakeX):
+    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+        return EngagementFetch(engagements={}, provider_available=tweet_id != "998")
+
+
+def _unavailable_998_engagements() -> FakeX:
+    return _SelectiveEngagementProvider(
+        {
+            "998": TweetFetch(tweet=tweet("998"), provider_available=True),
+            "999": TweetFetch(tweet=tweet("999"), provider_available=True),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [_unavailable_998_provider, _unavailable_998_engagements],
+    ids=["tweet", "engagements"],
+)
+async def test_unavailable_evidence_holds_settlement_until_it_returns(
+    tmp_path: Path, provider: Callable[[], FakeX]
+) -> None:
+    store = two_tweet_history(tmp_path / "validator.sqlite3")
+    snapshot = feed(_exclusive_final_campaign("campaign"), influence=10.0)
+
+    waiting = await run_rewards(store, provider(), snapshot, block=AFTER_GRACE - 1)
+
+    # Within the grace period the campaign waits rather than freezing without the
+    # tweet, so every validator settles on the same evidence once it returns.
+    assert waiting.floors == []
+    assert waiting.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ("campaign",)
+    healthy = FakeX(
+        {
+            "998": TweetFetch(tweet=tweet("998"), provider_available=True),
+            "999": TweetFetch(tweet=tweet("999"), provider_available=True),
+        }
+    )
+    settled = await run_rewards(store, healthy, snapshot, block=AFTER_GRACE - 1)
+    assert sorted(item.tweet_id for item in settled.floors) == ["998", "999"]
+    assert settled.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
+
+
 async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: Path) -> None:
     store = two_tweet_history(tmp_path / "validator.sqlite3")
     snapshot = feed(_exclusive_final_campaign("campaign"), influence=10.0)
 
-    run = await run_rewards(store, _unavailable_998_provider(), snapshot)
+    run = await run_rewards(store, _unavailable_998_provider(), snapshot, block=AFTER_GRACE)
 
     # Available evidence is ordered first; the unavailable tweet keeps its submission identity.
     assert [item.tweet_id for item in run.attributions] == ["999", "998"]
@@ -1216,7 +1274,7 @@ async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: P
 async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
-    run = await run_rewards(store, _unavailable_998_provider(), snapshot)
+    run = await run_rewards(store, _unavailable_998_provider(), snapshot, block=AFTER_GRACE)
     publisher = MultiCampaignPublisher()
     published = await ShadowResultPublisher(
         store,
@@ -1268,21 +1326,7 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
 async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
-    class SelectiveEngagementProvider(FakeX):
-        async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
-            return EngagementFetch(
-                engagements={},
-                provider_available=tweet_id != "998",
-            )
-
-    provider = SelectiveEngagementProvider(
-        {
-            "998": TweetFetch(tweet=tweet("998"), provider_available=True),
-            "999": TweetFetch(tweet=tweet("999"), provider_available=True),
-        }
-    )
-
-    run = await run_rewards(store, provider, snapshot)
+    run = await run_rewards(store, _unavailable_998_engagements(), snapshot, block=AFTER_GRACE)
 
     assert [item.attribution.campaign_id for item in run.scored] == ["campaign-b"]
     assert store.scored_reconciliation("campaign-a") == []
@@ -1393,10 +1437,12 @@ async def test_missing_historical_map_leaves_tweet_pending_in_completed_campaign
         FakeQualification(),
     )
 
-    results = await reconciler.reconcile_feed(snapshot, finalized_block=20)
+    results = await reconciler.reconcile_feed(
+        snapshot, finalized_block=record.settlement_block + EVIDENCE_GRACE_BLOCKS
+    )
 
-    # The missing map defers only the tweet: it stays pending, never rejected, while the
-    # campaign itself completes for this cycle.
+    # After the grace period, the missing map defers only the tweet: it stays pending,
+    # never rejected, while the campaign itself completes for this cycle.
     assert len(results) == 1
     assert results[0].tweet_id == "999"
     assert results[0].accepted is False

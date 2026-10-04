@@ -150,6 +150,7 @@ class RewardCoordinator:
         feed: CampaignFeed,
         attributions: list[AttributionResult],
         *,
+        block: int,
         reconciled_campaign_ids: Collection[str] | None = None,
     ) -> list[ScoredAttribution]:
         """Fetch mutable engagement evidence once per campaign snapshot, then reuse it."""
@@ -180,7 +181,7 @@ class RewardCoordinator:
                 scored = await self._scorer.score(
                     feed,
                     campaign_results,
-                    defer_unavailable_tweets=True,
+                    defer_unavailable_tweets=campaign.evidence_grace_ended(block),
                 )
             except ReconciliationUnavailableError as exc:
                 LOGGER.warning(
@@ -300,8 +301,8 @@ class RewardCoordinator:
         if any(tweet.tweet_id == selection.tweet_id for tweet in campaign.tweets):
             return selection.tweet_id
         LOGGER.warning(
-            "pinned featured tweet no longer qualifies; settling without featured bonus "
-            "campaign=%s tweet=%s",
+            "pinned featured tweet is not an eligible tweet at settlement; "
+            "settling without featured bonus campaign=%s tweet=%s",
             campaign.campaign_id,
             selection.tweet_id,
         )

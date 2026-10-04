@@ -145,12 +145,7 @@ class CampaignReconciler:
         self._completed_campaign_ids = frozenset()
         events: VerifiedEvents | None = None
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
-            reconciliation_block = (
-                campaign.emission_start_block
-                if campaign.emission_start_block is not None
-                else campaign.access.scoring_close_block
-            )
-            if reconciliation_block > finalized_block:
+            if campaign.settlement_block > finalized_block:
                 continue
             campaign_json = campaign.model_dump_json()
             campaign_results = (
@@ -170,7 +165,7 @@ class CampaignReconciler:
                         feed,
                         through_block=finalized_block,
                         events=events,
-                        defer_unavailable_tweets=True,
+                        defer_unavailable_tweets=campaign.evidence_grace_ended(finalized_block),
                     )
                 except ReconciliationUnavailableError as exc:
                     LOGGER.warning(

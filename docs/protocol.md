@@ -22,7 +22,8 @@ consensus-visible rule.
   recalculates provisional campaign results, freezes positive reward allocations, and calculates
   mechanism-1 weights.
 - X-data and LLM providers are availability and evidence dependencies. Their failure does not
-  become a rejection. An unavailable tweet remains explicitly pending while independently
+  become a rejection. Settlement waits up to 900 blocks (three hours) for evidence a provider could
+  not return; after that, an unavailable tweet remains explicitly pending while independently
   verifiable campaign tweets continue through final scoring and rewards.
 
 The campaign publisher, X provider, and configured LLM are not decentralized by this protocol.
@@ -230,8 +231,11 @@ A winner needs a score of at least `0.70` and a margin of at least `0.10` over t
 exact tie, weak match, or narrow margin abstains rather than assigning the tweet.
 
 Every submitted tweet receives an accepted, pending, or rejected reason for the current campaign
-cycle. Evidence that is unavailable at reconciliation remains `evidence_unavailable` pending rather
-than rejecting the tweet or blocking independently verifiable campaign results. A campaign with no
+cycle. Final reconciliation waits for unavailable evidence until 900 blocks after the campaign's
+settlement block (its emission start, or its scoring close when it has none), so a temporary outage
+cannot make validators freeze different results. Evidence still unavailable after that remains
+`evidence_unavailable` pending rather than rejecting the tweet or blocking independently verifiable
+campaign results. A campaign with no
 positive allocation is retried, so later evidence or an updated brief can replace that provisional
 decision. Campaign checks report the first failed requirement
 in deterministic evaluation order: `post_outside_campaign_window`,
@@ -256,8 +260,9 @@ Only accepted attributions that pass the campaign's semantic brief evaluation en
 Engagement evidence is taken from the configured X provider and retained provisionally until the
 campaign produces a positive allocation. The
 validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
-passes the tweet. Unavailable engagement or semantic evidence leaves only that tweet's reward
-disposition pending; available tweets continue without translating the outage into rejection.
+passes the tweet. Final scoring waits out the same 900-block grace period; engagement or semantic
+evidence still unavailable after it leaves only that tweet's reward disposition pending, and
+available tweets continue without translating the outage into rejection.
 Prompt text and parsing behavior are shipped in this repository. A new prompt version is dormant
 until selected by a campaign; changing an existing version would change its durable cache key and
 evaluation behavior.

@@ -94,6 +94,17 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Settlement no longer freezes a campaign without a tweet whose evidence a provider briefly could
+  not return. Validators whose fetch failed froze different rewards, and for a pinned tweet no
+  featured bonus, from validators whose fetch succeeded, for the campaign's whole emission window.
+  Settlement now waits up to 900 blocks (three hours) for missing evidence, pausing weight
+  submission meanwhile, then settles without what is still missing.
+- Validators submit weights before publishing final results. A campaign whose final payload could
+  not be built, such as one whose rewarded miner had deregistered, stopped weight submission for
+  every campaign until its emission ended.
+- Final result payloads now sign the form ingestion verifies. Payloads rewarding UIDs of different
+  digit counts (for example 9 and 10) failed signature verification with 401 and were resent every
+  cycle without being accepted.
 - Both miner modes apply one endpoint-advertisement rule. The chain rate-limits serve calls (50
   blocks on SN93), so a restart soon after the last advertisement cannot re-advertise: `run-miner`
   used to exit and crash-loop until the limit passed, while `run-miner-api` logged the failure and

@@ -42,10 +42,12 @@ per minute, and unchanged preview payloads are not republished. Preview rows inc
 performance-bonus percentages and breakdowns for the currently selected campaign tweets, but their
 USD targets remain zero. At the first healthy preview on or after one day before `closes_at`, the
 validator durably pins and publishes the deterministic featured tweet. Failed ingestion retries the
-identical payload after one minute. The pin never changes to a different tweet. The first
-post-close scoring pass still fetches fresh evidence before assigning tweets and freezing rewards,
-then applies the featured bonus to the pinned tweet if it still qualifies; otherwise that campaign
-settles without a featured bonus. A pin never delays settlement or weight submission.
+identical payload after one minute. The pin never changes to a different tweet. Settlement fetches
+fresh evidence before assigning tweets and freezing rewards, then applies the featured bonus to the
+pinned tweet if it still qualifies; otherwise that campaign settles without a featured bonus. A pin
+never delays settlement. If a provider cannot return a tweet's evidence, settlement waits up to 900
+blocks (about three hours) for it and weight submission pauses meanwhile; after that the campaign
+settles without the tweets still missing evidence.
 
 ## Runtime contract
 

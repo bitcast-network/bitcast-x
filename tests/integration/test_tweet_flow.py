@@ -405,7 +405,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         AttributionScorer(evidence, brief_filter=PassingBriefFilter()),
         score_blend=0.0,
     )
-    scored = await coordinator.freeze_scores(feed, attributions)
+    scored = await coordinator.freeze_scores(feed, attributions, block=30)
     weights, rewards = coordinator.shadow_weights(
         feed,
         scored,

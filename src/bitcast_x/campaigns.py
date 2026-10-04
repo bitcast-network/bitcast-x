@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+# Settlement waits this many blocks (3 hours) past a campaign's settlement block for
+# evidence a provider could not return, so a temporary outage cannot make validators
+# freeze different results. Weight submission pauses while a campaign waits.
+EVIDENCE_GRACE_BLOCKS = 900
+
 
 class SocialAccount(BaseModel):
     """Time-frozen influence entry used by v2-compatible engagement scoring."""
@@ -209,6 +214,19 @@ class CampaignRecord(BaseModel):
         ):
             raise ValueError("campaign emission must begin after scoring_close_block")
         return self
+
+    @property
+    def settlement_block(self) -> int:
+        """First block at which validators reconcile and freeze final results."""
+
+        if self.emission_start_block is not None:
+            return self.emission_start_block
+        return self.access.scoring_close_block
+
+    def evidence_grace_ended(self, block: int) -> bool:
+        """Whether settlement at ``block`` stops waiting for unavailable evidence."""
+
+        return block >= self.settlement_block + EVIDENCE_GRACE_BLOCKS
 
 
 class CampaignFeed(BaseModel):
