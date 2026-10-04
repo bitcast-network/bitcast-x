@@ -94,6 +94,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Retrying a miner submission with the same `Idempotency-Key` but a changed `external_id` now
+  returns `409 idempotency_conflict`, as documented and as claims already did. It previously
+  returned the existing submission and silently ignored the new input.
 - A miner that queued two submissions citing the same claim before its next batch committed could
   no longer commit anything: the batch revealed that claim twice, which every batch validation
   rejects. A batch now reveals each claim once; validators already let at most one of the

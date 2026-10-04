@@ -596,15 +596,22 @@ def test_direct_submission_accepts_existing_post_during_evaluation_grace(
 
 
 def test_repeated_submission_mapping_returns_the_existing_receipt(tmp_path: Path) -> None:
+    """A repeated tweet mapping resolves to its receipt; a reused key must repeat its input."""
+
     web = build_client(tmp_path, results_client=DirectResults())
 
     first = _submit(web)
+    replay = _submit(web)
     new_key = _submit(web, key="submission-key-0002")
-    changed_external_id = _submit(web, external_id="changed")
+    changed_input = _submit(web, external_id="changed")
 
-    assert [first.status_code, new_key.status_code, changed_external_id.status_code] == [200] * 3
+    assert [first.status_code, replay.status_code, new_key.status_code] == [200] * 3
+    assert replay.json()["submission_id"] == first.json()["submission_id"]
     assert new_key.json()["submission_id"] == first.json()["submission_id"]
-    assert changed_external_id.json()["submission_id"] == first.json()["submission_id"]
+    assert _error_envelope(changed_input) == (
+        409,
+        _refusal("idempotency_conflict", "idempotency key was reused with different input"),
+    )
     assert len(web.get("/api/v1/submissions").json()["items"]) == 1
 
 

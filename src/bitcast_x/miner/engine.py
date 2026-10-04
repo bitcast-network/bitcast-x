@@ -294,10 +294,8 @@ class MinerSdk:
             )
         ).encode()
         submission_id = hashlib.sha256(identity).hexdigest()[:32]
-        # A repeated mapping resolves to its existing receipt by its deterministic
-        # id, ahead of the idempotency-key check in enqueue.
-        if self.engine.store.status(submission_id) is not None:
-            return submission_id
+        # A repeated mapping resolves to its existing receipt inside enqueue, after
+        # the idempotency key is checked against its original input.
         submission = SubmissionEvent(
             submission_id=submission_id,
             campaign_id=campaign_id,
