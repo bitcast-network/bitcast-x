@@ -33,7 +33,6 @@ MUTABLE_CAMPAIGN_FIELDS = (
     "cap",
     "emission_start_block",
     "emission_end_block",
-    "max_members",
 )
 
 
@@ -84,7 +83,6 @@ def mutate_campaign_contract(record: CampaignRecord, field: str) -> CampaignReco
         "cap": 0.5,
         "emission_start_block": 31,
         "emission_end_block": 41,
-        "max_members": 2,
     }
     return record.model_copy(update={field: updates[field]})
 
@@ -209,6 +207,27 @@ def test_complete_campaign_contract_uses_frozen_version_after_results_freeze(
 
     assert bound == (original, unrelated)
     assert "using frozen contract campaign=same" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "bound_cutoff", [None, 150], ids=["cutoff-added-after-binding", "cutoff-absent-at-freeze"]
+)
+def test_frozen_results_replay_when_only_one_contract_has_a_rank_cutoff(
+    tmp_path, bound_cutoff: int | None
+) -> None:
+    # Before max_members existed, a campaign could be bound from a record without it and
+    # frozen from one with it (or the reverse); its frozen results must keep replaying.
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    bound = campaign("same").model_copy(update={"max_members": bound_cutoff})
+    frozen = bound.model_copy(update={"max_members": 150 if bound_cutoff is None else None})
+    store.bind_campaign_protocols((bound,))
+    freeze_positive_campaign(store, frozen)
+
+    (replayed,) = store.bind_campaign_protocols((frozen,))
+
+    contract = replayed.model_dump_json()
+    assert store.reconciliation("next", "same", contract) == []
+    assert store.campaign_rewards("same", contract) is not None
 
 
 def test_featured_pin_does_not_freeze_campaign_contract(tmp_path) -> None:

@@ -58,7 +58,7 @@ def _campaign_field_diffs(
 
 
 def _same_campaign_contract(first: str, second: str) -> bool:
-    """Compare two stored campaign contracts as parsed records."""
+    """Compare stored campaign contracts, ignoring a max_members missing on one side."""
 
     if first == second:
         # Contracts are stored as model dumps, so identical text is the common case.
@@ -66,11 +66,16 @@ def _same_campaign_contract(first: str, second: str) -> bool:
     from bitcast_x.campaigns import CampaignRecord
 
     try:
-        return CampaignRecord.model_validate_json(first) == CampaignRecord.model_validate_json(
-            second
-        )
+        first_record = CampaignRecord.model_validate_json(first)
+        second_record = CampaignRecord.model_validate_json(second)
     except ValueError:
         return False
+    # Feeds before max_members existed bound some campaigns without it, so a contract
+    # missing it on one side still matches; that placeholder never changed a result.
+    if (first_record.max_members is None) != (second_record.max_members is None):
+        first_record = first_record.model_copy(update={"max_members": None})
+        second_record = second_record.model_copy(update={"max_members": None})
+    return first_record == second_record
 
 
 def _campaign_has_frozen_results(connection: sqlite3.Connection, campaign_id: str) -> bool:

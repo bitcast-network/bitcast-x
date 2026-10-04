@@ -94,6 +94,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Restore the rule that a stored campaign contract missing `max_members` matches one that has it.
+  An earlier change in this release removed it as unused, but campaigns bound before the field
+  existed and frozen afterwards (or the reverse) then failed every replay check, stopping
+  reconciliation, publication and weights for as long as they stayed in the feed.
 - Settlement no longer freezes a campaign without a tweet whose evidence a provider briefly could
   not return. Validators whose fetch failed froze different rewards, and for a pinned tweet no
   featured bonus, from validators whose fetch succeeded, for the campaign's whole emission window.
