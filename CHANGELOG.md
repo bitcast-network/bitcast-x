@@ -120,6 +120,14 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   period only when the creator was historically eligible and the submission is committed no later
   than the campaign's scoring-close block.
 
+### Security
+
+- Removed the `diskcache` dependency, which has an unpatched unsafe-pickle advisory
+  (CVE-2025-69872). Validator preview state now lives in a JSON table in `preview.sqlite3` instead
+  of the `preview-cache` directory. On first start the validator imports the existing entries,
+  loading only plain values so no stored code can run, and leaves the old directory unchanged so
+  a rollback keeps its preview state. Delete it once rollback is no longer needed.
+
 ## [2.2.0] - 2026-08-31
 
 ### Added

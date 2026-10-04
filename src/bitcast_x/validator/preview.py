@@ -1,15 +1,19 @@
 """Persistent, rate-bounded X evidence for replaceable pre-close previews."""
 
+import io
+import json
 import logging
-from collections.abc import Callable, Collection
+import pickle
+import sqlite3
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from diskcache import Cache  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
+from bitcast_x.sqlite import apply_migrations, connect
 from bitcast_x.x_provider import (
     EngagementFetch,
     Tweet,
@@ -18,6 +22,17 @@ from bitcast_x.x_provider import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+_MIGRATIONS = (
+    """
+    CREATE TABLE IF NOT EXISTS preview_entries (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL
+    );
+    """,
+)
+# diskcache's storage mode for pickled values, which every legacy preview entry used.
+_DISKCACHE_PICKLE_MODE = 4
 
 _UNAVAILABLE_RETRY = timedelta(minutes=1)
 _NEW_TWEET_REFRESH = timedelta(hours=1)
@@ -56,20 +71,21 @@ class PreviewPublication:
 
 
 class PreviewStore:
-    """Separate rollback-safe cache for replaceable preview state."""
+    """Separate rollback-safe store for replaceable preview state."""
 
-    def __init__(self, path: Path) -> None:
-        self._cache = Cache(
-            directory=str(path),
-            sqlite_journal_mode="truncate",
-            sqlite_mmap_size=0,
-            disk_pickle_protocol=4,
-        )
+    def __init__(self, path: Path, *, legacy_directory: Path | None = None) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # One connection, as every caller runs on the validator's event loop thread.
+        self._connection = connect(path)
+        created = int(self._connection.execute("PRAGMA user_version").fetchone()[0]) == 0
+        apply_migrations(self._connection, _MIGRATIONS)
+        if created and legacy_directory is not None:
+            self._import_legacy(legacy_directory)
 
     def close(self) -> None:
-        """Flush and close the preview cache."""
+        """Close the preview store."""
 
-        self._cache.close()
+        self._connection.close()
 
     def preview_tweet_evidence(self, tweet_id: str) -> PreviewEvidence[TweetFetch] | None:
         """Return the latest effective pre-close tweet evidence."""
@@ -152,7 +168,7 @@ class PreviewStore:
     def preview_publication(self, campaign_id: str) -> PreviewPublication | None:
         """Return the last replaceable preview attempt for one campaign."""
 
-        value = self._cache.get(f"publication:{campaign_id}")
+        value = self._get(f"publication:{campaign_id}")
         attempted_at = _timestamp(value.get("attempted_at")) if isinstance(value, dict) else None
         if attempted_at is None or not isinstance(value.get("payload"), dict):
             return None
@@ -176,7 +192,7 @@ class PreviewStore:
     ) -> None:
         """Record the latest replaceable preview attempt."""
 
-        self._cache.set(
+        self._set(
             f"publication:{campaign_id}",
             {
                 "payload_hash": payload_hash,
@@ -192,7 +208,7 @@ class PreviewStore:
     ) -> PreviewEvidence[T] | None:
         # Preview evidence is replaceable. An entry this release cannot read, for
         # example after a model change, is a miss and is fetched again.
-        value = self._cache.get(key)
+        value = self._get(key)
         if not isinstance(value, dict):
             return None
         attempted_at = _timestamp(value.get("attempted_at"))
@@ -214,7 +230,7 @@ class PreviewStore:
         self, key: str, evidence: PreviewEvidence[T]
     ) -> PreviewEvidence[T]:
         refreshed_at = evidence.refreshed_at
-        self._cache.set(
+        self._set(
             key,
             {
                 "result": evidence.result.model_dump(mode="json"),
@@ -224,6 +240,71 @@ class PreviewStore:
             },
         )
         return evidence
+
+    def _get(self, key: str) -> Any:
+        row = self._connection.execute(
+            "SELECT value_json FROM preview_entries WHERE key = ?", (key,)
+        ).fetchone()
+        return json.loads(row["value_json"]) if row is not None else None
+
+    def _set(self, key: str, value: dict[str, object]) -> None:
+        self._connection.execute(
+            "INSERT OR REPLACE INTO preview_entries (key, value_json) VALUES (?, ?)",
+            (key, json.dumps(value)),
+        )
+
+    def _import_legacy(self, directory: Path) -> None:
+        """Import the diskcache entries earlier releases kept, leaving them for rollback."""
+
+        # Remove once no validator can still upgrade from a diskcache release.
+        try:
+            with self._connection as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                imported = connection.executemany(
+                    "INSERT OR REPLACE INTO preview_entries (key, value_json) VALUES (?, ?)",
+                    _legacy_entries(directory),
+                ).rowcount
+        except sqlite3.Error as exc:
+            LOGGER.warning("legacy preview cache not imported from %s: %s", directory, exc)
+            return
+        if imported:
+            LOGGER.info("imported %s legacy preview entries from %s", imported, directory)
+
+
+class _PlainUnpickler(pickle.Unpickler):
+    """Rebuild only plain containers and scalars, so no stored callable can run."""
+
+    def find_class(self, module_name: str, global_name: str, /) -> Any:
+        raise pickle.UnpicklingError(f"refusing to load {module_name}.{global_name}")
+
+
+def _legacy_entries(directory: Path) -> Iterator[tuple[str, str]]:
+    """Yield ``(key, value_json)`` for the readable entries of a diskcache directory."""
+
+    database = (directory / "cache.db").resolve()
+    if not database.is_file():
+        return
+    connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=30)
+    try:
+        rows = connection.execute(
+            "SELECT key, filename, value FROM Cache WHERE raw = 1 AND mode = ?",
+            (_DISKCACHE_PICKLE_MODE,),
+        ).fetchall()
+    finally:
+        connection.close()
+    for key, filename, value in rows:
+        try:
+            if filename is not None:
+                path = (database.parent / filename).resolve()
+                if not path.is_relative_to(database.parent):
+                    raise ValueError("value file is outside the cache directory")
+                value = path.read_bytes()
+            entry = json.dumps(_PlainUnpickler(io.BytesIO(value)).load())
+        except Exception as exc:
+            # As in the live store, an unreadable entry is a miss and is fetched again.
+            LOGGER.warning("skipping unreadable legacy preview entry key=%s: %s", key, exc)
+            continue
+        yield str(key), entry
 
 
 class PreviewXProvider:

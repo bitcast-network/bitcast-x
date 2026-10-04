@@ -229,7 +229,10 @@ class ValidatorService:
         )
         stack.push_async_callback(x_provider.close)
         qualification = QualificationReader(chain, qualification_policy)
-        preview_store = PreviewStore(settings.state_dir / "preview-cache")
+        preview_store = PreviewStore(
+            settings.state_dir / "preview.sqlite3",
+            legacy_directory=settings.state_dir / "preview-cache",
+        )
         stack.callback(preview_store.close)
         preview_provider = PreviewXProvider(x_provider, preview_store)
         endpoint = settings.llm_endpoint

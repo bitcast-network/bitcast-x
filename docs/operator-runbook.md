@@ -28,6 +28,8 @@ handles unpaid historical referral records independently of subnet campaign emis
 Keep `validator.sqlite3`, miner history, campaign caches, preview state, and wallets across
 upgrades. Protocol-v2 signed commitments and `/v2/batches` compatibility remain necessary to
 verify already committed preclaim history; they are separate from retired legacy campaigns.
+Preview state is kept in `preview.sqlite3`. A `preview-cache` directory left by an earlier
+release is imported on first start and can be deleted once rollback is no longer needed.
 
 ### Desearch activity budget
 

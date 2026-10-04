@@ -144,7 +144,7 @@ def preview_publisher(
         ValidatorStore(tmp_path / "validator.sqlite3"),
         data_publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
-        preview_store=PreviewStore(tmp_path / "preview-cache"),
+        preview_store=PreviewStore(tmp_path / "preview.sqlite3"),
         now=now,
     )
     return publisher, data_publisher

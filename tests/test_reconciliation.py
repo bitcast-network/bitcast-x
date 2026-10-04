@@ -1222,7 +1222,7 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
         store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
-        preview_store=PreviewStore(tmp_path / "preview-cache"),
+        preview_store=PreviewStore(tmp_path / "preview.sqlite3"),
     ).publish(
         snapshot,
         run.scored,

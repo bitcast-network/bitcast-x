@@ -418,7 +418,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         validator_store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
-        preview_store=PreviewStore(tmp_path / "preview-cache"),
+        preview_store=PreviewStore(tmp_path / "preview.sqlite3"),
     ).publish(
         feed,
         scored,
