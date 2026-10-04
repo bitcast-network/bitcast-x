@@ -94,6 +94,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- A miner that queued two submissions citing the same claim before its next batch committed could
+  no longer commit anything: the batch revealed that claim twice, which every batch validation
+  rejects. A batch now reveals each claim once; validators already let at most one of the
+  submissions consume the claim. An affected miner recovers on its next commit attempt.
 - An unreadable preview cache entry (for example after an evidence model change, or a malformed
   timestamp) is now a cache miss that is fetched again. It previously aborted the whole validator
   cycle before weights, or stopped the process.

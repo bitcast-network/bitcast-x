@@ -70,20 +70,26 @@ class BatchDraft:
     def build(self, miner_hotkey: str, events: tuple[ProtocolEvent, ...]) -> CommittedBatch:
         """Build the exact next batch for these events without I/O."""
 
-        reveals: list[DraftReveal] = []
+        # Several submissions may cite one claim (validators let at most one
+        # consume it), but a batch may reveal each claim only once.
+        reveals: dict[str, DraftReveal] = {}
         for event in events:
-            if not isinstance(event, SubmissionEvent) or event.claim_id is None:
+            if (
+                not isinstance(event, SubmissionEvent)
+                or event.claim_id is None
+                or event.claim_id in reveals
+            ):
                 continue
             reveal = self.reveals.get(event.claim_id)
             if reveal is None:
                 raise ProtocolError("submission references a claim without a local reveal")
-            reveals.append(reveal)
+            reveals[event.claim_id] = reveal
         return CommittedBatch.create(
             miner_hotkey=miner_hotkey,
             sequence=self.sequence,
             previous_batch_hash=self.previous_batch_hash,
             events=events,
-            reveals=tuple(reveals),
+            reveals=tuple(reveals.values()),
             history_id=self.history_id or None,
         )
 

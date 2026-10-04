@@ -19,6 +19,7 @@ from bitcast_x.miner import (
 from bitcast_x.protocol import (
     ClaimEvent,
     CommitmentPosition,
+    CommittedBatch,
     DraftReveal,
     OnChainEnvelope,
     ProtocolEvent,
@@ -167,6 +168,42 @@ async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path
     sdk.record_submission_result(submission_id, EventStatus.ATTRIBUTED)
     with pytest.raises(ProtocolError, match="final submission result changed"):
         sdk.record_submission_result(submission_id, EventStatus.REJECTED)
+
+
+async def test_submissions_sharing_a_claim_commit_with_one_reveal(tmp_path: Path) -> None:
+    """Two tweets may cite one claim before it is consumed; validators let at most one win it.
+
+    The batch must reveal the claim once: a duplicate reveal made every commit
+    attempt fail validation and stalled the miner's queue.
+    """
+
+    submitter = FakeSubmitter()
+    sdk = build_sdk(tmp_path / "miner.db", submitter)
+    claim_id = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="A private draft")
+    await sdk.engine.commit_ready(force=True)
+    submission_ids = [
+        sdk.submit_tweet(
+            campaign_id="campaign", tweet_id=tweet_id, claim_id=claim_id, creator_x_id="123"
+        )
+        for tweet_id in ("998", "999")
+    ]
+
+    batch = await sdk.engine.commit_ready(force=True)
+    page = await sdk.engine.batch_page(
+        BatchPageRequest(after_sequence=1, max_batches=10),
+        caller_hotkey="validator",
+    )
+
+    assert batch is not None
+    assert [event.tweet_id for event in batch.events if isinstance(event, SubmissionEvent)] == [
+        "998",
+        "999",
+    ]
+    assert [reveal.claim_id for reveal in batch.reveals] == [claim_id]
+    assert CommittedBatch.model_validate(page.batches[0].batch) == batch
+    assert [sdk.submission_status(item) for item in submission_ids] == [
+        EventStatus.VERIFICATION_PENDING
+    ] * 2
 
 
 async def test_page_truncates_at_complete_batch_before_response_byte_limit(

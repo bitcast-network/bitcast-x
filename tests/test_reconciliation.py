@@ -977,7 +977,8 @@ async def test_sixth_claim_evicts_the_oldest_from_the_active_set(
         assert result.claim_id is None
 
 
-async def test_consumed_claim_cannot_win_a_second_tweet(tmp_path: Path) -> None:
+@pytest.mark.parametrize("same_batch", [False, True], ids=["separate-batches", "one-batch"])
+async def test_consumed_claim_cannot_win_a_second_tweet(tmp_path: Path, same_batch: bool) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     reveal = DraftReveal(claim_id="01" * 16, draft=tweet().text, nonce="02" * 32)
     batch = CommittedBatch.create(
@@ -987,23 +988,26 @@ async def test_consumed_claim_cannot_win_a_second_tweet(tmp_path: Path) -> None:
         events=(claim_event(reveal),),
     )
     persist_batch(store, batch, block=10, timestamp=NOW + timedelta(minutes=1))
-    for sequence, (tweet_id, submission_id) in enumerate(
-        (("998", "03" * 16), ("999", "04" * 16)), start=2
-    ):
+    submissions = [
+        SubmissionEvent(
+            submission_id=submission_id,
+            campaign_id="campaign",
+            tweet_id=tweet_id,
+            claim_id=reveal.claim_id,
+            miner_hotkey=MINER,
+            creator_x_id="456",
+        )
+        for tweet_id, submission_id in (("998", "03" * 16), ("999", "04" * 16))
+    ]
+    # Miners reveal a shared claim once per batch, so both submissions can
+    # arrive together with a single reveal.
+    groups = [tuple(submissions)] if same_batch else [(item,) for item in submissions]
+    for sequence, events in enumerate(groups, start=2):
         batch = CommittedBatch.create(
             miner_hotkey=MINER,
             sequence=sequence,
             previous_batch_hash=batch.batch_hash,
-            events=(
-                SubmissionEvent(
-                    submission_id=submission_id,
-                    campaign_id="campaign",
-                    tweet_id=tweet_id,
-                    claim_id=reveal.claim_id,
-                    miner_hotkey=MINER,
-                    creator_x_id="456",
-                ),
-            ),
+            events=events,
             reveals=(reveal,),
         )
         persist_batch(store, batch, block=9 + sequence, timestamp=NOW + timedelta(minutes=20))
