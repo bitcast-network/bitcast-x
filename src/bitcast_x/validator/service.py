@@ -342,7 +342,7 @@ class ValidatorService:
         economics: _Economics,
         block: int,
     ) -> list[AttributionResult]:
-        """Reconcile and score the feed, publish results, and submit weights when due."""
+        """Reconcile and score the feed, submit weights when due, then publish results."""
 
         try:
             feed = await economics.feed.fetch()
@@ -389,15 +389,6 @@ class ValidatorService:
             )
         else:
             store.persist_shadow_weights(block, feed.snapshot_id, weights)
-        if economics.publisher is not None:
-            await economics.publisher.publish(
-                feed,
-                scored,
-                floors,
-                block=block,
-                hotkey_to_uid=hotkey_to_uid,
-                completed_campaign_ids=economics.rewards.completed_campaign_ids,
-            )
         if self.settings.enable_weight_submission and not pending:
             await submit_weights_if_due(
                 chain,
@@ -407,6 +398,17 @@ class ValidatorService:
                 block=block,
                 epoch_blocks=self.settings.weight_epoch_blocks,
                 version_key=self.settings.weight_version_key,
+            )
+        # Publish only after weights, so a campaign whose results cannot be
+        # published never holds back consensus output for every campaign.
+        if economics.publisher is not None:
+            await economics.publisher.publish(
+                feed,
+                scored,
+                floors,
+                block=block,
+                hotkey_to_uid=hotkey_to_uid,
+                completed_campaign_ids=economics.rewards.completed_campaign_ids,
             )
         return attributions
 

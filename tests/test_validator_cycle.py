@@ -9,6 +9,7 @@ import pytest
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.config import Settings
+from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
@@ -40,7 +41,7 @@ def campaign(campaign_id: str) -> CampaignRecord:
 
 
 @pytest.mark.parametrize(
-    "case", ["empty", "preclaim", "pending_preclaim", "invalid_feed", "preview"]
+    "case", ["empty", "preclaim", "pending_preclaim", "invalid_feed", "preview", "publish_fails"]
 )
 async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -61,9 +62,10 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         "pending_preclaim": (preclaim,),
         "invalid_feed": (preclaim,),
         "preview": (open_campaign,),
+        "publish_fails": (preclaim,),
     }[case]
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    if case in {"preclaim", "invalid_feed"}:
+    if case in {"preclaim", "invalid_feed", "publish_fails"}:
         frozen = preclaim
         store.bind_campaign_protocols((frozen,))
         store.persist_reconciliation(
@@ -128,7 +130,13 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         verified_events=Mock(return_value="events"),
         reconcile_campaign=AsyncMock(return_value=[]),
     )
-    publisher = SimpleNamespace(publish=AsyncMock(), publish_preview=AsyncMock())
+    # A final payload that cannot be built (for example, a rewarded miner that
+    # has since deregistered) must not block weights.
+    publish_error = ProtocolError("rewarded tweet has no registered miner")
+    publisher = SimpleNamespace(
+        publish=AsyncMock(side_effect=publish_error if case == "publish_fails" else None),
+        publish_preview=AsyncMock(),
+    )
     submit = AsyncMock()
     monkeypatch.setattr(
         service,
@@ -195,6 +203,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         else:
             submit.assert_awaited_once()
             assert submit.await_args is not None
-            expected = {0: 0.0, 7: 1.0} if case == "preclaim" else {0: 1.0, 7: 0.0}
+            frozen_rewards = case in {"preclaim", "publish_fails"}
+            expected = {0: 0.0, 7: 1.0} if frozen_rewards else {0: 1.0, 7: 0.0}
             assert submit.await_args.args[3] == expected
             assert shadow_report(tmp_path)["shadow_blocks"] == 1
