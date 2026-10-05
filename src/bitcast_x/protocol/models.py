@@ -23,6 +23,9 @@ SubmissionProtocolId = Literal[2, 3]
 # Direct submissions committed before this block use the legacy creator-resolution
 # rule. At and after it, validators require the version-3 creator binding.
 CREATOR_BINDING_ACTIVATION_BLOCK: Final = 8_920_000
+# Longest claim draft. A reveal stores the draft NFKC-normalized and every read
+# re-checks this limit, so it bounds the normalized text.
+MAX_DRAFT_CHARS: Final = 20_000
 Hex128 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{32}$")]
 Hash256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 NumericId = Annotated[str, StringConstraints(pattern=r"^[0-9]+$")]
@@ -136,7 +139,7 @@ class DraftReveal(ProtocolModel):
     """Private draft material revealed only with a completed submission."""
 
     claim_id: Hex128
-    draft: str = Field(min_length=1, max_length=20_000)
+    draft: str = Field(min_length=1, max_length=MAX_DRAFT_CHARS)
     nonce: Hash256
 
     @field_validator("draft")

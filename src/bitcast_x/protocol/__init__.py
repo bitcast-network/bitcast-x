@@ -7,6 +7,7 @@ from bitcast_x.protocol.commitments import (
 )
 from bitcast_x.protocol.models import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
+    MAX_DRAFT_CHARS,
     AttributionReason,
     AttributionResult,
     BatchContent,
@@ -24,6 +25,7 @@ from bitcast_x.protocol.state import MAX_ACTIVE_CLAIMS, BatchChainVerifier
 __all__ = [
     "CREATOR_BINDING_ACTIVATION_BLOCK",
     "MAX_ACTIVE_CLAIMS",
+    "MAX_DRAFT_CHARS",
     "AttributionReason",
     "AttributionResult",
     "BatchContent",

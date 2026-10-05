@@ -823,6 +823,19 @@ def test_validation_errors_use_stable_envelope_without_echoing_input(tmp_path: P
     assert "private" not in validation.text
 
 
+def test_claim_too_long_once_normalized_is_a_validation_error(tmp_path: Path) -> None:
+    web = build_client(tmp_path)
+
+    # 1,200 characters, but 21,600 once normalized as the claim's reveal stores it.
+    response = _post_claim(web, draft="\ufdfa" * 1_200)
+
+    assert _error_envelope(response) == (
+        422,
+        _refusal("invalid_request", "Request validation failed."),
+    )
+    assert web.get("/api/v1/claims").json()["items"] == []
+
+
 def test_every_operation_error_code_has_an_http_status() -> None:
     assert set(_ERROR_STATUS) == set(ErrorCode)
 

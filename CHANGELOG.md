@@ -95,6 +95,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- A claim whose draft exceeds 20,000 characters once NFKC-normalized is refused (422 from the
+  miner API). Its reveal is stored normalized and re-checked on every read, so such a claim could
+  be created but never read back to build a batch, after which no event from any creator committed.
 - Campaign feed caches left by earlier releases stay usable. A torn or retired-format
   `campaign-feed.json` is now downloaded again instead of failing every cycle until an operator
   deleted it, and the map-binding bootstrap reads map references from any manifest version.

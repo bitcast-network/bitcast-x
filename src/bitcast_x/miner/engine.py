@@ -21,7 +21,7 @@ from bitcast_x.protocol import (
     ProtocolEvent,
     SubmissionEvent,
 )
-from bitcast_x.protocol.canonical import canonical_json
+from bitcast_x.protocol.canonical import canonical_json, normalize_text
 from bitcast_x.transport import (
     BatchPageRequest,
     BatchPageResponse,
@@ -251,7 +251,8 @@ class MinerSdk:
         claim_id = secrets.token_hex(16)
         reveal = DraftReveal(
             claim_id=claim_id,
-            draft=draft,
+            # Validate the normalized form the reveal stores and every read re-checks.
+            draft=normalize_text(draft),
             nonce=secrets.token_hex(32),
         )
         claim = ClaimEvent(

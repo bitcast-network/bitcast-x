@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from bitcast_x.errors import ChainOperationError, ProtocolError
 from bitcast_x.miner import (
@@ -168,6 +169,17 @@ async def test_submission_batch_carries_required_reveal_and_is_pageable(tmp_path
     sdk.record_submission_result(submission_id, EventStatus.ATTRIBUTED)
     with pytest.raises(ProtocolError, match="final submission result changed"):
         sdk.record_submission_result(submission_id, EventStatus.REJECTED)
+
+
+def test_claim_too_long_once_normalized_is_refused_before_it_is_queued(tmp_path: Path) -> None:
+    sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
+
+    # Each U+FDFA ligature normalizes to 18 characters, so 1,200 become 21,600: a stored
+    # reveal that long could never be read back to build a batch.
+    with pytest.raises(ValidationError, match="draft"):
+        sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="\ufdfa" * 1_200)
+
+    assert sdk.engine.store.queued(limit=10) == []
 
 
 async def test_submissions_sharing_a_claim_commit_with_one_reveal(tmp_path: Path) -> None:

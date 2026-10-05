@@ -13,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from bitcast_x.errors import BitcastXError, ChainOperationError
 from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.errors import ErrorCode, OperationError
+from bitcast_x.protocol import MAX_DRAFT_CHARS
+from bitcast_x.protocol.canonical import normalize_text
 
 EcosystemFilter = Annotated[list[str] | None, Query()]
 
@@ -37,8 +39,17 @@ class ClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     campaign_id: str = Field(min_length=1, max_length=128)
     creator_x_id: str = Field(pattern=r"^[0-9]+$")
-    draft: str = Field(min_length=1, max_length=20_000)
+    draft: str = Field(min_length=1, max_length=MAX_DRAFT_CHARS)
     external_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("draft")
+    @classmethod
+    def fit_normalized_draft(cls, value: str) -> str:
+        """Reject a draft whose stored, normalized form would exceed the limit."""
+
+        if len(normalize_text(value)) > MAX_DRAFT_CHARS:
+            raise ValueError("draft is too long once normalized")
+        return value
 
 
 class SubmissionRequest(BaseModel):
