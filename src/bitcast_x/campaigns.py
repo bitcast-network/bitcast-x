@@ -312,6 +312,20 @@ class CampaignManifest(BaseModel):
         return self
 
 
+class _ManifestCache(BaseModel):
+    """The last downloaded manifest, as any release cached it, with its ETag."""
+
+    url: str
+    etag: str | None = None
+    manifest: dict[str, Any]
+
+
+class _ManifestMapReferences(BaseModel):
+    """The map references of a cached manifest of any protocol version."""
+
+    ecosystem_maps: tuple[EcosystemMapReference, ...] = ()
+
+
 class _EcosystemMapBinding(BaseModel):
     """First digest accepted for an immutable ecosystem/run identity."""
 
@@ -499,19 +513,13 @@ class CampaignFeedClient:
         return document.campaigns
 
     async def _fetch_document(self) -> CampaignManifest:
-        stored = self._read_cache()
-        # ETags are only meaningful for the resource that issued them.
-        cached = (
-            stored
-            if stored is not None and stored.get("url") == self.url and "manifest" in stored
-            else None
-        )
-        headers = {"if-none-match": str(cached["etag"])} if cached and cached.get("etag") else {}
+        cached = self._cached_manifest()
+        headers = {"if-none-match": cached[1]} if cached is not None and cached[1] else {}
         payload, etag, not_modified = await self._get_bounded(self.url, headers=headers)
         if not_modified:
             if cached is None:
                 raise ValueError("campaign endpoint returned 304 without a local cache")
-            manifest = CampaignManifest.model_validate(cached["manifest"])
+            manifest = cached[0]
             self._reject_map_mutations(manifest.ecosystem_maps)
             return manifest
         manifest = CampaignManifest.model_validate_json(payload)
@@ -544,10 +552,29 @@ class CampaignFeedClient:
             payload = await read_bounded(response, self._max_response_bytes, source="campaign")
             return payload, response.headers.get("etag"), False
 
-    def _read_cache(self) -> dict[str, Any] | None:
-        if not self.cache_path.exists():
+    def _cached_manifest(self) -> tuple[CampaignManifest, str | None] | None:
+        """Return this URL's cached manifest and ETag when this release can use them."""
+
+        stored = self._read_cache()
+        # ETags are only meaningful for the resource that issued them.
+        if stored is None or stored.url != self.url:
             return None
-        return TypeAdapter(dict[str, Any]).validate_json(self.cache_path.read_bytes())
+        try:
+            return CampaignManifest.model_validate(stored.manifest), stored.etag
+        except ValueError:
+            # An older manifest format is downloaded again rather than reused.
+            return None
+
+    def _read_cache(self) -> _ManifestCache | None:
+        try:
+            return _ManifestCache.model_validate_json(self.cache_path.read_bytes())
+        except FileNotFoundError:
+            return None
+        except ValueError:
+            # The cache is replaceable: one this release cannot read, such as a torn
+            # write or a retired document shape, is a miss and is downloaded again.
+            LOGGER.warning("discarding unreadable campaign manifest cache path=%s", self.cache_path)
+            return None
 
     def _write_manifest_cache(self, manifest: CampaignManifest, etag: str | None) -> None:
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -574,10 +601,14 @@ class CampaignFeedClient:
         # before the binding ledger existed.  A document reference is imported
         # only when its digest-addressed payload is still present and passes the
         # normal identity, timestamp and content-digest checks.
-        cached = self._read_cache()
+        stored = self._read_cache()
         references: tuple[EcosystemMapReference, ...] = ()
-        if cached is not None and "manifest" in cached:
-            references = CampaignManifest.model_validate(cached["manifest"]).ecosystem_maps
+        if stored is not None:
+            try:
+                # Only the references matter here, so any manifest version will do.
+                references = _ManifestMapReferences.model_validate(stored.manifest).ecosystem_maps
+            except ValueError:
+                LOGGER.warning("cached manifest has unreadable map references; importing none")
         imported = tuple(
             _EcosystemMapBinding(
                 ecosystem_id=reference.ecosystem_id,
@@ -637,7 +668,12 @@ class CampaignFeedClient:
         if not path.exists():
             return None
         try:
-            ecosystem_map = EcosystemMap.model_validate_json(path.read_bytes())
+            payload = json.loads(path.read_bytes())
+            if isinstance(payload, dict):
+                # Releases before 3.0 cached a consumer-only max_referral_amount
+                # default that was never part of a map or its digest.
+                payload.pop("max_referral_amount", None)
+            ecosystem_map = EcosystemMap.model_validate(payload)
             self._validate_map(reference, ecosystem_map)
         except ValueError:
             # The cache is digest-addressed, so a stale or damaged entry is just

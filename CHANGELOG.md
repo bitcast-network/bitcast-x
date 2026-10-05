@@ -94,6 +94,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Fixed
 
+- Campaign feed caches left by earlier releases stay usable. A torn or retired-format
+  `campaign-feed.json` is now downloaded again instead of failing every cycle until an operator
+  deleted it, and the map-binding bootstrap reads map references from any manifest version.
+  Cached ecosystem maps that still carry the retired consumer-only `max_referral_amount` default
+  are reused rather than all downloaded again on upgrade.
 - Restore the rule that a stored campaign contract missing `max_members` matches one that has it.
   An earlier change in this release removed it as unused, but campaigns bound before the field
   existed and frozen afterwards (or the reverse) then failed every replay check, stopping

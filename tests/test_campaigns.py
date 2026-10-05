@@ -271,9 +271,9 @@ async def test_split_feed_downloads_each_map_once_then_uses_digest_cache(tmp_pat
     }
 
 
-@pytest.mark.parametrize("ledger_missing", (False, True), ids=("ledger", "pre-ledger-cache"))
+@pytest.mark.parametrize("prior_state", ("ledger", "pre-ledger-cache", "v3-era-cache"))
 async def test_rejects_changed_digest_for_an_accepted_ecosystem_run(
-    tmp_path: Path, ledger_missing: bool
+    tmp_path: Path, prior_state: str
 ) -> None:
     original_manifest = _manifest()
     original_digest = original_manifest["ecosystem_maps"][0]["digest"]  # type: ignore[index]
@@ -299,10 +299,21 @@ async def test_rejects_changed_digest_for_an_accepted_ecosystem_run(
     bindings_path = tmp_path / "feed.json.map-bindings.json"
     async with feed_client(handler, path) as client:
         first = await client.fetch()
-        if ledger_missing:
+        if prior_state != "ledger":
             # A cache written before the binding ledger existed: the verified
             # cached map must be imported before the new digest is judged.
             bindings_path.unlink()
+        if prior_state == "v3-era-cache":
+            # As releases before 3.0 left it: the retired URL and manifest format,
+            # and the map cached with its retired referral default.
+            path.write_text(
+                json.dumps(
+                    {"url": LEGACY_CAMPAIGN_FEED_URL, "etag": None, "manifest": _v3_era_manifest()}
+                )
+            )
+            cached_map = tmp_path / "feed.json.maps" / f"{original_digest}.json"
+            stale_map = {**json.loads(cached_map.read_text()), "max_referral_amount": 100.0}
+            cached_map.write_text(json.dumps(stale_map))
         with pytest.raises(ProtocolError, match="changed the digest"):
             await client.fetch()
 
@@ -387,14 +398,23 @@ async def test_does_not_reuse_an_etag_from_a_stale_cache(
     assert json.loads(path.read_text())["url"] == str(client.url)
 
 
-async def test_unreadable_map_cache_is_downloaded_again(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("cached", "downloads"),
+    [
+        # Releases before 3.0 cached a retired consumer-only referral default.
+        (json.dumps({**FEED["ecosystem_maps"][0], "max_referral_amount": 100.0}).encode(), 0),  # type: ignore[dict-item]
+        (b'{"ecosystem_id": "exam', 1),
+    ],
+    ids=["retired-field", "torn-write"],
+)
+async def test_map_cache_from_older_releases_is_reused_or_downloaded_again(
+    tmp_path: Path, cached: bytes, downloads: int
+) -> None:
     manifest = _manifest()
     digest = manifest["ecosystem_maps"][0]["digest"]  # type: ignore[index]
     cached_map = tmp_path / "feed.json.maps" / f"{digest}.json"
     cached_map.parent.mkdir()
-    # Written by releases that still carried the retired referral field.
-    stale = {**FEED["ecosystem_maps"][0], "max_referral_amount": 100.0}  # type: ignore[dict-item]
-    cached_map.write_text(json.dumps(stale))
+    cached_map.write_bytes(cached)
     map_calls = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -407,9 +427,45 @@ async def test_unreadable_map_cache_is_downloaded_again(tmp_path: Path) -> None:
     async with feed_client(handler, tmp_path / "feed.json") as client:
         feed = await client.fetch()
 
-    assert map_calls == 1
-    assert feed.ecosystem_maps[0].ecosystem_id == "example"
-    assert "max_referral_amount" not in json.loads(cached_map.read_text())
+    assert map_calls == downloads
+    assert feed.ecosystem_maps[0] == EcosystemMap.model_validate(FEED["ecosystem_maps"][0])  # type: ignore[index]
+
+
+def _v3_era_manifest() -> dict[str, object]:
+    """Return the manifest as releases before 3.0 cached it, in the retired v3 format."""
+
+    manifest = _manifest()
+    manifest["protocol_version"] = 3
+    for campaign in manifest["campaigns"]:  # type: ignore[attr-defined]
+        del campaign["max_members"]
+    return manifest
+
+
+@pytest.mark.parametrize(
+    "cache",
+    [
+        b'{"url": "https://feed.example/api/v2/public/x/campaign-manifest", "etag"',
+        json.dumps({"url": MANIFEST_URL, "etag": '"old"', "manifest": _v3_era_manifest()}).encode(),
+    ],
+    ids=["torn-write", "retired-manifest-format"],
+)
+async def test_unusable_manifest_cache_is_downloaded_again(tmp_path: Path, cache: bytes) -> None:
+    path = tmp_path / "feed.json"
+    path.write_bytes(cache)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("campaign-manifest"):
+            # Revalidating an unusable cache would leave nothing to serve on a 304.
+            if "if-none-match" in request.headers:
+                return httpx.Response(304)
+            return httpx.Response(200, json=_manifest(), headers={"etag": '"new"'})
+        return httpx.Response(200, json=FEED["ecosystem_maps"][0])  # type: ignore[index]
+
+    async with feed_client(handler, path) as client:
+        feed = await client.fetch()
+
+    assert feed.campaigns[0].max_members == 1
+    assert json.loads(path.read_text())["etag"] == '"new"'
 
 
 @pytest.mark.parametrize(
