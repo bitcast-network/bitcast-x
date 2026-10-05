@@ -249,6 +249,12 @@ For application rollback, redeploy the recorded image digest. If the newer relea
 that the older binary cannot read, stop the node and restore the pre-upgrade backup into a new state
 directory; never run two writers against one SQLite volume.
 
+Rolling back from this release to the 3.0 releases that hard-pinned featured tweets (#119-#140) is
+safe except in one case: an active campaign whose pinned featured tweet was disqualified by an edit
+adopted after close and that has no other eligible tweet, so its rewards settled at zero. Those
+releases wait for that pin's featured evidence and withhold weights for every campaign until the
+campaign's emission ends. If such a campaign is active, roll forward instead.
+
 ## Incident rules
 
 - X, archive RPC or campaign evidence unavailable: keep the campaign unreconciled and retain the
