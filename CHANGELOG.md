@@ -158,6 +158,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   its event loop, loading only plain values so no stored code can run; an interrupted import runs
   again on the next start, and an unusable old cache never blocks startup. The old directory is
   left unchanged so a rollback keeps its preview state. Delete it once rollback is no longer needed.
+  Entries no preview has written for 14 days, which belong to closed campaigns, are dropped, so the
+  store stays bounded as diskcache's size limit kept the old cache.
 
 ## [2.2.0] - 2026-08-31
 

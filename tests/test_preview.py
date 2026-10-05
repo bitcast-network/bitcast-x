@@ -329,3 +329,25 @@ def test_unusable_legacy_preview_cache_starts_empty(tmp_path: Path, state: str) 
             legacy.chmod(0o700)
 
     assert PreviewStore(path).preview_tweet_evidence("1") is None
+
+
+def test_entries_unwritten_for_the_retention_period_are_dropped(tmp_path: Path) -> None:
+    path = tmp_path / "preview.sqlite3"
+    import_legacy_preview_cache(path, tmp_path / "preview-cache")
+    first = PreviewStore(path)
+    first.record_preview_tweet_evidence(
+        "closed", TweetFetch(tweet=None, provider_available=True), attempted_at=NOW
+    )
+    first.close()
+    # Everything written so far, the import marker included, ages past the retention.
+    with closing(sqlite3.connect(path)) as database, database:
+        database.execute("UPDATE preview_entries SET updated_ns = 0")
+
+    store = PreviewStore(path)
+    store.record_preview_tweet_evidence(
+        "active", TweetFetch(tweet=None, provider_available=True), attempted_at=NOW
+    )
+
+    assert store.preview_tweet_evidence("closed") is None
+    assert store.preview_tweet_evidence("active") is not None
+    assert store._get("legacy-import") is not None

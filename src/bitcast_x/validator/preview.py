@@ -5,6 +5,7 @@ import json
 import logging
 import pickle
 import sqlite3
+import time
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -27,14 +28,20 @@ _MIGRATIONS = (
     """
     CREATE TABLE IF NOT EXISTS preview_entries (
         key TEXT PRIMARY KEY,
-        value_json TEXT NOT NULL
+        value_json TEXT NOT NULL,
+        updated_ns INTEGER NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS preview_entries_updated ON preview_entries (updated_ns);
     """,
 )
 # diskcache's storage mode for pickled values, which every legacy preview entry used.
 _DISKCACHE_PICKLE_MODE = 4
 # Recorded with the imported entries, so an interrupted import runs again.
 _LEGACY_IMPORT_KEY = "legacy-import"
+# Previews rewrite an active tweet's entries at least daily, so entries unwritten for
+# this long belong to closed campaigns and are dropped, at most once a day.
+_RETENTION_NS = 14 * 24 * 3600 * 10**9
+_PRUNE_INTERVAL_NS = 24 * 3600 * 10**9
 
 _UNAVAILABLE_RETRY = timedelta(minutes=1)
 _NEW_TWEET_REFRESH = timedelta(hours=1)
@@ -80,6 +87,7 @@ class PreviewStore:
         # One connection, used only by the thread that opened the store.
         self._connection = connect(path)
         apply_migrations(self._connection, _MIGRATIONS)
+        self._next_prune_ns = 0
 
     def close(self) -> None:
         """Close the preview store."""
@@ -247,10 +255,17 @@ class PreviewStore:
         return json.loads(row["value_json"]) if row is not None else None
 
     def _set(self, key: str, value: dict[str, object]) -> None:
+        now = time.time_ns()
         self._connection.execute(
-            "INSERT OR REPLACE INTO preview_entries (key, value_json) VALUES (?, ?)",
-            (key, json.dumps(value)),
+            "INSERT OR REPLACE INTO preview_entries (key, value_json, updated_ns) VALUES (?, ?, ?)",
+            (key, json.dumps(value), now),
         )
+        if now >= self._next_prune_ns:
+            self._connection.execute(
+                "DELETE FROM preview_entries WHERE updated_ns < ? AND key != ?",
+                (now - _RETENTION_NS, _LEGACY_IMPORT_KEY),
+            )
+            self._next_prune_ns = now + _PRUNE_INTERVAL_NS
 
     def import_legacy(self, directory: Path) -> None:
         """Import, once, the diskcache entries earlier releases kept, leaving them for rollback."""
@@ -258,17 +273,20 @@ class PreviewStore:
         # Remove once no validator can still upgrade from a diskcache release.
         if self._get(_LEGACY_IMPORT_KEY) is not None:
             return
+        now = time.time_ns()
         try:
             with self._connection as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 # Entries this release already wrote are newer than the old cache's.
                 imported = connection.executemany(
-                    "INSERT OR IGNORE INTO preview_entries (key, value_json) VALUES (?, ?)",
-                    _legacy_entries(directory),
+                    "INSERT OR IGNORE INTO preview_entries (key, value_json, updated_ns) "
+                    "VALUES (?, ?, ?)",
+                    ((key, entry, now) for key, entry in _legacy_entries(directory)),
                 ).rowcount
                 connection.execute(
-                    "INSERT INTO preview_entries (key, value_json) VALUES (?, 'true')",
-                    (_LEGACY_IMPORT_KEY,),
+                    "INSERT INTO preview_entries (key, value_json, updated_ns) "
+                    "VALUES (?, 'true', ?)",
+                    (_LEGACY_IMPORT_KEY, now),
                 )
         except Exception:
             # The old cache only seeds replaceable state, so it never blocks startup.
