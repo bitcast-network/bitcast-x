@@ -96,8 +96,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   protocol app and commitment loop. The miner store uses the shared SQLite helpers.
 - `config/miner.env.example` states the enforced 64-character minimum for
   `BITCAST_X_MINER_API_TOKEN`.
-- Remote Loki log forwarding is opt-in. The previous default enabled forwarding with a placeholder
-  token that could not authenticate; set all three `BITCAST_X_LOKI_*` values to enable it.
+- Remote Loki log forwarding no longer runs with the placeholder token, which could not
+  authenticate: it starts once `BITCAST_X_LOKI_TOKEN` is set, using the shared URL and username
+  unless they are overridden. Setting `BITCAST_X_LOKI_URL=` still disables it.
 
 ### Fixed
 

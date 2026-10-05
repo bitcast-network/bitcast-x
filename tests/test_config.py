@@ -31,16 +31,13 @@ def test_operator_defaults_match_the_published_network() -> None:
     assert settings.enable_weight_submission is True
     assert settings.auto_update is False
     assert settings.validator_preview_max_concurrency == 2
-    # Host identity, secrets and third-party log forwarding are injected at runtime.
-    for unconfigured in (
-        "public_ip",
-        "desearch_api_key",
-        "llm_api_key",
-        "loki_url",
-        "loki_username",
-        "loki_token",
-    ):
+    # Host identity and secrets are injected at runtime; Loki forwarding waits for its token.
+    for unconfigured in ("public_ip", "desearch_api_key", "llm_api_key", "loki_token"):
         assert getattr(settings, unconfigured) is None, unconfigured
+    assert (settings.loki_url, settings.loki_username) == (
+        "https://logs-prod-042.grafana.net",
+        "1693344",
+    )
 
 
 @pytest.mark.parametrize(

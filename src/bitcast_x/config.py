@@ -127,9 +127,10 @@ class Settings(BaseSettings):
     ops_port: int = Field(default=8096, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_format: Literal["json", "text"] = "json"
-    # Optional Grafana Loki forwarding: set all three BITCAST_X_LOKI_* values to enable.
-    loki_url: str | None = None
-    loki_username: str | None = None
+    # Logs go to the shared write-only Grafana Loki stack once BITCAST_X_LOKI_TOKEN is set.
+    # Override the URL and username for another stack, or set the URL empty to disable.
+    loki_url: str | None = "https://logs-prod-042.grafana.net"
+    loki_username: str | None = "1693344"
     loki_token: SecretStr | None = Field(default=None, repr=False)
     auto_update: bool = False
     auto_update_ref: str = "origin/main"

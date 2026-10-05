@@ -23,9 +23,10 @@ async def reset_loki() -> None:
 @pytest.mark.parametrize(
     "configured",
     (
-        pytest.param({}, id="default"),
+        pytest.param({}, id="no-token"),
         pytest.param(
-            {"loki_url": "https://example.test", "loki_username": "tenant"}, id="no-token"
+            {"loki_url": "", "loki_token": "write-token"},  # noqa: S106 - inert test credential
+            id="url-disabled",
         ),
     ),
 )
@@ -108,6 +109,17 @@ def test_loki_does_not_buffer_its_own_http_push_log() -> None:
     )
 
     assert not handler._buffer
+
+
+async def test_token_alone_forwards_to_the_shared_stack() -> None:
+    # Deployments that set only the write-only token rely on the shared URL and username.
+    settings = Settings(_env_file=None, loki_token="write-token")  # noqa: S106 - inert test credential
+
+    with patch.object(LokiHandler, "push", new=AsyncMock()):
+        assert configure_loki_logging(settings, labels={"neuron": "validator"}) is True
+        handler = logging_module._loki_handler
+        assert handler is not None
+        assert handler._push_url == "https://logs-prod-042.grafana.net/loki/api/v1/push"
 
 
 async def test_configure_and_shutdown_attach_to_root_logger() -> None:
