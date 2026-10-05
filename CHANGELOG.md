@@ -61,7 +61,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   submission, reducing repeated upstream reads.
 - Final and preview reconciliation load the verified batch history once per pass, grouped by
   campaign, instead of reloading and re-hashing the whole history for every campaign. The
-  reconciler's qualification memo is bounded so long-running previews no longer grow it per cycle.
+  reconciler keeps qualification answers for fixed past blocks, and for the moving preview block
+  only the latest block's, so long-running previews no longer grow it per cycle.
 - Engagement scoring looks up relationship edges in a sparse map built once per campaign pool,
   instead of allocating a dense N×N matrix for every tweet (about 376 MB per tweet on the live
   indie_hacker map). Scores are bit-identical; scoring 400 tweets on that map drops from 7.8 s to

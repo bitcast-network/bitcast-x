@@ -599,6 +599,27 @@ async def test_open_preview_can_recover_at_close_only_if_claim_was_initially_qua
     assert qualification.calls == [10, 15, 20]
 
 
+async def test_preview_qualification_keeps_fixed_block_answers_but_only_the_latest_head(
+    tmp_path: Path,
+) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign()
+    qualification = FakeQualification()
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(), provider_available=True)}),
+        qualification,
+    )
+
+    for head in (15, 16, 16, 17, 20):
+        await reconciler.reconcile_campaign(record, feed(record), through_block=head)
+
+    # The commit block (10) and scoring close (20) are read once and kept for good;
+    # each new chain head is read once, and earlier heads are not retained.
+    assert qualification.calls == [10, 15, 16, 17, 20]
+    assert set(reconciler._qualification_cache) == {(MINER, 10), (MINER, 20)}
+
+
 async def test_open_submission_without_a_committed_claim_is_rejected(tmp_path: Path) -> None:
     store = submission_only_history(tmp_path / "validator.sqlite3", claim_id="04" * 16)
     reconciler = CampaignReconciler(

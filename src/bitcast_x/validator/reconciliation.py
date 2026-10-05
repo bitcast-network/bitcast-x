@@ -29,8 +29,6 @@ from bitcast_x.x_provider import Tweet, XProvider
 
 LOGGER = logging.getLogger(__name__)
 
-_QUALIFICATION_CACHE_LIMIT = 10_000
-
 
 class QualificationChecker(Protocol):
     """Historical financial-barrier decision used by reconciliation."""
@@ -123,7 +121,10 @@ class CampaignReconciler:
         self.store = store
         self._x = x_provider
         self._qualification = qualification
+        # Qualification at a fixed past block never changes, so those answers are kept.
         self._qualification_cache: dict[tuple[str, int], bool] = {}
+        # Previews also ask at the moving chain head; only the latest head's are kept.
+        self._head_qualification: tuple[int, dict[str, bool]] = (-1, {})
         self._completed_campaign_ids: frozenset[str] = frozenset()
 
     @property
@@ -425,11 +426,7 @@ class CampaignReconciler:
             identity_match_seen = True
             if not await self._qualified(event.miner_hotkey, located.position.block):
                 continue
-            qualification_block = min(
-                through_block or campaign.access.scoring_close_block,
-                campaign.access.scoring_close_block,
-            )
-            if not await self._qualified(event.miner_hotkey, qualification_block):
+            if not await self._qualified_at_close(event.miner_hotkey, campaign, through_block):
                 if (
                     pending_candidate is None
                     and through_block is not None
@@ -525,11 +522,7 @@ class CampaignReconciler:
             if not await self._qualified(claim.miner_hotkey, claim.position.block):
                 failures.append((located.order, AttributionReason.MINER_NOT_QUALIFIED))
                 continue
-            qualification_block = min(
-                through_block or campaign.access.scoring_close_block,
-                campaign.access.scoring_close_block,
-            )
-            if not await self._qualified(claim.miner_hotkey, qualification_block):
+            if not await self._qualified_at_close(claim.miner_hotkey, campaign, through_block):
                 failures.append((located.order, AttributionReason.MINER_NOT_QUALIFIED))
                 if (
                     through_block is not None
@@ -620,12 +613,24 @@ class CampaignReconciler:
     async def _qualified(self, hotkey: str, block: int) -> bool:
         key = (hotkey, block)
         if key not in self._qualification_cache:
-            # Previews query a new block every cycle; bound the memo so a
-            # long-running validator does not accumulate one entry per cycle.
-            if len(self._qualification_cache) >= _QUALIFICATION_CACHE_LIMIT:
-                self._qualification_cache.clear()
             self._qualification_cache[key] = await self._qualification.eligible(hotkey, block)
         return self._qualification_cache[key]
+
+    async def _qualified_at_close(
+        self, hotkey: str, campaign: CampaignRecord, through_block: int | None
+    ) -> bool:
+        """Check qualification at scoring close, or at the chain head before it."""
+
+        close = campaign.access.scoring_close_block
+        if not through_block or through_block >= close:
+            return await self._qualified(hotkey, close)
+        head, answers = self._head_qualification
+        if head != through_block:
+            answers = {}
+            self._head_qualification = (through_block, answers)
+        if hotkey not in answers:
+            answers[hotkey] = await self._qualification.eligible(hotkey, through_block)
+        return answers[hotkey]
 
     @staticmethod
     def _exclusive_submission(
