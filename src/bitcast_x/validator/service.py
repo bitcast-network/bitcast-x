@@ -36,7 +36,11 @@ from bitcast_x.validator.ingestion import (
     ValidatorIngestor,
     signed_client_factory,
 )
-from bitcast_x.validator.preview import PreviewStore, PreviewXProvider
+from bitcast_x.validator.preview import (
+    PreviewStore,
+    PreviewXProvider,
+    import_legacy_preview_cache,
+)
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
@@ -230,10 +234,12 @@ class ValidatorService:
         )
         stack.push_async_callback(x_provider.close)
         qualification = QualificationReader(chain, qualification_policy)
-        preview_store = PreviewStore(
-            settings.state_dir / "preview.sqlite3",
-            legacy_directory=settings.state_dir / "preview-cache",
+        preview_path = settings.state_dir / "preview.sqlite3"
+        # A large one-time import takes seconds, so it runs off the event loop.
+        await asyncio.to_thread(
+            import_legacy_preview_cache, preview_path, settings.state_dir / "preview-cache"
         )
+        preview_store = PreviewStore(preview_path)
         stack.callback(preview_store.close)
         preview_provider = PreviewXProvider(x_provider, preview_store)
         endpoint = settings.llm_endpoint

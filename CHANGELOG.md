@@ -154,9 +154,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - Removed the `diskcache` dependency, which has an unpatched unsafe-pickle advisory
   (CVE-2025-69872). Validator preview state now lives in a JSON table in `preview.sqlite3` instead
-  of the `preview-cache` directory. On first start the validator imports the existing entries,
-  loading only plain values so no stored code can run, and leaves the old directory unchanged so
-  a rollback keeps its preview state. Delete it once rollback is no longer needed.
+  of the `preview-cache` directory. On first start the validator imports the existing entries off
+  its event loop, loading only plain values so no stored code can run; an interrupted import runs
+  again on the next start, and an unusable old cache never blocks startup. The old directory is
+  left unchanged so a rollback keeps its preview state. Delete it once rollback is no longer needed.
 
 ## [2.2.0] - 2026-08-31
 

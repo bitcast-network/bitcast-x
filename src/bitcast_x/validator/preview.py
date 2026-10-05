@@ -33,6 +33,8 @@ _MIGRATIONS = (
 )
 # diskcache's storage mode for pickled values, which every legacy preview entry used.
 _DISKCACHE_PICKLE_MODE = 4
+# Recorded with the imported entries, so an interrupted import runs again.
+_LEGACY_IMPORT_KEY = "legacy-import"
 
 _UNAVAILABLE_RETRY = timedelta(minutes=1)
 _NEW_TWEET_REFRESH = timedelta(hours=1)
@@ -73,14 +75,11 @@ class PreviewPublication:
 class PreviewStore:
     """Separate rollback-safe store for replaceable preview state."""
 
-    def __init__(self, path: Path, *, legacy_directory: Path | None = None) -> None:
+    def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        # One connection, as every caller runs on the validator's event loop thread.
+        # One connection, used only by the thread that opened the store.
         self._connection = connect(path)
-        created = int(self._connection.execute("PRAGMA user_version").fetchone()[0]) == 0
         apply_migrations(self._connection, _MIGRATIONS)
-        if created and legacy_directory is not None:
-            self._import_legacy(legacy_directory)
 
     def close(self) -> None:
         """Close the preview store."""
@@ -253,22 +252,40 @@ class PreviewStore:
             (key, json.dumps(value)),
         )
 
-    def _import_legacy(self, directory: Path) -> None:
-        """Import the diskcache entries earlier releases kept, leaving them for rollback."""
+    def import_legacy(self, directory: Path) -> None:
+        """Import, once, the diskcache entries earlier releases kept, leaving them for rollback."""
 
         # Remove once no validator can still upgrade from a diskcache release.
+        if self._get(_LEGACY_IMPORT_KEY) is not None:
+            return
         try:
             with self._connection as connection:
                 connection.execute("BEGIN IMMEDIATE")
+                # Entries this release already wrote are newer than the old cache's.
                 imported = connection.executemany(
-                    "INSERT OR REPLACE INTO preview_entries (key, value_json) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO preview_entries (key, value_json) VALUES (?, ?)",
                     _legacy_entries(directory),
                 ).rowcount
-        except sqlite3.Error as exc:
-            LOGGER.warning("legacy preview cache not imported from %s: %s", directory, exc)
+                connection.execute(
+                    "INSERT INTO preview_entries (key, value_json) VALUES (?, 'true')",
+                    (_LEGACY_IMPORT_KEY,),
+                )
+        except Exception:
+            # The old cache only seeds replaceable state, so it never blocks startup.
+            LOGGER.warning("legacy preview cache not imported from %s", directory, exc_info=True)
             return
         if imported:
             LOGGER.info("imported %s legacy preview entries from %s", imported, directory)
+
+
+def import_legacy_preview_cache(path: Path, directory: Path) -> None:
+    """Run the one-time legacy import on its own connection, so it can run off the loop."""
+
+    store = PreviewStore(path)
+    try:
+        store.import_legacy(directory)
+    finally:
+        store.close()
 
 
 class _PlainUnpickler(pickle.Unpickler):
@@ -286,25 +303,25 @@ def _legacy_entries(directory: Path) -> Iterator[tuple[str, str]]:
         return
     connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=30)
     try:
-        rows = connection.execute(
+        # Streamed row by row, so a large cache does not have to fit in memory.
+        for key, filename, value in connection.execute(
             "SELECT key, filename, value FROM Cache WHERE raw = 1 AND mode = ?",
             (_DISKCACHE_PICKLE_MODE,),
-        ).fetchall()
+        ):
+            try:
+                if filename is not None:
+                    path = (database.parent / filename).resolve()
+                    if not path.is_relative_to(database.parent):
+                        raise ValueError("value file is outside the cache directory")
+                    value = path.read_bytes()
+                entry = json.dumps(_PlainUnpickler(io.BytesIO(value)).load())
+            except Exception as exc:
+                # As in the live store, an unreadable entry is a miss and is fetched again.
+                LOGGER.warning("skipping unreadable legacy preview entry key=%s: %s", key, exc)
+                continue
+            yield str(key), entry
     finally:
         connection.close()
-    for key, filename, value in rows:
-        try:
-            if filename is not None:
-                path = (database.parent / filename).resolve()
-                if not path.is_relative_to(database.parent):
-                    raise ValueError("value file is outside the cache directory")
-                value = path.read_bytes()
-            entry = json.dumps(_PlainUnpickler(io.BytesIO(value)).load())
-        except Exception as exc:
-            # As in the live store, an unreadable entry is a miss and is fetched again.
-            LOGGER.warning("skipping unreadable legacy preview entry key=%s: %s", key, exc)
-            continue
-        yield str(key), entry
 
 
 class PreviewXProvider:
