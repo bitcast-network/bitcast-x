@@ -100,6 +100,10 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         ecosystem_maps=(),
     )
 
+    def feed_client(_settings: Settings) -> SimpleNamespace:
+        assert ops.serve.called, "liveness must be served before economics opens"
+        return SimpleNamespace(fetch=fetch, close=AsyncMock())
+
     async def fetch() -> CampaignFeed:
         ops.should_exit = True  # Finish after this one complete cycle.
         if case == "invalid_feed":
@@ -151,9 +155,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     monkeypatch.setattr(
         service,
         "CampaignFeedClient",
-        SimpleNamespace(
-            from_settings=lambda _settings: SimpleNamespace(fetch=fetch, close=AsyncMock())
-        ),
+        SimpleNamespace(from_settings=feed_client),
     )
     monkeypatch.setattr(service, "CampaignReconciler", lambda *_args, **_kwargs: reconciler)
     monkeypatch.setattr(

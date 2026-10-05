@@ -164,9 +164,10 @@ class ValidatorService:
                 max_concurrency=self.settings.validator_max_concurrency,
                 page_size=self.settings.max_batches_per_page,
             )
-            economics = await self._open_economics(chain, store, wallet, stack)
-            # Registered last so shutdown marks the node unready before closing anything.
+            # Serve liveness first: auto-update activates a release once /health answers,
+            # and opening economics can take a while.
             ops_server = await self._serve_ops(health, stack)
+            economics = await self._open_economics(chain, store, wallet, stack)
             if economics is None:
                 LOGGER.warning(
                     "campaign URL, Desearch key, LLM key, or qualification owner is missing; "
