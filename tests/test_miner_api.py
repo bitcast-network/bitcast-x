@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,8 +12,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from bitcast_x.campaigns import CampaignRecord
 from bitcast_x.config import Settings
-from bitcast_x.errors import ChainOperationError
+from bitcast_x.errors import ChainOperationError, ProtocolError
 from bitcast_x.miner import (
     BatchPolicy,
     EventStatus,
@@ -26,7 +28,13 @@ from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.engine import CapacityBudget
 from bitcast_x.miner.errors import ErrorCode
 from bitcast_x.miner.web import build_miner_api
-from bitcast_x.protocol import CommitmentEnvelope, CommitmentPosition, CommittedBatch
+from bitcast_x.protocol import (
+    CampaignAccess,
+    CommitmentEnvelope,
+    CommitmentPosition,
+    CommittedBatch,
+    MiningProtocol,
+)
 from bitcast_x.transport import BatchPageRequest, create_miner_app
 from contracts.bitcast_api_miner_campaign import (
     MinerCampaign as BitcastApiMinerCampaign,
@@ -79,6 +87,14 @@ def _central_error(
     request = httpx.Request("GET", f"https://central.test{path}")
     response = httpx.Response(status_code, request=request, headers=headers)
     return httpx.HTTPStatusError("central error", request=request, response=response)
+
+
+class Feed:
+    async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]:
+        return ()
+
+    async def close(self) -> None:
+        return None
 
 
 class Results:
@@ -167,7 +183,7 @@ class Results:
 
     async def campaign(self, campaign_id: str) -> dict[str, Any]:
         if campaign_id != "campaign":
-            raise _central_error(404, f"/api/v2/miners/x/campaigns/{campaign_id}")
+            raise FakeNotFoundError
         return self.campaign_record
 
     async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
@@ -281,6 +297,14 @@ def test_results_doubles_match_pinned_bitcast_api_contract(
     assert eligibility.eligible_if_published_now is eligible_if_published_now
 
 
+class FakeNotFoundResponse:
+    status_code = 404
+
+
+class FakeNotFoundError(Exception):
+    response = FakeNotFoundResponse()
+
+
 def build_client(
     tmp_path: Path,
     *,
@@ -307,8 +331,9 @@ def build_client(
 
     service = MinerControlService(
         MinerSdk(engine, qualification_provider=qualification),
+        Feed(),
+        timeout,
         results_client=results_client or Results(),  # type: ignore[arg-type]
-        commit_timeout_seconds=timeout,
         enabled_ecosystem_ids=enabled_ecosystems,
     )
     protocol = create_miner_app(
@@ -386,27 +411,6 @@ def _error_envelope(response: httpx.Response) -> tuple[int, dict[str, object]]:
     body = response.json()
     assert list(body) == ["error"], body
     return response.status_code, body["error"]
-
-
-def test_miner_api_does_not_require_the_campaign_feed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        "bitcast_x.miner.web.load_wallet",
-        lambda _settings: SimpleNamespace(hotkey=SimpleNamespace(ss58_address=MINER)),
-    )
-
-    apps = build_miner_api(
-        Settings(
-            _env_file=None,
-            state_dir=tmp_path,
-            public_ip="203.0.113.10",
-            miner_api_token=INTERNAL_TOKEN,
-            campaign_feed_url=None,
-        )
-    )
-
-    assert apps.protocol is None
 
 
 def test_miner_api_refuses_to_start_when_validators_cannot_reach_its_endpoint(
@@ -679,8 +683,9 @@ def test_result_sync_records_final_results_only_for_pending_submissions(
     sdk = MinerSdk(engine)
     service = MinerControlService(
         sdk,
-        results_client=results,  # type: ignore[arg-type]
+        Feed(),
         commit_timeout_seconds=5,
+        results_client=results,  # type: ignore[arg-type]
     )
 
     asyncio.run(service.sync_submission_results())
@@ -719,8 +724,9 @@ def test_submission_listing_reads_claims_in_one_query_and_each_batch_once(
     sdk = MinerSdk(engine)
     service = MinerControlService(
         sdk,
-        results_client=Results(),  # type: ignore[arg-type]
+        Feed(),
         commit_timeout_seconds=5,
+        results_client=Results(),  # type: ignore[arg-type]
     )
     claim_ids = [
         sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft=f"draft {index}")
@@ -834,6 +840,45 @@ def test_claim_too_long_once_normalized_is_a_validation_error(tmp_path: Path) ->
         _refusal("invalid_request", "Request validation failed."),
     )
     assert web.get("/api/v1/claims").json()["items"] == []
+
+
+def test_service_without_central_results_reads_campaigns_from_its_source(tmp_path: Path) -> None:
+    """Integrations such as offline miners run without the central results client."""
+
+    def record(campaign_id: str, exclusive: str | None) -> CampaignRecord:
+        return CampaignRecord(
+            access=CampaignAccess(
+                campaign_id=campaign_id,
+                mechanism_id=1,
+                mining_protocol=MiningProtocol.PRECLAIM_V2,
+                scoring_close_block=20,
+                exclusive_miner_hotkey=exclusive,
+            ),
+            display=campaign_id,
+            brief="brief",
+            pools=("ecosystem",),
+            opens_at=datetime(2026, 9, 1, tzinfo=UTC),
+            closes_at=datetime(2026, 9, 2, tzinfo=UTC),
+            reward_pool_usd="100",
+        )
+
+    class Source(Feed):
+        async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]:
+            return (record("open", None), record("mine", MINER), record("other", "5" + "x" * 47))
+
+    engine = MinerEngine(
+        miner_hotkey=MINER,
+        store=MinerStore(tmp_path / "miner.db"),
+        submitter=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    # Positional, as integrations subclassing the service call it.
+    service = MinerControlService(MinerSdk(engine), Source(), 5)
+
+    campaigns = asyncio.run(service.campaigns())
+
+    assert [item["access"]["campaign_id"] for item in campaigns] == ["open", "mine"]
+    with pytest.raises(ProtocolError, match="central campaign results service is unavailable"):
+        asyncio.run(service.campaign_tweets("open"))
 
 
 def test_every_operation_error_code_has_an_http_status() -> None:

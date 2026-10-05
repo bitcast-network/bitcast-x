@@ -17,6 +17,9 @@ from bitcast_x.qualification import (
     resolve_qualification_policy,
 )
 
+# Public SDK name that miner integrations import from here.
+QUALIFICATION_OWNER_HOTKEY = PUBLIC_QUALIFICATION_OWNER_HOTKEY
+
 
 @dataclass(frozen=True, slots=True)
 class LlmEndpoint:

@@ -137,6 +137,17 @@ class InMemoryChain:
         )
 
 
+class CampaignSource:
+    def __init__(self, campaign: CampaignRecord) -> None:
+        self._campaign = campaign
+
+    async def fetch_campaigns(self) -> tuple[CampaignRecord, ...]:
+        return (self._campaign,)
+
+    async def close(self) -> None:
+        return None
+
+
 class CentralResults:
     """Central miner API double backed by the same immutable fixture campaign."""
 
@@ -291,8 +302,9 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
 
     service = MinerControlService(
         MinerSdk(engine, qualification_provider=qualification),
-        results_client=CentralResults(campaign),  # type: ignore[arg-type]
+        CampaignSource(campaign),  # type: ignore[arg-type]
         commit_timeout_seconds=5,
+        results_client=CentralResults(campaign),  # type: ignore[arg-type]
     )
 
     async def authorize_validator(hotkey: str) -> bool:

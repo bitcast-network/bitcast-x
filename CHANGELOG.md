@@ -42,9 +42,16 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Remove the remaining legacy compatibility code: `MiningProtocol.LEGACY_CONNECTION` and its
   retirement guard, the v3 manifest fallback, v2 full-feed parsing, `CampaignFeedClient.cached()`,
   and the unused `max_referral_amount` map field. Clients read only the v4 manifest; the retired v3
-  URL is redirected to it. Map cache entries written by earlier releases are re-downloaded once, an
+  URL is redirected to it. Feed and map caches written by earlier releases stay usable, an
   unreadable or retired feed fails the validator cycle instead of stopping the process, and a stored
   legacy contract is quarantined rather than failing every cycle.
+- Reshape miner store and engine internals: `MinerStore.preview_batch` becomes `batch_draft`,
+  `receipts(event_id=...)` becomes `receipts(event_ids=(...))`, `MinerStore.enqueue` requires its
+  queue bounds (`MinerEngine.enqueue` supplies them from the batch policy), `resume_history` moves
+  from `MinerEngine` to `MinerStore`, and `MinerStore.close`, `current_history_id`,
+  `history_has_batches`, `start_history` and `submission_id` are removed. `MinerSdk`,
+  `MinerControlService` (including its `CampaignSource` fallback), `config.QUALIFICATION_OWNER_HOTKEY`
+  and the miner HTTP API are unchanged.
 
 ### Compatibility
 
@@ -79,8 +86,7 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   empty strings), and the LLM endpoint and model table. The env templates no longer pin the
   consensus-relevant LLM check settings or the weight cadence and version key; existing `.env`
   files that set them keep their values, so remove those lines to follow release defaults.
-- `run-miner-api` no longer requires `BITCAST_X_CAMPAIGN_FEED_URL`; only `bitcast-x campaigns` reads
-  the campaign feed. Miner claims fetch the central campaign once per request.
+- Miner claims fetch the central campaign once per request.
 - Miner submission no longer decodes every stored submission, and result polling skips the central
   API when nothing is pending. Batch selection uses one store read and a binary search instead of
   one write transaction per candidate; batch bytes are unchanged. Receipt listings parse each batch
