@@ -61,7 +61,7 @@ def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
             before = _schema_version(source)
             copied = temporary / name
             backup_database(source, copied)
-            factory(copied)
+            factory(copied).close()
             after = _schema_version(copied)
             if after != before:
                 raise RuntimeError(

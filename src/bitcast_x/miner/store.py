@@ -24,7 +24,7 @@ from bitcast_x.protocol import (
     ProtocolEvent,
     SubmissionEvent,
 )
-from bitcast_x.sqlite import apply_migrations, session, transaction
+from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
 
 _EVENT_ADAPTER: TypeAdapter[ProtocolEvent] = TypeAdapter(ProtocolEvent)
 
@@ -102,6 +102,12 @@ class MinerStore:
         self.path = path
         self._lock = threading.RLock()
         self._initialize()
+        self._release = hold_open(self, path)
+
+    def close(self) -> None:
+        """Release the connection held open for this store's lifetime."""
+
+        self._release()
 
     def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
         return session(self.path)

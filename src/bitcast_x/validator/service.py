@@ -157,6 +157,7 @@ class ValidatorService:
                 source_revision(),
             )
             store = ValidatorStore(self.settings.state_dir / "validator.sqlite3")
+            stack.callback(store.close)
             ingestor = ValidatorIngestor(
                 chain,
                 store,
