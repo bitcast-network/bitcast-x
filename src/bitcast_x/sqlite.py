@@ -2,11 +2,29 @@
 
 import sqlite3
 import threading
-from collections.abc import Iterator, Sequence
+import weakref
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
 from bitcast_x.errors import ProtocolError
+
+
+def hold_open(owner: object, path: Path) -> Callable[[], object]:
+    """Keep ``path`` open while ``owner`` lives; the returned function releases it early.
+
+    Stores open a connection per call, and closing a WAL database's last connection
+    checkpoints it and deletes its -wal and -shm files, which the next call recreates.
+    On network file systems such as EFS each of those steps is a round trip, so one
+    idle connection is held for the owner's lifetime instead.
+    """
+
+    # Never used for queries, so whichever thread releases it may close it.
+    connection = sqlite3.connect(path, timeout=30, check_same_thread=False)
+    # Opens the file and its log like a store connection; run to completion so the
+    # idle connection never holds a read snapshot that would block checkpoints.
+    connection.execute("PRAGMA journal_mode = WAL").fetchall()
+    return weakref.finalize(owner, connection.close)
 
 
 def connect(path: Path) -> sqlite3.Connection:

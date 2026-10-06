@@ -1,8 +1,10 @@
 """Tests for operational health, migrations, structured logs, and state backup."""
 
+import gc
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -200,6 +202,36 @@ def test_unreadable_validator_store_is_quarantined_and_rebuilt(tmp_path: Path) -
     # SQLite may rewrite the shared-memory sidecar while detecting corruption;
     # retaining the resulting bytes is the recoverability guarantee.
     assert quarantined_by_name["validator.sqlite3-shm"].stat().st_size > 0
+
+
+@pytest.mark.parametrize("release", ["close", "collect"])
+@pytest.mark.parametrize(
+    ("store_type", "read"),
+    [(ValidatorStore, "verified_batches"), (MinerStore, "submissions")],
+)
+def test_store_holds_its_database_open_until_released(
+    tmp_path: Path, store_type: type[ValidatorStore | MinerStore], read: str, release: str
+) -> None:
+    # Closing a WAL database's last connection checkpoints it and deletes the -wal
+    # and -shm files; rebuilding them on every store call tripled cycle time on EFS.
+    path = tmp_path / "state.sqlite3"
+    sidecars = (Path(f"{path}-wal"), Path(f"{path}-shm"))
+    store = store_type(path)
+
+    getattr(store, read)()
+
+    assert all(item.exists() for item in sidecars)
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("CREATE TABLE written_while_held (value INTEGER)")
+        # The held connection stays idle, so it never pins the log against checkpoints.
+        assert connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+    if release == "close":
+        store.close()
+    else:
+        # SDK integrations may never close the stores they build.
+        del store
+        gc.collect()
+    assert not any(item.exists() for item in sidecars)
 
 
 def test_json_formatter_emits_bounded_standard_fields() -> None:

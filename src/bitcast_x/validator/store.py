@@ -19,7 +19,7 @@ from bitcast_x.protocol import (
     CommittedBatch,
 )
 from bitcast_x.protocol.models import AttributionResult
-from bitcast_x.sqlite import apply_migrations, session, transaction
+from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
 
 LOGGER = logging.getLogger(__name__)
 
@@ -244,6 +244,12 @@ class ValidatorStore:
                 [str(item) for item in quarantined],
             )
             self._initialize()
+        self._release = hold_open(self, path)
+
+    def close(self) -> None:
+        """Release the connection held open for this store's lifetime."""
+
+        self._release()
 
     def _quarantine_unreadable_database(self) -> tuple[Path, ...]:
         """Preserve an unreadable journal and SQLite sidecars before rebuilding."""
