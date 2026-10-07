@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from bitcast_x import x_provider
+from bitcast_x.campaigns import EVIDENCE_GRACE_BLOCKS
 from bitcast_x.x_provider import DesearchProvider, TweetFetch
 
 Handler = Callable[[httpx.Request], Awaitable[httpx.Response]]
@@ -143,6 +144,12 @@ async def test_exhausted_failure_is_cached_for_ttl_and_success_is_not_cached(
     assert first == second == TweetFetch(tweet=None, provider_available=False)
     assert third == fourth == TweetFetch(tweet=None, provider_available=True)
     assert requests == 5
+
+
+def test_cached_failures_expire_within_the_settlement_grace_period() -> None:
+    # Settlement waits EVIDENCE_GRACE_BLOCKS (12 s each) for missing evidence; a
+    # failure cached for longer could never be fetched again during that wait.
+    assert x_provider._NEGATIVE_TTL_SECONDS < EVIDENCE_GRACE_BLOCKS * 12
 
 
 async def test_negative_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:

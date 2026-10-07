@@ -46,8 +46,8 @@ identical payload after one minute. The pin never changes to a different tweet. 
 fresh evidence before assigning tweets and freezing rewards, then applies the featured bonus to the
 pinned tweet if it still qualifies; otherwise that campaign settles without a featured bonus. A pin
 never delays settlement. If a provider cannot return a tweet's evidence, settlement waits up to 900
-blocks (about three hours) for it and weight submission pauses meanwhile; after that the campaign
-settles without the tweets still missing evidence.
+blocks (about three hours) for it and weights leave that campaign out meanwhile; after that the
+campaign settles without the tweets still missing evidence.
 
 ## Runtime contract
 
