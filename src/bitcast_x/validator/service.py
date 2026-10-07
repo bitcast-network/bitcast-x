@@ -391,13 +391,14 @@ class ValidatorService:
         )
         pending = economics.rewards.pending_reward_campaign_ids(feed, block=block)
         if pending:
+            # Weights leave out a campaign until its economics freeze, so one campaign
+            # waiting out the evidence grace period never holds back the others.
             LOGGER.warning(
-                "weight update deferred; final campaign economics are incomplete campaigns=%s",
+                "weights exclude campaigns whose final economics are incomplete campaigns=%s",
                 ",".join(pending),
             )
-        else:
-            store.persist_shadow_weights(block, feed.snapshot_id, weights)
-        if self.settings.enable_weight_submission and not pending:
+        store.persist_shadow_weights(block, feed.snapshot_id, weights)
+        if self.settings.enable_weight_submission:
             await submit_weights_if_due(
                 chain,
                 wallet,

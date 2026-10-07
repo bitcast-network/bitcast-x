@@ -10,10 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _RETRYABLE = {408, 429, 500, 502, 503, 504}
 
-# Desearch currently answers 500 (a retryable status) for tweets that no longer
+# Desearch currently answers a retryable 5xx status for tweets that no longer
 # exist on X. Remember exhausted failures for a TTL so dead IDs cost one probe
-# per TTL window instead of full retry storms on every encounter.
-_NEGATIVE_TTL_SECONDS = 6 * 3600
+# per TTL window instead of full retry storms on every encounter. The TTL is well
+# inside settlement's evidence grace period, so settlement asks again while it waits.
+_NEGATIVE_TTL_SECONDS = 3600
 _NEGATIVE_CACHE_MAX = 4096
 
 

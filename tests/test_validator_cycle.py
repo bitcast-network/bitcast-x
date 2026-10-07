@@ -59,13 +59,13 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     records = {
         "empty": (),
         "preclaim": (preclaim,),
-        "pending_preclaim": (preclaim,),
+        "pending_preclaim": (preclaim, campaign("pending")),
         "invalid_feed": (preclaim,),
         "preview": (open_campaign,),
         "publish_fails": (preclaim,),
     }[case]
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    if case in {"preclaim", "invalid_feed", "publish_fails"}:
+    if case in {"preclaim", "pending_preclaim", "invalid_feed", "publish_fails"}:
         frozen = preclaim
         store.bind_campaign_protocols((frozen,))
         store.persist_reconciliation(
@@ -199,13 +199,10 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         assert shadow_report(tmp_path) == before
     else:
         publisher.publish.assert_awaited_once()
-        if case == "pending_preclaim":
-            submit.assert_not_awaited()
-            assert shadow_report(tmp_path)["shadow_blocks"] == 0
-        else:
-            submit.assert_awaited_once()
-            assert submit.await_args is not None
-            frozen_rewards = case in {"preclaim", "publish_fails"}
-            expected = {0: 0.0, 7: 1.0} if frozen_rewards else {0: 1.0, 7: 0.0}
-            assert submit.await_args.args[3] == expected
-            assert shadow_report(tmp_path)["shadow_blocks"] == 1
+        # A campaign still waiting to settle gets no weight and holds back no other.
+        submit.assert_awaited_once()
+        assert submit.await_args is not None
+        frozen_rewards = case in {"preclaim", "pending_preclaim", "publish_fails"}
+        expected = {0: 0.0, 7: 1.0} if frozen_rewards else {0: 1.0, 7: 0.0}
+        assert submit.await_args.args[3] == expected
+        assert shadow_report(tmp_path)["shadow_blocks"] == 1

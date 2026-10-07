@@ -117,8 +117,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Settlement no longer freezes a campaign without a tweet whose evidence a provider briefly could
   not return. Validators whose fetch failed froze different rewards, and for a pinned tweet no
   featured bonus, from validators whose fetch succeeded, for the campaign's whole emission window.
-  Settlement now waits up to 900 blocks (three hours) for missing evidence, pausing weight
-  submission meanwhile, then settles without what is still missing.
+  Settlement now waits up to 900 blocks (three hours) for missing evidence, leaving that campaign
+  out of weights meanwhile, then settles without what is still missing. A failed tweet lookup is
+  retried after an hour rather than six, so the wait can still recover it.
 - Validators submit weights before publishing final results. A campaign whose final payload could
   not be built, such as one whose rewarded miner had deregistered, stopped weight submission for
   every campaign until its emission ended.
