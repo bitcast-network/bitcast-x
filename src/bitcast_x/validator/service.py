@@ -21,6 +21,7 @@ from bitcast_x.errors import (
     ReconciliationUnavailableError,
     ResponseTooLargeError,
 )
+from bitcast_x.jev_filter import JevBriefFilter
 from bitcast_x.logging import configure_loki_logging, shutdown_loki_logging
 from bitcast_x.miner.service import load_wallet
 from bitcast_x.ops import RuntimeHealth, create_ops_app
@@ -70,11 +71,7 @@ def ensure_production_outputs_configured(settings: Settings) -> None:
     if not settings.desearch_api_key:
         missing.append("BITCAST_X_DESEARCH_API_KEY")
     if not settings.llm_api_key:
-        missing.append(
-            "BITCAST_X_CHUTES_API_KEY"
-            if settings.llm_provider == "chutes"
-            else "BITCAST_X_OPENROUTER_API_KEY"
-        )
+        missing.append(f"BITCAST_X_{settings.llm_provider.upper()}_API_KEY")
     if settings.qualification_policy is None:
         missing.append("BITCAST_X_QUALIFICATION_OWNER_HOTKEY")
     if missing:
@@ -145,7 +142,7 @@ class ValidatorService:
         campaign_client: CampaignFeedClient | None = None
         x_provider: DesearchProvider | None = None
         data_publisher: DataPublisher | None = None
-        brief_filter: LlmBriefFilter | None = None
+        brief_filter: LlmBriefFilter | JevBriefFilter | None = None
         preview_store: PreviewStore | None = None
         ops_server: uvicorn.Server | None = None
         ops_task: asyncio.Task[None] | None = None
@@ -229,30 +226,38 @@ class ValidatorService:
                 preview_store = PreviewStore(self.settings.state_dir / "preview-cache")
                 preview_provider = PreviewXProvider(x_provider, preview_store)
                 preview_reconciler = CampaignReconciler(store, preview_provider, qualification)
-                if self.settings.llm_provider == "chutes":
-                    llm_url = "https://llm.chutes.ai/v1/chat/completions"
-                    llm_model = "Qwen/Qwen3-32B"
-                    llm_headers: dict[str, str] = {}
-                    llm_timeout = 60.0
+                if self.settings.llm_provider == "jev":
+                    brief_filter = JevBriefFilter(
+                        api_key=self.settings.llm_api_key,
+                        cache=store,
+                        tweet_max_length=self.settings.llm_tweet_max_length,
+                        max_response_bytes=self.settings.max_response_bytes,
+                    )
                 else:
-                    llm_url = "https://openrouter.ai/api/v1/chat/completions"
-                    llm_model = "qwen/qwen3-32b:nitro"
-                    llm_headers = {
-                        "HTTP-Referer": "https://bitcast.ai",
-                        "X-Title": "Bitcast Validator",
-                    }
-                    llm_timeout = 90.0
-                brief_filter = LlmBriefFilter(
-                    api_url=llm_url,
-                    api_key=self.settings.llm_api_key,
-                    model=llm_model,
-                    cache=store,
-                    num_checks=self.settings.llm_num_checks,
-                    tweet_max_length=self.settings.llm_tweet_max_length,
-                    max_response_bytes=self.settings.max_response_bytes,
-                    timeout=llm_timeout,
-                    extra_headers=llm_headers,
-                )
+                    if self.settings.llm_provider == "chutes":
+                        llm_url = "https://llm.chutes.ai/v1/chat/completions"
+                        llm_model = "Qwen/Qwen3-32B"
+                        llm_headers: dict[str, str] = {}
+                        llm_timeout = 60.0
+                    else:
+                        llm_url = "https://openrouter.ai/api/v1/chat/completions"
+                        llm_model = "qwen/qwen3-32b:nitro"
+                        llm_headers = {
+                            "HTTP-Referer": "https://bitcast.ai",
+                            "X-Title": "Bitcast Validator",
+                        }
+                        llm_timeout = 90.0
+                    brief_filter = LlmBriefFilter(
+                        api_url=llm_url,
+                        api_key=self.settings.llm_api_key,
+                        model=llm_model,
+                        cache=store,
+                        num_checks=self.settings.llm_num_checks,
+                        tweet_max_length=self.settings.llm_tweet_max_length,
+                        max_response_bytes=self.settings.max_response_bytes,
+                        timeout=llm_timeout,
+                        extra_headers=llm_headers,
+                    )
                 scorer = AttributionScorer(
                     x_provider,
                     brief_filter=brief_filter,

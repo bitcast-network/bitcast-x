@@ -70,9 +70,10 @@ class Settings(BaseSettings):
     validator_max_concurrency: int = Field(default=16, ge=1, le=256)
     validator_preview_max_concurrency: int = Field(default=2, ge=1, le=16)
     desearch_api_key: str | None = Field(default=None, repr=False)
-    llm_provider: Literal["chutes", "openrouter"] = "chutes"
+    llm_provider: Literal["chutes", "openrouter", "jev"] = "chutes"
     chutes_api_key: str | None = Field(default=None, repr=False)
     openrouter_api_key: str | None = Field(default=None, repr=False)
+    jev_api_key: str | None = Field(default=None, repr=False)
     llm_num_checks: int = Field(default=3, ge=1, le=10)
     llm_tweet_max_length: int = Field(default=10_000, ge=1, le=100_000)
     enable_data_publish: bool = True
@@ -121,9 +122,13 @@ class Settings(BaseSettings):
 
     @property
     def llm_api_key(self) -> str | None:
-        """Return the credential for the selected v2-compatible LLM provider."""
+        """Return the credential for the selected LLM provider."""
 
-        return self.chutes_api_key if self.llm_provider == "chutes" else self.openrouter_api_key
+        return {
+            "chutes": self.chutes_api_key,
+            "openrouter": self.openrouter_api_key,
+            "jev": self.jev_api_key,
+        }[self.llm_provider]
 
     @property
     def qualification_policy(self) -> QualificationConfig | QualificationSchedule | None:

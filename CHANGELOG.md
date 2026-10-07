@@ -8,6 +8,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Added
 
+- Opt-in `jev` LLM provider (`BITCAST_X_LLM_PROVIDER=jev`, `BITCAST_X_JEV_API_KEY`) for X brief
+  evaluation. One JEV request per tweet scores the campaign's prompt-version rules (v1, v2, v5,
+  v6) as separate yes/no gates beside a final verdict and a product-identity check; required
+  tags and links are checked in code. Verdicts share the durable evaluation cache, and provider
+  failure keeps the campaign unreconciled rather than rejecting content. The default provider
+  is unchanged.
 - Helm chart for running one miner on Kubernetes (`charts/bitcast-x-miner`): `run-miner` or
   `run-miner-api`, state on a PersistentVolumeClaim, the hotkey mounted read-only from an existing
   Secret, and the advertised `publicIP:port` kept identical end to end. Optional: `/api/v1` on

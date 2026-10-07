@@ -132,7 +132,7 @@ results and adopts the latest complete campaign record for the same campaign ID.
 operators correct public, access, timing, scoring, or economic fields without abandoning an empty
 campaign. A campaign with a pinned feature or positive allocation requires a new campaign ID for
 such changes.
-Semantic evaluation requires the selected Chutes or OpenRouter key; provider availability never
+Semantic evaluation requires the selected Chutes, OpenRouter or JEV key; provider availability never
 becomes a content rejection. During the configured seven-day emission block window, the validator
 calculates the complete proposed vector and stores it durably for inspection and reproducibility,
 whether or not submission is enabled. Campaign feed records can
