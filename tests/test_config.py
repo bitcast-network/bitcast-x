@@ -39,7 +39,7 @@ def test_secrets_remain_unconfigured_and_production_outputs_are_enabled() -> Non
 
     assert settings.public_ip is None
     assert settings.desearch_api_key is None
-    assert settings.llm_api_key is None
+    assert settings.jev_api_key is None
     assert settings.enable_data_publish is True
     assert settings.enable_weight_submission is True
 

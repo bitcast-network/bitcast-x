@@ -21,11 +21,11 @@ consensus-visible rule.
   verifies every batch against historical chain state, independently obtains public X evidence,
   recalculates provisional campaign results, freezes positive reward allocations, and calculates
   mechanism-1 weights.
-- X-data and LLM providers are availability and evidence dependencies. Their failure does not
+- X-data and JEV providers are availability and evidence dependencies. Their failure does not
   become a rejection. An unavailable tweet remains explicitly pending while independently
   verifiable campaign tweets continue through final scoring and rewards.
 
-The campaign publisher, X provider, and configured LLM are not decentralized by this protocol.
+The campaign publisher, X provider, and JEV are not decentralized by this protocol.
 Validators independently verify miner history and repeat the scoring rules, but they consume the
 same published campaign input and external public-content evidence.
 
@@ -77,7 +77,7 @@ successful zero-value publication are provisional: validators replace them on th
 publish replaceable status updates for miner visibility. Once at least one positive per-tweet daily
 USD floor exists, the contract and its complete result become immutable.
 
-`prompt_version` explicitly selects one of four semantic-evaluation templates. Version 1 retains
+`prompt_version` explicitly selects one of four semantic-evaluation rule sets. Version 1 retains
 the original sponsor-oriented evaluation used by existing campaigns. Version 2 evaluates
 conventional sponsored coverage. Version 5 evaluates honest product or service reviews: positive,
 neutral, mixed, critical, and negative conclusions are equally valid; the post must instead make
@@ -86,7 +86,7 @@ substance, and meet the brief's objective coverage requirements. Sentiment, rati
 conclusions prescribed by a version-5 brief are not eligibility requirements. Version 6 is the
 generic compliance prompt that checks only whether the post follows every instruction in the
 brief, without adding product-, brand-, review-, or sentiment-specific rules. Every available
-template is byte-stable and pinned by a golden SHA-256 test.
+version's JEV request is byte-stable and pinned by a golden SHA-256 test.
 
 The schema and digest checks are implemented in
 [`src/bitcast_x/campaigns.py`](../src/bitcast_x/campaigns.py).
@@ -255,11 +255,13 @@ zero-value campaigns adopt the current cutoff when retried.
 Only accepted attributions that pass the campaign's semantic brief evaluation enter rewards.
 Engagement evidence is taken from the configured X provider and retained provisionally until the
 campaign produces a positive allocation. The
-validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
-passes the tweet. Unavailable engagement or semantic evidence leaves only that tweet's reward
-disposition pending; available tweets continue without translating the outage into rejection.
-Prompt text and parsing behavior are shipped in this repository. A new prompt version is dormant
-until selected by a campaign; changing an existing version would change its durable cache key and
+validator sends one JEV request per tweet carrying the brief, the selected version's rules, a final
+verdict, a product-identity check and that version's yes/no rule gates, and checks in code that
+every tag or link the brief explicitly requires is present. The tweet passes only when every check
+passes. Unavailable engagement or semantic evidence leaves only that tweet's reward disposition
+pending; available tweets continue without translating the outage into rejection. Request text
+and decision thresholds are shipped in this repository. A new prompt version is dormant until
+selected by a campaign; changing an existing version would change its durable cache key and
 evaluation behavior.
 
 The engagement score starts at twice the author's influence. Retweets from considered accounts add

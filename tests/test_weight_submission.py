@@ -62,7 +62,7 @@ def _qualification_schedule(*thresholds: tuple[int, str]) -> QualificationSchedu
 def test_enabled_production_outputs_require_reconciliation_providers() -> None:
     with pytest.raises(
         ValueError,
-        match="BITCAST_X_DESEARCH_API_KEY, BITCAST_X_CHUTES_API_KEY",
+        match="BITCAST_X_DESEARCH_API_KEY, BITCAST_X_JEV_API_KEY",
     ):
         ensure_production_outputs_configured(Settings(_env_file=None))
 
@@ -77,7 +77,7 @@ def test_disabled_outputs_allow_an_ingestion_only_diagnostic_run() -> None:
 
 def test_production_outputs_accept_complete_provider_configuration() -> None:
     settings = Settings(_env_file=None).model_copy(
-        update={"desearch_api_key": "desearch", "chutes_api_key": "chutes"}
+        update={"desearch_api_key": "desearch", "jev_api_key": "jev"}
     )
 
     ensure_production_outputs_configured(settings)

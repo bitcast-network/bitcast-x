@@ -147,7 +147,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
         service, "DesearchProvider", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
     )
     monkeypatch.setattr(
-        service, "LlmBriefFilter", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
+        service, "JevBriefFilter", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
     )
     monkeypatch.setattr(
         service, "DataPublisher", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
@@ -160,7 +160,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
             _env_file=None,
             state_dir=tmp_path,
             desearch_api_key="offline-test",
-            chutes_api_key="offline-test",
+            jev_api_key="offline-test",
             enable_data_publish=True,
             enable_weight_submission=True,
         )

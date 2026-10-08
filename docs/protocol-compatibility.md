@@ -31,9 +31,9 @@ strings are consensus-visible contracts.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.
-- An additive LLM prompt version does not change the miner-validator wire version when existing
-  prompts remain byte-stable, the campaign selects the new version explicitly, and a golden digest
-  pins its exact text. Removing or rewriting a prompt version remains a compatibility change.
+- An additive prompt version does not change the miner-validator wire version when existing
+  JEV requests remain byte-stable, the campaign selects the new version explicitly, and a golden
+  digest pins its exact text. Removing or rewriting a prompt version remains a compatibility change.
 - Final `preclaim_v2` publications keep attribution and economic disposition separate: each
   attribution decision includes `reward_status`, `reward_reason` and `daily_usd_floor`. Preview
   publications leave the economic disposition pending. Final publications also retain a pending
