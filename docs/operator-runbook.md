@@ -80,7 +80,7 @@ validators use the rule active at each claim, submission and scoring-close block
 
 Use `config/miner.env.example` or `config/validator.env.example` for a minimal role-specific
 installation. The root `.env.example` remains the exhaustive reference. Optional remote logging
-settings are in `config/remote-logging.env.example`; validator evidence/JEV credentials are in
+settings are in `config/remote-logging.env.example`; validator evidence/OpenRouter credentials are in
 `config/providers.env.example`.
 
 ```bash
@@ -137,7 +137,8 @@ npm install --global pm2@latest
 On first use, the setup script installs locked production dependencies and creates `.env` from the
 validator and provider templates with mode `0600`. It substitutes usable wallet, state, and update
 paths beneath the current home directory and never overwrites an existing `.env`. Edit that file to
-select the existing wallet name/hotkey and add the Desearch and JEV keys, then launch:
+select the existing wallet name/hotkey and add the Desearch and OpenRouter keys, then launch.
+JEV brief evaluation uses the existing `BITCAST_X_OPENROUTER_API_KEY`; no TypeSafe key is needed:
 
 ```bash
 ./scripts/start-pm2-validator.sh

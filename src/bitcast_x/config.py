@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     validator_max_concurrency: int = Field(default=16, ge=1, le=256)
     validator_preview_max_concurrency: int = Field(default=2, ge=1, le=16)
     desearch_api_key: str | None = Field(default=None, repr=False)
-    jev_api_key: str | None = Field(default=None, repr=False)
+    openrouter_api_key: str | None = Field(default=None, repr=False)
     llm_tweet_max_length: int = Field(default=10_000, ge=1, le=100_000)
     enable_data_publish: bool = True
     enable_weight_submission: bool = True

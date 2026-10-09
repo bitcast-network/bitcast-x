@@ -31,8 +31,8 @@ if settings.campaign_feed_url is None:
     missing.append("BITCAST_X_CAMPAIGN_FEED_URL")
 if not settings.desearch_api_key:
     missing.append("BITCAST_X_DESEARCH_API_KEY")
-if not settings.jev_api_key:
-    missing.append("BITCAST_X_JEV_API_KEY")
+if not settings.openrouter_api_key:
+    missing.append("BITCAST_X_OPENROUTER_API_KEY")
 
 hotkey_path = settings.wallet_path / settings.wallet_name / "hotkeys" / settings.wallet_hotkey
 if not hotkey_path.is_file():

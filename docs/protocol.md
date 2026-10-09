@@ -21,11 +21,11 @@ consensus-visible rule.
   verifies every batch against historical chain state, independently obtains public X evidence,
   recalculates provisional campaign results, freezes positive reward allocations, and calculates
   mechanism-1 weights.
-- X-data and JEV providers are availability and evidence dependencies. Their failure does not
+- X-data and JEV via OpenRouter are availability and evidence dependencies. Their failure does not
   become a rejection. An unavailable tweet remains explicitly pending while independently
   verifiable campaign tweets continue through final scoring and rewards.
 
-The campaign publisher, X provider, and JEV are not decentralized by this protocol.
+The campaign publisher, X provider, OpenRouter, and JEV are not decentralized by this protocol.
 Validators independently verify miner history and repeat the scoring rules, but they consume the
 same published campaign input and external public-content evidence.
 
@@ -254,10 +254,12 @@ zero-value campaigns adopt the current cutoff when retried.
 
 Only accepted attributions that pass the campaign's semantic brief evaluation enter rewards.
 Engagement evidence is taken from the configured X provider and retained provisionally until the
-campaign produces a positive allocation. The
-validator sends one JEV request per tweet carrying the brief, the selected version's rules, a final
-verdict, a product-identity check and that version's yes/no rule gates, and checks in code that
-every tag or link the brief explicitly requires is present. The tweet passes only when every check
+campaign produces a positive allocation. The validator sends one JEV request per tweet through
+OpenRouter's `/api/v1/systemone` endpoint,
+using the pinned `typesafe/jev-1.13` model and the existing `BITCAST_X_OPENROUTER_API_KEY`.
+The request carries the brief, the selected version's rules, a final verdict, a product-identity
+check and that version's yes/no rule gates. The validator also checks in code that every tag or
+link the brief explicitly requires is present. The tweet passes only when every check
 passes. Unavailable engagement or semantic evidence leaves only that tweet's reward disposition
 pending; available tweets continue without translating the outage into rejection. Request text
 and decision thresholds are shipped in this repository. A new prompt version is dormant until

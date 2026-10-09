@@ -23,7 +23,10 @@ from bitcast_x.x_provider import Tweet
 
 LOGGER = logging.getLogger(__name__)
 
-JEV_API_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_API_URL = "https://openrouter.ai/api/v1/systemone"
+# OpenRouter can return the canonical slug for the pinned Jev 1.13 model.
+# https://openrouter.ai/docs/guides/community/typesafe-sdk
+JEV_CANONICAL_MODEL = "typesafe/jev-1.13-20260917"
 VERDICT_ACCEPT_MIN = 0.02
 GATE_MIN = 0.6
 IDENTITY_MISMATCH_MAX = 0.5
@@ -127,7 +130,7 @@ def decide(answers: dict[str, Any], brief: str, post: str) -> BriefEvaluation:
 
 
 def _validated_answers(payload: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
-    if payload.get("model") != request["model"]:
+    if payload.get("model") not in (request["model"], JEV_CANONICAL_MODEL):
         raise ValueError("unexpected JEV model")
     answers = payload["answers"]
     if not isinstance(answers, dict) or set(answers) != set(request["questions"]):
@@ -149,7 +152,7 @@ def _validated_answers(payload: dict[str, Any], request: dict[str, Any]) -> dict
 
 
 class JevBriefFilter:
-    """Evaluate each tweet with one version-aware JEV request."""
+    """Evaluate each tweet with one version-aware JEV request through OpenRouter."""
 
     def __init__(
         self,
@@ -164,7 +167,7 @@ class JevBriefFilter:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key.strip():
-            raise ValueError("JEV API key cannot be empty")
+            raise ValueError("OpenRouter API key cannot be empty")
         if tweet_max_length <= 0 or max_response_bytes <= 0 or attempts <= 0:
             raise ValueError("JEV evaluation limits must be positive")
         self._api_url = api_url

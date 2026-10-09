@@ -146,9 +146,12 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
     monkeypatch.setattr(
         service, "DesearchProvider", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
     )
-    monkeypatch.setattr(
-        service, "JevBriefFilter", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
-    )
+
+    def brief_filter(*, api_key: str, **_kwargs: object) -> SimpleNamespace:
+        assert api_key == "existing-openrouter-key"
+        return SimpleNamespace(close=AsyncMock())
+
+    monkeypatch.setattr(service, "JevBriefFilter", brief_filter)
     monkeypatch.setattr(
         service, "DataPublisher", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
     )
@@ -160,7 +163,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
             _env_file=None,
             state_dir=tmp_path,
             desearch_api_key="offline-test",
-            jev_api_key="offline-test",
+            openrouter_api_key="existing-openrouter-key",
             enable_data_publish=True,
             enable_weight_submission=True,
         )

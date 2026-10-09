@@ -29,13 +29,14 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
   These incompatible operator and package changes require a software major release. See the
   [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
-- Replace Chutes and OpenRouter brief evaluation with JEV. One JEV request per tweet scores the
+- Replace chat-model brief evaluation with JEV through OpenRouter. One JEV request per tweet scores the
   campaign's prompt-version rules (v1, v2, v5, v6) as separate yes/no gates beside a final verdict
   and a product-identity check; required tags and links are checked in code, and the tweet passes
   only when every check passes. Each version's request is pinned by a golden digest. Verdicts share
   the durable evaluation cache, and provider failure keeps the campaign unreconciled rather than
-  rejecting content. Validators with production outputs enabled require `BITCAST_X_JEV_API_KEY`;
-  `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY`, `BITCAST_X_OPENROUTER_API_KEY` and
+  rejecting content. Validators retain their existing `BITCAST_X_OPENROUTER_API_KEY`, which is
+  required when production outputs are enabled; no separate TypeSafe key is needed.
+  `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY` and
   `BITCAST_X_LLM_NUM_CHECKS` are removed, along with `LlmBriefFilter`, `parse_brief_evaluation`
   and the `bitcast_x.prompts` markdown prompt generators.
 

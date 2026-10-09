@@ -132,7 +132,8 @@ results and adopts the latest complete campaign record for the same campaign ID.
 operators correct public, access, timing, scoring, or economic fields without abandoning an empty
 campaign. A campaign with a pinned feature or positive allocation requires a new campaign ID for
 such changes.
-Semantic evaluation requires a JEV key; provider availability never
+Semantic evaluation uses JEV through OpenRouter and requires `BITCAST_X_OPENROUTER_API_KEY`;
+existing validator OpenRouter keys continue to work. Provider availability never
 becomes a content rejection. During the configured seven-day emission block window, the validator
 calculates the complete proposed vector and stores it durably for inspection and reproducibility,
 whether or not submission is enabled. Campaign feed records can

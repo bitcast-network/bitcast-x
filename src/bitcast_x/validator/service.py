@@ -69,8 +69,8 @@ def ensure_production_outputs_configured(settings: Settings) -> None:
         missing.append("BITCAST_X_CAMPAIGN_FEED_URL")
     if not settings.desearch_api_key:
         missing.append("BITCAST_X_DESEARCH_API_KEY")
-    if not settings.jev_api_key:
-        missing.append("BITCAST_X_JEV_API_KEY")
+    if not settings.openrouter_api_key:
+        missing.append("BITCAST_X_OPENROUTER_API_KEY")
     if settings.qualification_policy is None:
         missing.append("BITCAST_X_QUALIFICATION_OWNER_HOTKEY")
     if missing:
@@ -203,7 +203,7 @@ class ValidatorService:
                 self.settings.campaign_feed_url is not None
                 and self.settings.desearch_api_key is not None
                 and self.settings.qualification_policy is not None
-                and self.settings.jev_api_key is not None
+                and self.settings.openrouter_api_key is not None
             ):
                 campaign_client = CampaignFeedClient(
                     self.settings.campaign_feed_url,
@@ -226,7 +226,7 @@ class ValidatorService:
                 preview_provider = PreviewXProvider(x_provider, preview_store)
                 preview_reconciler = CampaignReconciler(store, preview_provider, qualification)
                 brief_filter = JevBriefFilter(
-                    api_key=self.settings.jev_api_key,
+                    api_key=self.settings.openrouter_api_key,
                     cache=store,
                     tweet_max_length=self.settings.llm_tweet_max_length,
                     max_response_bytes=self.settings.max_response_bytes,

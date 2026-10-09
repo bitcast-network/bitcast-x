@@ -76,15 +76,21 @@ def answers(
 
 
 def response(prompt_version: int = 2, **kwargs: float) -> dict[str, Any]:
-    return {"model": JEV_MODEL, "answers": answers(prompt_version, **kwargs), "usage": {}}
+    return {
+        "id": "gen-dec-test",
+        "model": "typesafe/jev-1.13-20260917",
+        "provider": "TypeSafe",
+        "answers": answers(prompt_version, **kwargs),
+        "usage": {"input_tokens": 476, "output_tokens": 70, "cost": 0.000019992},
+    }
 
 
 def test_request_versions_have_frozen_hashes() -> None:
     expected = {
-        1: "5320357508e322ea4e068bc54137dcc6a8b75eb606479128f7a12b64620a1124",
-        2: "6fcf48f1134e30f6261a58af584c70952aa375c480b079db62269e63635919a5",
-        5: "7cbcd58184113297a78385bb707723c94e8f1b2c609cfce742967838398cc7ac",
-        6: "5764c879e7191f587c34ee89582ec20bc0f1379f56ba9dec5d0860c86f70a9fb",
+        1: "83bcab0bb404081a674e42d81aa16d4be96fe72fcb285399c240ea3975a80782",
+        2: "1e7c78cb3f67b2496a60cc3354b9ff1c1f5260658761de06c5bb1404119b5480",
+        5: "fc833ffa5635013f488e6fb4334badb64daf4125c38cb65b3780e8622157987e",
+        6: "5c4e7ea96b4ec92cc79337ff3a3d515cf9ba512ae292a6d550dda1968f740751",
     }
 
     actual = {
@@ -149,21 +155,28 @@ def test_required_items_come_only_from_explicit_instructions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_one_request_is_sent_and_replayed_from_cache() -> None:
+@pytest.mark.parametrize("model", ["typesafe/jev-1.13", "typesafe/jev-1.13-20260917"])
+async def test_one_openrouter_request_is_sent_and_replayed_from_cache(model: str) -> None:
     sent: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == "https://openrouter.ai/api/v1/systemone"
+        assert request.headers["Authorization"] == "Bearer existing-openrouter-key"
         sent.append(json.loads(request.content))
-        return httpx.Response(200, json=response())
+        return httpx.Response(200, json={**response(), "model": model})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    evaluator = JevBriefFilter(api_key="secret", cache=MemoryCache(), client=client)
+    evaluator = JevBriefFilter(
+        api_key="existing-openrouter-key", cache=MemoryCache(), client=client
+    )
 
     first = await evaluator.evaluate(campaign(), tweet())
     second = await evaluator.evaluate(campaign(), tweet())
 
     assert first.meets_brief and second == first
     assert len(sent) == 1
+    assert sent[0]["model"] == "typesafe/jev-1.13"
     assert sent[0] == build_request(BRIEF, 2, tweet().text)
     await client.aclose()
 
@@ -211,6 +224,10 @@ async def test_provider_failure_keeps_campaign_unreconciled() -> None:
     "payload",
     [
         {"model": "other", "answers": answers()},
+        {"model": "typesafe/jev-1.14", "answers": answers()},
+        {"model": "typesafe/jev-1.13-20261001", "answers": answers()},
+        {"model": "~typesafe/jev-latest", "answers": answers()},
+        {"model": "jev-1.13.0", "answers": answers()},
         {"model": JEV_MODEL, "answers": answers(5)},
         {"model": JEV_MODEL, "answers": answers(accept=1.5)},
         {"model": JEV_MODEL},

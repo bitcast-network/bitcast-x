@@ -17,7 +17,7 @@ Currently supported versions: v1, v2, v5, v6
 import json
 from typing import Any
 
-JEV_MODEL = "jev-1.13.0"
+JEV_MODEL = "typesafe/jev-1.13"
 
 VERDICT_INSTRUCTIONS = (
     "Evaluate this creator submission against the unchanged campaign brief under "

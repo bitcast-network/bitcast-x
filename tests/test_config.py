@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from bitcast_x.config import Settings
 from bitcast_x.qualification import PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
 
@@ -39,9 +41,18 @@ def test_secrets_remain_unconfigured_and_production_outputs_are_enabled() -> Non
 
     assert settings.public_ip is None
     assert settings.desearch_api_key is None
-    assert settings.jev_api_key is None
+    assert settings.openrouter_api_key is None
     assert settings.enable_data_publish is True
     assert settings.enable_weight_submission is True
+
+
+def test_existing_openrouter_environment_key_is_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BITCAST_X_OPENROUTER_API_KEY", "existing-openrouter-key")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openrouter_api_key == "existing-openrouter-key"
+    assert "existing-openrouter-key" not in repr(settings)
 
 
 def test_environment_template_contains_real_public_protocol_values() -> None:
