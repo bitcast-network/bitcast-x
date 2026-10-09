@@ -1,15 +1,20 @@
 """Persistent, rate-bounded X evidence for replaceable pre-close previews."""
 
+import io
+import json
 import logging
-from collections.abc import Callable, Collection
+import pickle
+import sqlite3
+import time
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from diskcache import Cache  # type: ignore[import-untyped]
+from pydantic import ValidationError
 
-from bitcast_x.errors import ProtocolError
+from bitcast_x.sqlite import apply_migrations, connect
 from bitcast_x.x_provider import (
     EngagementFetch,
     Tweet,
@@ -18,6 +23,25 @@ from bitcast_x.x_provider import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+_MIGRATIONS = (
+    """
+    CREATE TABLE IF NOT EXISTS preview_entries (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_ns INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS preview_entries_updated ON preview_entries (updated_ns);
+    """,
+)
+# diskcache's storage mode for pickled values, which every legacy preview entry used.
+_DISKCACHE_PICKLE_MODE = 4
+# Recorded with the imported entries, so an interrupted import runs again.
+_LEGACY_IMPORT_KEY = "legacy-import"
+# Previews rewrite an active tweet's entries at least daily, so entries unwritten for
+# this long belong to closed campaigns and are dropped, at most once a day.
+_RETENTION_NS = 14 * 24 * 3600 * 10**9
+_PRUNE_INTERVAL_NS = 24 * 3600 * 10**9
 
 _UNAVAILABLE_RETRY = timedelta(minutes=1)
 _NEW_TWEET_REFRESH = timedelta(hours=1)
@@ -35,20 +59,10 @@ _COUNTERS = (
 
 
 @dataclass(frozen=True, slots=True)
-class PreviewTweetEvidence:
-    """Durable mutable tweet evidence used only by pre-close previews."""
+class PreviewEvidence[T: (TweetFetch, EngagementFetch)]:
+    """Durable mutable X evidence used only by pre-close previews."""
 
-    result: TweetFetch
-    refreshed_at: datetime | None
-    attempted_at: datetime
-    last_attempt_available: bool
-
-
-@dataclass(frozen=True, slots=True)
-class PreviewEngagementEvidence:
-    """Durable cumulative engagement evidence used only by pre-close previews."""
-
-    result: EngagementFetch
+    result: T
     refreshed_at: datetime | None
     attempted_at: datetime
     last_attempt_available: bool
@@ -66,33 +80,24 @@ class PreviewPublication:
 
 
 class PreviewStore:
-    """Separate rollback-safe cache for replaceable preview state."""
+    """Separate rollback-safe store for replaceable preview state."""
 
     def __init__(self, path: Path) -> None:
-        self._cache = Cache(
-            directory=str(path),
-            sqlite_journal_mode="truncate",
-            sqlite_mmap_size=0,
-            disk_pickle_protocol=4,
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # One connection, used only by the thread that opened the store.
+        self._connection = connect(path)
+        apply_migrations(self._connection, _MIGRATIONS)
+        self._next_prune_ns = 0
 
     def close(self) -> None:
-        """Flush and close the preview cache."""
+        """Close the preview store."""
 
-        self._cache.close()
+        self._connection.close()
 
-    def preview_tweet_evidence(self, tweet_id: str) -> PreviewTweetEvidence | None:
+    def preview_tweet_evidence(self, tweet_id: str) -> PreviewEvidence[TweetFetch] | None:
         """Return the latest effective pre-close tweet evidence."""
 
-        value = self._cache.get(f"tweet:{tweet_id}")
-        if not isinstance(value, dict):
-            return None
-        return PreviewTweetEvidence(
-            result=TweetFetch.model_validate(value.get("result")),
-            refreshed_at=_timestamp(value.get("refreshed_at")),
-            attempted_at=_required_timestamp(value.get("attempted_at")),
-            last_attempt_available=bool(value.get("last_attempt_available")),
-        )
+        return self._load_evidence(f"tweet:{tweet_id}", TweetFetch)
 
     def record_preview_tweet_evidence(
         self,
@@ -100,7 +105,7 @@ class PreviewStore:
         result: TweetFetch,
         *,
         attempted_at: datetime,
-    ) -> PreviewTweetEvidence:
+    ) -> PreviewEvidence[TweetFetch]:
         """Persist a preview fetch while retaining prior evidence across provider outages."""
 
         existing = self.preview_tweet_evidence(tweet_id)
@@ -114,34 +119,20 @@ class PreviewStore:
         else:
             effective = result
             refreshed_at = None
-        self._cache.set(
+        return self._save_evidence(
             f"tweet:{tweet_id}",
-            {
-                "result": effective.model_dump(mode="json"),
-                "refreshed_at": refreshed_at.isoformat() if refreshed_at is not None else None,
-                "attempted_at": attempted_at.isoformat(),
-                "last_attempt_available": result.provider_available,
-            },
-        )
-        return PreviewTweetEvidence(
-            result=effective,
-            refreshed_at=refreshed_at,
-            attempted_at=attempted_at,
-            last_attempt_available=result.provider_available,
+            PreviewEvidence(
+                result=effective,
+                refreshed_at=refreshed_at,
+                attempted_at=attempted_at,
+                last_attempt_available=result.provider_available,
+            ),
         )
 
-    def preview_engagement_evidence(self, tweet_id: str) -> PreviewEngagementEvidence | None:
+    def preview_engagement_evidence(self, tweet_id: str) -> PreviewEvidence[EngagementFetch] | None:
         """Return the latest cumulative pre-close engagement evidence."""
 
-        value = self._cache.get(f"engagements:{tweet_id}")
-        if not isinstance(value, dict):
-            return None
-        return PreviewEngagementEvidence(
-            result=EngagementFetch.model_validate(value.get("result")),
-            refreshed_at=_timestamp(value.get("refreshed_at")),
-            attempted_at=_required_timestamp(value.get("attempted_at")),
-            last_attempt_available=bool(value.get("last_attempt_available")),
-        )
+        return self._load_evidence(f"engagements:{tweet_id}", EngagementFetch)
 
     def record_preview_engagement_evidence(
         self,
@@ -149,7 +140,7 @@ class PreviewStore:
         result: EngagementFetch,
         *,
         attempted_at: datetime,
-    ) -> PreviewEngagementEvidence:
+    ) -> PreviewEvidence[EngagementFetch]:
         """Merge cumulative preview engagements and retain them across provider outages."""
 
         existing = self.preview_engagement_evidence(tweet_id)
@@ -171,33 +162,28 @@ class PreviewStore:
         else:
             effective = result
             refreshed_at = None
-        self._cache.set(
+        return self._save_evidence(
             f"engagements:{tweet_id}",
-            {
-                "result": effective.model_dump(mode="json"),
-                "refreshed_at": refreshed_at.isoformat() if refreshed_at is not None else None,
-                "attempted_at": attempted_at.isoformat(),
-                "last_attempt_available": result.provider_available,
-            },
-        )
-        return PreviewEngagementEvidence(
-            result=effective,
-            refreshed_at=refreshed_at,
-            attempted_at=attempted_at,
-            last_attempt_available=result.provider_available,
+            PreviewEvidence(
+                result=effective,
+                refreshed_at=refreshed_at,
+                attempted_at=attempted_at,
+                last_attempt_available=result.provider_available,
+            ),
         )
 
     def preview_publication(self, campaign_id: str) -> PreviewPublication | None:
         """Return the last replaceable preview attempt for one campaign."""
 
-        value = self._cache.get(f"publication:{campaign_id}")
-        if not isinstance(value, dict) or not isinstance(value.get("payload"), dict):
+        value = self._get(f"publication:{campaign_id}")
+        attempted_at = _timestamp(value.get("attempted_at")) if isinstance(value, dict) else None
+        if attempted_at is None or not isinstance(value.get("payload"), dict):
             return None
         return PreviewPublication(
             payload_hash=str(value.get("payload_hash") or ""),
             run_id=str(value.get("run_id") or ""),
             payload=value["payload"],
-            attempted_at=_required_timestamp(value.get("attempted_at")),
+            attempted_at=attempted_at,
             succeeded=bool(value.get("succeeded")),
         )
 
@@ -213,7 +199,7 @@ class PreviewStore:
     ) -> None:
         """Record the latest replaceable preview attempt."""
 
-        self._cache.set(
+        self._set(
             f"publication:{campaign_id}",
             {
                 "payload_hash": payload_hash,
@@ -223,6 +209,137 @@ class PreviewStore:
                 "succeeded": succeeded,
             },
         )
+
+    def _load_evidence[T: (TweetFetch, EngagementFetch)](
+        self, key: str, model: type[T]
+    ) -> PreviewEvidence[T] | None:
+        # Preview evidence is replaceable. An entry this release cannot read, for
+        # example after a model change, is a miss and is fetched again.
+        value = self._get(key)
+        if not isinstance(value, dict):
+            return None
+        attempted_at = _timestamp(value.get("attempted_at"))
+        try:
+            result = model.model_validate(value.get("result"))
+        except ValidationError:
+            attempted_at = None
+        if attempted_at is None:
+            LOGGER.warning("discarding unreadable preview evidence key=%s", key)
+            return None
+        return PreviewEvidence(
+            result=result,
+            refreshed_at=_timestamp(value.get("refreshed_at")),
+            attempted_at=attempted_at,
+            last_attempt_available=bool(value.get("last_attempt_available")),
+        )
+
+    def _save_evidence[T: (TweetFetch, EngagementFetch)](
+        self, key: str, evidence: PreviewEvidence[T]
+    ) -> PreviewEvidence[T]:
+        refreshed_at = evidence.refreshed_at
+        self._set(
+            key,
+            {
+                "result": evidence.result.model_dump(mode="json"),
+                "refreshed_at": refreshed_at.isoformat() if refreshed_at is not None else None,
+                "attempted_at": evidence.attempted_at.isoformat(),
+                "last_attempt_available": evidence.last_attempt_available,
+            },
+        )
+        return evidence
+
+    def _get(self, key: str) -> Any:
+        row = self._connection.execute(
+            "SELECT value_json FROM preview_entries WHERE key = ?", (key,)
+        ).fetchone()
+        return json.loads(row["value_json"]) if row is not None else None
+
+    def _set(self, key: str, value: dict[str, object]) -> None:
+        now = time.time_ns()
+        self._connection.execute(
+            "INSERT OR REPLACE INTO preview_entries (key, value_json, updated_ns) VALUES (?, ?, ?)",
+            (key, json.dumps(value), now),
+        )
+        if now >= self._next_prune_ns:
+            self._connection.execute(
+                "DELETE FROM preview_entries WHERE updated_ns < ? AND key != ?",
+                (now - _RETENTION_NS, _LEGACY_IMPORT_KEY),
+            )
+            self._next_prune_ns = now + _PRUNE_INTERVAL_NS
+
+    def import_legacy(self, directory: Path) -> None:
+        """Import, once, the diskcache entries earlier releases kept, leaving them for rollback."""
+
+        # Remove once no validator can still upgrade from a diskcache release.
+        if self._get(_LEGACY_IMPORT_KEY) is not None:
+            return
+        now = time.time_ns()
+        try:
+            with self._connection as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                # Entries this release already wrote are newer than the old cache's.
+                imported = connection.executemany(
+                    "INSERT OR IGNORE INTO preview_entries (key, value_json, updated_ns) "
+                    "VALUES (?, ?, ?)",
+                    ((key, entry, now) for key, entry in _legacy_entries(directory)),
+                ).rowcount
+                connection.execute(
+                    "INSERT INTO preview_entries (key, value_json, updated_ns) "
+                    "VALUES (?, 'true', ?)",
+                    (_LEGACY_IMPORT_KEY, now),
+                )
+        except Exception:
+            # The old cache only seeds replaceable state, so it never blocks startup.
+            LOGGER.warning("legacy preview cache not imported from %s", directory, exc_info=True)
+            return
+        if imported:
+            LOGGER.info("imported %s legacy preview entries from %s", imported, directory)
+
+
+def import_legacy_preview_cache(path: Path, directory: Path) -> None:
+    """Run the one-time legacy import on its own connection, so it can run off the loop."""
+
+    store = PreviewStore(path)
+    try:
+        store.import_legacy(directory)
+    finally:
+        store.close()
+
+
+class _PlainUnpickler(pickle.Unpickler):
+    """Rebuild only plain containers and scalars, so no stored callable can run."""
+
+    def find_class(self, module_name: str, global_name: str, /) -> Any:
+        raise pickle.UnpicklingError(f"refusing to load {module_name}.{global_name}")
+
+
+def _legacy_entries(directory: Path) -> Iterator[tuple[str, str]]:
+    """Yield ``(key, value_json)`` for the readable entries of a diskcache directory."""
+
+    database = (directory / "cache.db").resolve()
+    if not database.is_file():
+        return
+    connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True, timeout=30)
+    try:
+        # Streamed row by row, so a large cache does not have to fit in memory.
+        for key, filename, value in connection.execute(
+            "SELECT key, filename, value FROM Cache WHERE raw = 1 AND mode = ?",
+            (_DISKCACHE_PICKLE_MODE,),
+        ):
+            try:
+                if filename is not None:
+                    path = (database.parent / filename).resolve()
+                    if not path.is_relative_to(database.parent):
+                        raise ValueError("value file is outside the cache directory")
+                    value = path.read_bytes()
+                entry = json.dumps(_PlainUnpickler(io.BytesIO(value)).load())
+            except Exception as exc:
+                # As in the live store, an unreadable entry is a miss and is fetched again.
+                LOGGER.warning("skipping unreadable legacy preview entry key=%s: %s", key, exc)
+                continue
+            yield str(key), entry
+    finally:
+        connection.close()
 
 
 class PreviewXProvider:
@@ -305,7 +422,7 @@ class PreviewXProvider:
         """Leave lifecycle ownership with the final-evidence provider."""
 
 
-def _tweet_refresh_due(record: PreviewTweetEvidence, *, now: datetime) -> bool:
+def _tweet_refresh_due(record: PreviewEvidence[TweetFetch], *, now: datetime) -> bool:
     if not record.last_attempt_available and now - record.attempted_at < _UNAVAILABLE_RETRY:
         return False
     tweet = record.result.tweet
@@ -315,8 +432,8 @@ def _tweet_refresh_due(record: PreviewTweetEvidence, *, now: datetime) -> bool:
 
 
 def _engagement_refresh_due(
-    record: PreviewEngagementEvidence,
-    tweet_record: PreviewTweetEvidence | None,
+    record: PreviewEvidence[EngagementFetch],
+    tweet_record: PreviewEvidence[TweetFetch] | None,
     *,
     now: datetime,
     refresh_interval: timedelta | None = None,
@@ -359,10 +476,3 @@ def _timestamp(value: Any) -> datetime | None:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
     return parsed.astimezone(UTC)
-
-
-def _required_timestamp(value: Any) -> datetime:
-    parsed = _timestamp(value)
-    if parsed is None:
-        raise ProtocolError("stored preview timestamp is invalid")
-    return parsed

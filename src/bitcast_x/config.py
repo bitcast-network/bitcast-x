@@ -15,6 +15,7 @@ from bitcast_x.qualification import (
     resolve_qualification_policy,
 )
 
+# Public SDK name that miner integrations import from here.
 QUALIFICATION_OWNER_HOTKEY = PUBLIC_QUALIFICATION_OWNER_HOTKEY
 
 
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
     miner_results_api_url: str = "https://bitcast-api.bitcast.network"
     miner_results_poll_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     miner_enabled_ecosystem_ids: tuple[str, ...] = ()
-    qualification_owner_hotkey: str | None = QUALIFICATION_OWNER_HOTKEY
+    qualification_owner_hotkey: str | None = PUBLIC_QUALIFICATION_OWNER_HOTKEY
     qualification_minimum_alpha: str = "15000"
     qualification_minimum_self_stake_alpha: str | None = None
     qualification_effective_block: int = Field(default=0, ge=0)
@@ -70,10 +71,7 @@ class Settings(BaseSettings):
     validator_max_concurrency: int = Field(default=16, ge=1, le=256)
     validator_preview_max_concurrency: int = Field(default=2, ge=1, le=16)
     desearch_api_key: str | None = Field(default=None, repr=False)
-    llm_provider: Literal["chutes", "openrouter"] = "chutes"
-    chutes_api_key: str | None = Field(default=None, repr=False)
     openrouter_api_key: str | None = Field(default=None, repr=False)
-    llm_num_checks: int = Field(default=3, ge=1, le=10)
     llm_tweet_max_length: int = Field(default=10_000, ge=1, le=100_000)
     enable_data_publish: bool = True
     enable_weight_submission: bool = True
@@ -95,14 +93,11 @@ class Settings(BaseSettings):
     ops_port: int = Field(default=8096, ge=1, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_format: Literal["json", "text"] = "json"
-    # Shared write-only Loki credentials keep decentralized operators zero-config.
-    # Override any value through BITCAST_X_LOKI_* or set the URL empty to disable.
+    # Logs go to the shared write-only Grafana Loki stack once BITCAST_X_LOKI_TOKEN is set.
+    # Override the URL and username for another stack, or set the URL empty to disable.
     loki_url: str | None = "https://logs-prod-042.grafana.net"
     loki_username: str | None = "1693344"
-    loki_token: SecretStr | None = Field(
-        default=SecretStr("REPLACE_WITH_PUBLIC_WRITE_ONLY_LOKI_TOKEN"),
-        repr=False,
-    )
+    loki_token: SecretStr | None = Field(default=None, repr=False)
     auto_update: bool = False
     auto_update_ref: str = "origin/main"
     auto_update_interval_seconds: float = Field(default=900.0, ge=60.0)
@@ -119,11 +114,19 @@ class Settings(BaseSettings):
             raise ValueError("enabled ecosystem ids must not be blank")
         return tuple(dict.fromkeys(ecosystem_id.strip() for ecosystem_id in value))
 
-    @property
-    def llm_api_key(self) -> str | None:
-        """Return the credential for the selected v2-compatible LLM provider."""
+    def missing_validator_settings(self) -> list[str]:
+        """Return the settings validator reconciliation, rewards and publishing still need."""
 
-        return self.chutes_api_key if self.llm_provider == "chutes" else self.openrouter_api_key
+        missing: list[str] = []
+        if not self.campaign_feed_url:
+            missing.append("BITCAST_X_CAMPAIGN_FEED_URL")
+        if not self.desearch_api_key:
+            missing.append("BITCAST_X_DESEARCH_API_KEY")
+        if not self.openrouter_api_key:
+            missing.append("BITCAST_X_OPENROUTER_API_KEY")
+        if self.qualification_policy is None:
+            missing.append("BITCAST_X_QUALIFICATION_OWNER_HOTKEY")
+        return missing
 
     @property
     def qualification_policy(self) -> QualificationConfig | QualificationSchedule | None:

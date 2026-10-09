@@ -28,6 +28,8 @@ handles unpaid historical referral records independently of subnet campaign emis
 Keep `validator.sqlite3`, miner history, campaign caches, preview state, and wallets across
 upgrades. Protocol-v2 signed commitments and `/v2/batches` compatibility remain necessary to
 verify already committed preclaim history; they are separate from retired legacy campaigns.
+Preview state is kept in `preview.sqlite3`. A `preview-cache` directory left by an earlier
+release is imported on first start and can be deleted once rollback is no longer needed.
 
 ### Desearch activity budget
 
@@ -40,11 +42,12 @@ per minute, and unchanged preview payloads are not republished. Preview rows inc
 performance-bonus percentages and breakdowns for the currently selected campaign tweets, but their
 USD targets remain zero. At the first healthy preview on or after one day before `closes_at`, the
 validator durably pins and publishes the deterministic featured tweet. Failed ingestion retries the
-identical payload after one minute. A temporary loss of the selected tweet's evidence preserves the
-last good preview and retries on later cycles rather than publishing a destructive replacement. The
-first post-close scoring pass still fetches fresh evidence before assigning tweets and freezing
-rewards, then reuses the pinned feature. If its
-required evidence is still unavailable, final economics and weight submission wait until recovery.
+identical payload after one minute. The pin never changes to a different tweet. Settlement fetches
+fresh evidence before assigning tweets and freezing rewards, then applies the featured bonus to the
+pinned tweet if it still qualifies; otherwise that campaign settles without a featured bonus. A pin
+never delays settlement. If a provider cannot return a tweet's evidence, settlement waits up to 900
+blocks (about three hours) for it and weights leave that campaign out meanwhile; after that the
+campaign settles without the tweets still missing evidence.
 
 ## Runtime contract
 
@@ -80,7 +83,7 @@ validators use the rule active at each claim, submission and scoring-close block
 
 Use `config/miner.env.example` or `config/validator.env.example` for a minimal role-specific
 installation. The root `.env.example` remains the exhaustive reference. Optional remote logging
-settings are in `config/remote-logging.env.example`; validator evidence/LLM credentials are in
+settings are in `config/remote-logging.env.example`; validator evidence/OpenRouter credentials are in
 `config/providers.env.example`.
 
 ```bash
@@ -137,7 +140,8 @@ npm install --global pm2@latest
 On first use, the setup script installs locked production dependencies and creates `.env` from the
 validator and provider templates with mode `0600`. It substitutes usable wallet, state, and update
 paths beneath the current home directory and never overwrites an existing `.env`. Edit that file to
-select the existing wallet name/hotkey and add the Desearch and selected LLM key, then launch:
+select the existing wallet name/hotkey and add the Desearch and OpenRouter keys, then launch.
+JEV brief evaluation uses the existing `BITCAST_X_OPENROUTER_API_KEY`; no TypeSafe key is needed:
 
 ```bash
 ./scripts/start-pm2-validator.sh
@@ -182,7 +186,9 @@ miner can use the checked `bitcast-x-miner` role in `ecosystem.config.cjs` with 
 template; the helper scripts intentionally remain validator-only.
 
 Miner liveness is `GET :8095/health`; readiness is `GET :8095/ready` and becomes 200 only after
-the endpoint advertisement finalizes. Validator liveness is `GET :8096/health`; readiness is
+the endpoint advertisement finalizes. A restart inside the chain's serving rate limit (50 blocks on
+SN93) cannot re-advertise; the miner then starts only if the chain already advertises this exact
+endpoint, and otherwise exits so its supervisor retries. Validator liveness is `GET :8096/health`; readiness is
 `GET :8096/ready` and becomes 200 after one complete finalized reconciliation cycle. Metrics are
 at `GET :8096/metrics` and contain only fixed-name process counters and the latest finalized block.
 
@@ -243,6 +249,12 @@ new batches exist creates another new history; it never alters either older hist
 For application rollback, redeploy the recorded image digest. If the newer release applied a schema
 that the older binary cannot read, stop the node and restore the pre-upgrade backup into a new state
 directory; never run two writers against one SQLite volume.
+
+Rolling back from this release to the 3.0 releases that hard-pinned featured tweets (#119-#140) is
+safe except in one case: an active campaign whose pinned featured tweet was disqualified by an edit
+adopted after close and that has no other eligible tweet, so its rewards settled at zero. Those
+releases wait for that pin's featured evidence and withhold weights for every campaign until the
+campaign's emission ends. If such a campaign is active, roll forward instead.
 
 ## Incident rules
 

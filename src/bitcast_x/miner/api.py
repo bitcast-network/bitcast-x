@@ -12,8 +12,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from bitcast_x.errors import BitcastXError, ChainOperationError
 from bitcast_x.miner.control import MinerControlService
+from bitcast_x.miner.errors import ErrorCode, OperationError
+from bitcast_x.protocol import MAX_DRAFT_CHARS
+from bitcast_x.protocol.canonical import normalize_text
 
 EcosystemFilter = Annotated[list[str] | None, Query()]
+
+_ERROR_STATUS: dict[ErrorCode, int] = {
+    ErrorCode.IDEMPOTENCY_CONFLICT: 409,
+    ErrorCode.MINER_NOT_QUALIFIED: 403,
+    ErrorCode.CAMPAIGN_NOT_FOUND: 404,
+    ErrorCode.CLAIM_NOT_FOUND: 404,
+    ErrorCode.SUBMISSION_NOT_FOUND: 404,
+    ErrorCode.SUBMISSION_DEADLINE_PASSED: 409,
+    ErrorCode.SUBMISSION_COMMITMENT_PENDING: 503,
+    ErrorCode.CREATOR_NOT_ELIGIBLE: 400,
+    ErrorCode.CLAIM_NOT_SAFE_TO_POST: 400,
+    ErrorCode.ECOSYSTEM_NOT_ENABLED: 400,
+    ErrorCode.QUEUE_CAPACITY_EXHAUSTED: 400,
+}
 
 
 class ClaimRequest(BaseModel):
@@ -22,8 +39,17 @@ class ClaimRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     campaign_id: str = Field(min_length=1, max_length=128)
     creator_x_id: str = Field(pattern=r"^[0-9]+$")
-    draft: str = Field(min_length=1, max_length=20_000)
+    draft: str = Field(min_length=1, max_length=MAX_DRAFT_CHARS)
     external_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+    @field_validator("draft")
+    @classmethod
+    def fit_normalized_draft(cls, value: str) -> str:
+        """Reject a draft whose stored, normalized form would exceed the limit."""
+
+        if len(normalize_text(value)) > MAX_DRAFT_CHARS:
+            raise ValueError("draft is too long once normalized")
+        return value
 
 
 class SubmissionRequest(BaseModel):
@@ -114,60 +140,18 @@ def create_control_app(
                     retryable=True,
                 ),
             )
-        message = str(error)
-        code = "invalid_request"
-        retryable = False
-        if "idempotency key" in message:
-            code = "idempotency_conflict"
-        elif "miner is not qualified" in message:
-            code = "miner_not_qualified"
-        elif "campaign is not available" in message:
-            code = "campaign_not_found"
-        elif "claim_id does not belong" in message:
-            code = "claim_not_found"
-        elif "submission deadline" in message:
-            code = "submission_deadline_passed"
-        elif "submission commitment was not confirmed" in message:
-            code = "submission_commitment_pending"
-            retryable = True
-        elif "not eligible" in message:
-            code = "creator_not_eligible"
-        elif "not safe" in message:
-            code = "claim_not_safe_to_post"
-        elif "ecosystem" in message:
-            code = "ecosystem_not_enabled"
-        elif "capacity" in message:
-            code = "queue_capacity_exhausted"
-        status_code = 400
-        if code == "idempotency_conflict":
-            status_code = 409
-        elif code == "miner_not_qualified":
-            status_code = 403
-        elif code in {"campaign_not_found", "claim_not_found"}:
-            status_code = 404
-        elif code == "submission_deadline_passed":
-            status_code = 409
-        elif code == "submission_commitment_pending":
-            status_code = 503
-        return JSONResponse(
-            status_code=status_code,
-            content=_error(code, message, retryable=retryable),
-        )
+        if isinstance(error, OperationError):
+            return JSONResponse(
+                status_code=_ERROR_STATUS[error.code],
+                content=_error(error.code.value, str(error), retryable=error.retryable),
+            )
+        return JSONResponse(status_code=400, content=_error("invalid_request", str(error)))
 
     @app.exception_handler(HTTPException)
     async def http_error(_request: Request, error: HTTPException) -> JSONResponse:
-        message = str(error.detail)
-        code = "invalid_request"
-        if error.status_code == 404:
-            if "campaign" in message:
-                code = "campaign_not_found"
-            elif "claim" in message:
-                code = "claim_not_found"
-            elif "submission" in message:
-                code = "submission_not_found"
         return JSONResponse(
             status_code=error.status_code,
-            content=_error(code, message),
+            content=_error("invalid_request", str(error.detail)),
             headers=error.headers,
         )
 
@@ -276,7 +260,7 @@ def create_control_app(
     async def campaign(campaign_id: str, current: Service) -> dict[str, Any]:
         result = await current.campaign(campaign_id)
         if result is None:
-            raise HTTPException(status_code=404, detail="campaign not found")
+            raise OperationError(ErrorCode.CAMPAIGN_NOT_FOUND, "campaign not found")
         return result
 
     @app.get("/api/v1/campaigns/{campaign_id}/eligibility/{creator_x_id}")
@@ -333,7 +317,7 @@ def create_control_app(
     async def claim_status(claim_id: str, current: Service) -> dict[str, Any]:
         result = current.claim_status(claim_id)
         if result is None:
-            raise HTTPException(status_code=404, detail="claim not found")
+            raise OperationError(ErrorCode.CLAIM_NOT_FOUND, "claim not found")
         return result
 
     @app.post("/api/v1/submissions")
@@ -377,7 +361,7 @@ def create_control_app(
     async def submission_status(submission_id: str, current: Service) -> dict[str, Any]:
         result = await current.submission_status(submission_id)
         if result is None:
-            raise HTTPException(status_code=404, detail="submission not found")
+            raise OperationError(ErrorCode.SUBMISSION_NOT_FOUND, "submission not found")
         return result
 
     original_openapi = app.openapi

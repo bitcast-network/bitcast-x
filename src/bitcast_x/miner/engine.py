@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from bitcast_x.errors import ChainOperationError, ProtocolError
+from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.store import EventStatus, MinerStore, OperationMetadata
 from bitcast_x.protocol import (
     ClaimEvent,
@@ -20,7 +21,7 @@ from bitcast_x.protocol import (
     ProtocolEvent,
     SubmissionEvent,
 )
-from bitcast_x.protocol.canonical import canonical_json
+from bitcast_x.protocol.canonical import canonical_json, normalize_text
 from bitcast_x.transport import (
     BatchPageRequest,
     BatchPageResponse,
@@ -111,17 +112,11 @@ class MinerEngine:
 
         return self.store.enqueue(
             event,
-            reveal=reveal,
-            metadata=metadata,
             max_pending_events=self.policy.max_pending_events,
             max_pending_bytes=self.policy.max_pending_bytes,
+            reveal=reveal,
+            metadata=metadata,
         )
-
-    async def resume_history(self) -> str:
-        """Atomically abandon pending work and select a fresh local history."""
-
-        async with self._commit_lock:
-            return self.store.resume_history()
 
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:
         """Finalize one due batch, recovering a prepared batch after restart."""
@@ -160,16 +155,33 @@ class MinerEngine:
             return batch
 
     def _select_events(self, queued: list[ProtocolEvent]) -> list[ProtocolEvent]:
-        selected: list[ProtocolEvent] = []
-        for event in queued:
-            candidate = [*selected, event]
-            preview = self.store.preview_batch(self.miner_hotkey, tuple(candidate))
-            if len(canonical_json(preview)) > self.policy.max_batch_bytes:
-                if not selected:
-                    raise ProtocolError("one queued event exceeds the maximum batch byte size")
-                break
-            selected.append(event)
-        return selected
+        """Return the longest queue prefix whose complete batch fits the byte limit."""
+
+        draft = self.store.batch_draft(tuple(queued))
+
+        def fits(count: int) -> bool:
+            try:
+                batch = draft.build(self.miner_hotkey, tuple(queued[:count]))
+            except (ProtocolError, ValueError):
+                return False
+            return len(canonical_json(batch)) <= self.policy.max_batch_bytes
+
+        # Batch bytes grow with every appended event and an unbuildable prefix
+        # stays unbuildable when extended, so the prefixes that fit are exactly
+        # those up to one boundary, found here by binary search.
+        fitting, unfit = 0, len(queued) + 1
+        while unfit - fitting > 1:
+            middle = (fitting + unfit) // 2
+            if fits(middle):
+                fitting = middle
+            else:
+                unfit = middle
+        if fitting < len(queued):
+            # Raise the first unfitting prefix's build error, as a linear scan would.
+            draft.build(self.miner_hotkey, tuple(queued[: fitting + 1]))
+            if fitting == 0:
+                raise ProtocolError("one queued event exceeds the maximum batch byte size")
+        return queued[:fitting]
 
     async def batch_page(self, request: BatchPageRequest, caller_hotkey: str) -> BatchPageResponse:
         """Serve a bounded page of finalized complete batches."""
@@ -239,7 +251,8 @@ class MinerSdk:
         claim_id = secrets.token_hex(16)
         reveal = DraftReveal(
             claim_id=claim_id,
-            draft=draft,
+            # Validate the normalized form the reveal stores and every read re-checks.
+            draft=normalize_text(draft),
             nonce=secrets.token_hex(32),
         )
         claim = ClaimEvent(
@@ -268,16 +281,10 @@ class MinerSdk:
         """Queue a completed tweet mapping and return its submission id."""
 
         if claim_id is not None and not self.engine.store.has_claim(claim_id):
-            raise ProtocolError("submission claim_id does not belong to this miner")
+            raise OperationError(
+                ErrorCode.CLAIM_NOT_FOUND, "submission claim_id does not belong to this miner"
+            )
 
-        existing = self.engine.store.submission_id(
-            campaign_id=campaign_id,
-            tweet_id=tweet_id,
-            claim_id=claim_id,
-            creator_x_id=creator_x_id,
-        )
-        if existing is not None:
-            return existing
         identity = "\0".join(
             (
                 self.engine.miner_hotkey,
@@ -288,6 +295,8 @@ class MinerSdk:
             )
         ).encode()
         submission_id = hashlib.sha256(identity).hexdigest()[:32]
+        # A repeated mapping resolves to its existing receipt inside enqueue, after
+        # the idempotency key is checked against its original input.
         submission = SubmissionEvent(
             submission_id=submission_id,
             campaign_id=campaign_id,

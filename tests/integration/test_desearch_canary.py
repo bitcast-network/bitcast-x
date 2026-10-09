@@ -15,7 +15,6 @@ DEFAULT_TWEET_ID = "2082462415942533125"
 DEFAULT_AUTHOR_X_ID = "1908181343290200064"
 
 
-@pytest.mark.asyncio
 async def test_desearch_normalizes_stable_historical_tweet_evidence() -> None:
     api_key = os.getenv("DESEARCH_API_KEY", "").strip()
     if not api_key:

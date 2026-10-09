@@ -17,9 +17,9 @@ strings are consensus-visible contracts.
   reactivated. Older validators quarantine `DX3`; they must be upgraded during the rollout.
 - Resumes are future-only. Claims and submissions must belong to the same side of the latest
   verified history boundary. Existing verified batches and positive campaign economics remain immutable.
-- Campaign manifest v4 adds a required positive `max_members` cutoff. The strict v3 manifest stays
-  available unchanged during rollout; updated clients prefer v4 and fall back to v3 only when the
-  v4 endpoint has not yet been published. A v3 response containing the new field is invalid.
+- Campaign manifest v4 adds a required positive `max_members` cutoff. Clients read only v4; the v4
+  rollout is complete, so v3 manifests and v2 full-feed documents are rejected. A client configured
+  with the retired v3 endpoint reads the canonical v4 endpoint instead.
 - Adding the first published cutoff does not rewrite a campaign with a positive reward allocation.
   Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
@@ -31,9 +31,9 @@ strings are consensus-visible contracts.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.
-- An additive LLM prompt version does not change the miner-validator wire version when existing
-  prompts remain byte-stable, the campaign selects the new version explicitly, and a golden digest
-  pins its exact text. Removing or rewriting a prompt version remains a compatibility change.
+- An additive prompt version does not change the miner-validator wire version when existing
+  JEV requests remain byte-stable, the campaign selects the new version explicitly, and a golden
+  digest pins its exact text. Removing or rewriting a prompt version remains a compatibility change.
 - Final `preclaim_v2` publications keep attribution and economic disposition separate: each
   attribution decision includes `reward_status`, `reward_reason` and `daily_usd_floor`. Preview
   publications leave the economic disposition pending. Final publications also retain a pending
@@ -45,10 +45,11 @@ strings are consensus-visible contracts.
   cycle, adopt the latest complete record for the same campaign ID, and use payload-addressed
   preview run IDs for replaceable status updates. The first positive per-tweet daily USD allocation
   makes the complete campaign result immutable across restarts and feed snapshots.
-- A pinned featured tweet is a narrower pre-allocation compatibility boundary: its identity and
-  campaign contract are immutable across restarts, but preview evidence, scores, bonus recipients,
-  and zero-value publications remain replaceable until positive economics freeze. Final rewards
-  must replay the pinned identity; unavailable selected-tweet evidence defers settlement.
+- A pinned featured tweet fixes only which tweet is announced; it never freezes the campaign
+  contract or delays settlement. Final rewards apply the bonus to the pinned tweet when it still
+  qualifies and otherwise settle without one, never substituting a different tweet. Validators keep
+  the pin's recorded contract current and clear an unused pin when rewards freeze, so earlier
+  releases that validate the pin remain safe rollback targets.
 - Any change to canonical encoding, hash domains, batch/event fields, matcher normalization or
   thresholds requires a new protocol version and golden vectors. The coordinated `DX3` rollout is
   the explicit exception to an extended overlap because every current miner and validator is
@@ -64,8 +65,9 @@ strings are consensus-visible contracts.
   validators use `/v3/batches`; miner-reported positions are untrusted hints and must match the
   exact finalized extrinsic and on-chain envelope before a cursor advances.
 - `legacy_connection` campaign execution is retired after its final emission window ended on
-  2026-09-01. Historical contracts remain readable, but a live legacy campaign fails the validator
-  cycle closed. Preclaim batch history and transport compatibility are unaffected.
+  2026-09-01, and the value is no longer accepted: a live legacy campaign fails the validator cycle
+  closed, and a stored legacy contract is quarantined if read. Preclaim batch history and transport
+  compatibility are unaffected.
 - Removing a version requires published notice longer than the maximum campaign plus retention
   window and evidence that no live campaign references it.
 

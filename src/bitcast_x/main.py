@@ -9,7 +9,6 @@ from typing import Any
 
 from bitcast_x import __version__
 from bitcast_x.auto_update import (
-    auto_update_enabled,
     find_source_root,
     run_validator_supervised,
     verify_automatic_upgrade,
@@ -94,14 +93,7 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         return {"hotkey": hotkey, "history_id": history_id}
 
     if arguments.command == "campaigns":
-        if settings.campaign_feed_url is None:
-            raise ValueError("BITCAST_X_CAMPAIGN_FEED_URL is not configured")
-        client = CampaignFeedClient(
-            settings.campaign_feed_url,
-            cache_path=settings.state_dir / "campaign-feed.json",
-            timeout=settings.request_timeout_seconds,
-            max_response_bytes=settings.campaign_feed_max_response_bytes,
-        )
+        client = CampaignFeedClient.from_settings(settings)
         try:
             feed = await client.fetch()
         finally:
@@ -113,7 +105,7 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
         return None
     if arguments.command == "run-validator":
         source_root = find_source_root()
-        if auto_update_enabled(settings):
+        if settings.auto_update:
             if source_root is None:
                 raise RuntimeError("automatic updates require a Git source checkout")
             await run_validator_supervised(settings, source_root)

@@ -114,8 +114,9 @@ probes:
     periodSeconds: 20
     timeoutSeconds: 5
     failureThreshold: 6
-  # /ready becomes 200 only after the endpoint advertisement is finalized on chain, which takes
-  # at least a few blocks. The startup probe gives it that long before liveness applies.
+  # /ready becomes 200 once the endpoint advertisement is finalized on chain, which takes at least a
+  # few blocks; a restart inside the serving rate limit instead confirms the existing on-chain
+  # endpoint. The startup probe gives it that long before liveness applies.
   startup:
     periodSeconds: 10
     failureThreshold: 60

@@ -1,21 +1,55 @@
-"""V2-compatible optimistic LLM brief evaluation behind a durable cache seam."""
+"""Version-aware JEV brief evaluation behind a durable verdict cache.
+
+The JEV answers are combined with a code check for required tags and links. Thresholds are the
+configuration validated offline with the request text in `bitcast_x.prompts`; change them only
+with a fresh evaluation. Provider failure is never a content rejection.
+"""
 
 import asyncio
 import hashlib
+import json
 import logging
+import math
 import re
-from collections.abc import Mapping
 from typing import Any, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from bitcast_x.campaigns import CampaignRecord
-from bitcast_x.errors import ReconciliationUnavailableError
-from bitcast_x.prompts import generate_brief_evaluation_prompt
+from bitcast_x.errors import ReconciliationUnavailableError, ResponseTooLargeError
+from bitcast_x.http import read_bounded
+from bitcast_x.prompts import build_request
 from bitcast_x.x_provider import Tweet
 
 LOGGER = logging.getLogger(__name__)
+
+JEV_API_URL = "https://openrouter.ai/api/v1/systemone"
+# OpenRouter can return the canonical slug for the pinned Jev 1.13 model.
+# https://openrouter.ai/docs/guides/community/typesafe-sdk
+JEV_CANONICAL_MODEL = "typesafe/jev-1.13-20260917"
+VERDICT_ACCEPT_MIN = 0.02
+GATE_MIN = 0.6
+IDENTITY_MISMATCH_MAX = 0.5
+
+_GATE_FAILURE_REASONS = {
+    "nonnegative": (
+        "The post did not meet this campaign's requirement for a positive or neutral tone "
+        "toward the sponsor or product."
+    ),
+    "focus80": (
+        "The post does not focus enough on the sponsor or its topic. "
+        "This campaign requires at least 80% of the content to stay on topic."
+    ),
+    "primary": (
+        "The post needs to focus mainly on the product or service, "
+        "or a comparison with alternatives."
+    ),
+    "substance": (
+        "The review needs a specific assessment supported by a reason, example, "
+        "product feature, result, or experience."
+    ),
+}
 
 
 class BriefEvaluation(BaseModel):
@@ -36,7 +70,7 @@ class BriefFilter(Protocol):
 
 
 class EvaluationCache(Protocol):
-    """Durable prompt-verdict cache owned by validator state."""
+    """Durable request-verdict cache owned by validator state."""
 
     def llm_evaluation(self, prompt_hash: str) -> BriefEvaluation | None: ...
 
@@ -45,32 +79,130 @@ class EvaluationCache(Protocol):
     ) -> BriefEvaluation: ...
 
 
-class LlmBriefFilter:
-    """Run v2's three optimistic checks using one configured chat-completion provider."""
+_HANDLE_INSTRUCTION = re.compile(
+    r"\b(?:also\s+)?(?:tag|mention|tagging|mentioning)\s*:?\s*"
+    r"((?:@\w+(?:\s*(?:,|/|&|\band\b)\s*)?)+)",
+    re.IGNORECASE,
+)
+_LINK_INSTRUCTION = re.compile(r"\binclude\b[^.\n]*?\b(?:ref(?:erral)?\s+)?link\b", re.IGNORECASE)
+_URL = re.compile(
+    r"https?://\S+|\b[\w-]+\.(?:io|com|xyz|ai|so|fun|app|network|org|net|dev)(?:/\S*)?",
+    re.IGNORECASE,
+)
+
+
+def missing_required_items(brief: str, post: str) -> list[str]:
+    """Return handles or links the brief explicitly requires that the post lacks.
+
+    Brand handles in a header are not requirements, and quote-post instructions are ignored
+    because quote metadata is not captured. Any URL satisfies a required link because X
+    shortens links and the destination is not captured.
+    """
+
+    text = post.lower()
+    handles: list[str] = []
+    for match in _HANDLE_INSTRUCTION.finditer(brief):
+        for handle in re.findall(r"@\w+", match.group(1)):
+            if handle.lower() not in handles:
+                handles.append(handle.lower())
+    missing = [handle for handle in handles if handle not in text]
+    if _LINK_INSTRUCTION.search(brief) and not _URL.search(post):
+        missing.append("link")
+    return missing
+
+
+def decide(answers: dict[str, Any], brief: str, post: str) -> BriefEvaluation:
+    """Apply the validated thresholds to a JEV response and the code checks."""
+
+    accept = float(answers["verdict"]["probabilities"]["ACCEPT"])
+    mismatch = float(answers["identity"]["probabilities"]["MISMATCH"])
+    gates = {
+        name.removeprefix("gate_"): float(answer["noul"])
+        for name, answer in answers.items()
+        if name.startswith("gate_")
+    }
+    missing = missing_required_items(brief, post)
+    failures: list[str] = []
+    if mismatch >= IDENTITY_MISMATCH_MAX:
+        failures.append(
+            "The post appears to describe a different product or service "
+            "from the one in the campaign brief."
+        )
+    failures.extend(
+        _GATE_FAILURE_REASONS[name] for name, value in gates.items() if value < GATE_MIN
+    )
+    missing_handles = [item for item in missing if item != "link"]
+    if missing_handles:
+        failures.append(
+            "The post is missing required mentions: " + ", ".join(missing_handles) + "."
+        )
+    if "link" in missing:
+        failures.append("The post is missing a link required by the campaign brief.")
+    if accept < VERDICT_ACCEPT_MIN:
+        reason = "The post did not pass the overall brief check."
+        if not failures:
+            reason += " A specific unmet requirement was not identified."
+        failures.insert(0, reason)
+    breakdown = json.dumps(
+        {
+            "verdict_accept": accept,
+            "identity_mismatch": mismatch,
+            "gates": gates,
+            "missing_required": missing,
+        },
+        sort_keys=True,
+    )
+    return BriefEvaluation(
+        meets_brief=not failures,
+        reasoning="The post meets the campaign brief." if not failures else " ".join(failures),
+        detailed_breakdown=breakdown,
+        checks_used=1,
+    )
+
+
+def _validated_answers(payload: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("model") not in (request["model"], JEV_CANONICAL_MODEL):
+        raise ValueError("unexpected JEV model")
+    answers = payload["answers"]
+    if not isinstance(answers, dict) or set(answers) != set(request["questions"]):
+        raise ValueError("JEV answers do not match the request")
+    values = [
+        answers["verdict"]["probabilities"]["ACCEPT"],
+        answers["identity"]["probabilities"]["MISMATCH"],
+    ]
+    values += [answers[name]["noul"] for name in answers if name.startswith("gate_")]
+    if any(
+        isinstance(v, bool)
+        or not isinstance(v, int | float)
+        or not math.isfinite(v)
+        or not 0 <= v <= 1
+        for v in values
+    ):
+        raise ValueError("invalid JEV probability")
+    return answers
+
+
+class JevBriefFilter:
+    """Evaluate each tweet with one version-aware JEV request through OpenRouter."""
 
     def __init__(
         self,
         *,
-        api_url: str,
         api_key: str,
-        model: str,
         cache: EvaluationCache,
-        num_checks: int = 3,
+        api_url: str = JEV_API_URL,
         tweet_max_length: int = 10_000,
         max_response_bytes: int = 2_000_000,
-        timeout: float = 60.0,
+        timeout: float = 30.0,
         attempts: int = 3,
-        extra_headers: Mapping[str, str] | None = None,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         if not api_key.strip():
-            raise ValueError("LLM API key cannot be empty")
-        if num_checks <= 0 or tweet_max_length <= 0 or max_response_bytes <= 0 or attempts <= 0:
-            raise ValueError("LLM evaluation limits must be positive")
+            raise ValueError("OpenRouter API key cannot be empty")
+        if tweet_max_length <= 0 or max_response_bytes <= 0 or attempts <= 0:
+            raise ValueError("JEV evaluation limits must be positive")
         self._api_url = api_url
-        self._model = model
         self._cache = cache
-        self._num_checks = num_checks
         self._tweet_max_length = tweet_max_length
         self._max_response_bytes = max_response_bytes
         self._timeout = timeout
@@ -78,11 +210,10 @@ class LlmBriefFilter:
         self._headers = {
             "Authorization": f"Bearer {api_key.strip()}",
             "Content-Type": "application/json",
-            **dict(extra_headers or {}),
         }
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(trust_env=False)
-        self._prompt_locks: dict[str, asyncio.Lock] = {}
+        self._request_locks: dict[str, asyncio.Lock] = {}
 
     async def close(self) -> None:
         """Close an internally owned HTTP pool."""
@@ -91,54 +222,33 @@ class LlmBriefFilter:
             await self._client.aclose()
 
     async def evaluate(self, campaign: CampaignRecord, tweet: Tweet) -> BriefEvaluation:
-        """Pass if any available check passes; never turn total provider failure into rejection."""
+        """Return a cached or fresh verdict; provider failure is never a rejection."""
 
         text = tweet.text[: self._tweet_max_length]
-        last_result: BriefEvaluation | None = None
-        unavailable = 0
-        brief = {
-            "id": campaign.access.campaign_id,
-            "brief": campaign.brief,
-            "prompt_version": campaign.prompt_version,
-        }
-        for check in range(1, self._num_checks + 1):
-            prompt = generate_brief_evaluation_prompt(
-                brief,
-                f"{text} {check}",
-                campaign.prompt_version,
-            )
-            prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-            lock = self._prompt_locks.setdefault(prompt_hash, asyncio.Lock())
-            async with lock:
-                result = self._cache.llm_evaluation(prompt_hash)
-                if result is None:
-                    try:
-                        response_text = await self._request(prompt)
-                    except httpx.HTTPError:
-                        unavailable += 1
-                        LOGGER.warning(
-                            "brief evaluation unavailable campaign=%s tweet=%s check=%s",
-                            campaign.access.campaign_id,
-                            tweet.tweet_id,
-                            check,
-                        )
-                        continue
-                    proposed = parse_brief_evaluation(response_text, checks_used=check)
-                    result = self._cache.persist_llm_evaluation(prompt_hash, proposed)
-            last_result = result.model_copy(update={"checks_used": check})
-            if result.meets_brief:
-                return last_result
-        if unavailable:
-            raise ReconciliationUnavailableError(
-                f"brief evaluation provider unavailable for tweet {tweet.tweet_id}"
-            )
-        return last_result or BriefEvaluation(
-            meets_brief=False,
-            reasoning="All checks failed",
-            checks_used=self._num_checks,
-        )
+        request = build_request(campaign.brief, campaign.prompt_version, text)
+        request_hash = hashlib.sha256(
+            ("jev:" + json.dumps(request, sort_keys=True)).encode()
+        ).hexdigest()
+        lock = self._request_locks.setdefault(request_hash, asyncio.Lock())
+        async with lock:
+            cached = self._cache.llm_evaluation(request_hash)
+            if cached is not None:
+                return cached
+            try:
+                answers = await self._request(request)
+            except httpx.HTTPError as exc:
+                LOGGER.warning(
+                    "brief evaluation unavailable campaign=%s tweet=%s",
+                    campaign.access.campaign_id,
+                    tweet.tweet_id,
+                )
+                raise ReconciliationUnavailableError(
+                    f"brief evaluation provider unavailable for tweet {tweet.tweet_id}"
+                ) from exc
+            result = decide(answers, campaign.brief, text)
+            return self._cache.persist_llm_evaluation(request_hash, result)
 
-    async def _request(self, prompt: str) -> str:
+    async def _request(self, request: dict[str, Any]) -> dict[str, Any]:
         last_error: httpx.HTTPError | None = None
         for attempt in range(self._attempts):
             try:
@@ -146,60 +256,28 @@ class LlmBriefFilter:
                     "POST",
                     self._api_url,
                     headers=self._headers,
-                    json={
-                        "model": self._model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0,
-                        "max_tokens": 4096,
-                    },
+                    json=request,
                     timeout=self._timeout,
                 ) as response:
                     response.raise_for_status()
-                    declared = int(response.headers.get("content-length", 0))
-                    if declared > self._max_response_bytes:
-                        raise httpx.ProtocolError("LLM response exceeds byte limit")
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > self._max_response_bytes:
-                            raise httpx.ProtocolError("LLM response exceeds byte limit")
-                        chunks.append(chunk)
-                payload = TypeAdapter(dict[str, Any]).validate_json(b"".join(chunks))
-                content = payload["choices"][0]["message"].get("content")
-                if not isinstance(content, str) or not content:
-                    raise httpx.ProtocolError("LLM response content is empty")
-                return content
-            except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+                    body = await read_bounded(response, self._max_response_bytes, source="JEV")
+                payload = TypeAdapter(dict[str, Any]).validate_json(body)
+                return _validated_answers(payload, request)
+            except (
+                httpx.HTTPError,
+                ResponseTooLargeError,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+            ) as exc:
                 if isinstance(exc, httpx.HTTPError):
                     last_error = exc
+                elif isinstance(exc, ResponseTooLargeError):
+                    last_error = httpx.ProtocolError("JEV response exceeds byte limit")
                 else:
-                    last_error = httpx.ProtocolError("malformed LLM response")
+                    last_error = httpx.ProtocolError("malformed JEV response")
                 if attempt + 1 < self._attempts:
                     await asyncio.sleep(2 ** (attempt + 1))
         assert last_error is not None
         raise last_error
-
-
-def parse_brief_evaluation(text: str, *, checks_used: int) -> BriefEvaluation:
-    """Parse the versioned markdown verdict, breakdown, and summary fields."""
-
-    verdict = re.search(r"## Verdict\s*\n\s*(YES|NO)", text, re.IGNORECASE)
-    breakdown = re.search(
-        r"## (?:Requirement-by-Requirement|Objective Requirements|"
-        r"Instruction-by-Instruction)[ \t]*\n"
-        r"(.*?)(?:\n## Verdict|\n## |$)",
-        text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    summary = re.search(
-        r"## Summary\s*\n\s*(.*?)(?:\n##|\n```|$)",
-        text,
-        re.DOTALL | re.IGNORECASE,
-    )
-    return BriefEvaluation(
-        meets_brief=bool(verdict and verdict.group(1).upper() == "YES"),
-        reasoning=summary.group(1).strip() if summary else "Unable to parse response",
-        detailed_breakdown=breakdown.group(1).strip() if breakdown else None,
-        checks_used=checks_used,
-    )

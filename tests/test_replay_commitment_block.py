@@ -14,7 +14,6 @@ from bitcast_x.protocol import CommitmentEnvelope
 from bitcast_x.replay_commitment_block import replay_commitments
 
 
-@pytest.mark.asyncio
 async def test_replay_uses_settings_chain_and_closes_without_wallet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -45,12 +45,6 @@ def find_source_root(start: Path | None = None) -> Path | None:
     return None
 
 
-def auto_update_enabled(settings: Settings) -> bool:
-    """Return whether the operator explicitly enabled source updates."""
-
-    return settings.auto_update
-
-
 def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
     """Exercise candidate migrations and reject versioned schema changes."""
 
@@ -59,7 +53,7 @@ def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
         temporary = Path(raw_temp)
         for name, factory in (
             ("miner.sqlite3", lambda path: MinerStore(path)),
-            ("validator.sqlite3", lambda path: ValidatorStore(path, start_block=0)),
+            ("validator.sqlite3", ValidatorStore),
         ):
             source = state_dir / name
             if not source.exists():
@@ -67,7 +61,7 @@ def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
             before = _schema_version(source)
             copied = temporary / name
             backup_database(source, copied)
-            factory(copied)
+            factory(copied).close()
             after = _schema_version(copied)
             if after != before:
                 raise RuntimeError(

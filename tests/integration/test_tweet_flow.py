@@ -25,12 +25,12 @@ from bitcast_x.protocol import (
     MiningProtocol,
 )
 from bitcast_x.qualification import (
-    HistoricalQualificationChecker,
     QualificationConfig,
     QualificationReader,
 )
 from bitcast_x.transport import SignedMinerClient, create_miner_app
 from bitcast_x.validator.ingestion import MinerEndpoint, ValidatorIngestor
+from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.rewards import RewardCoordinator
@@ -272,7 +272,6 @@ def campaign_feed(now: datetime, *, exclusive_miner_hotkey: str | None = None) -
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("exclusive", [False, True], ids=["open", "exclusive"])
 async def test_tweet_flows_from_miner_api_to_published_reward(
     tmp_path: Path,
@@ -359,7 +358,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         )
         assert status_response.json()["status"] == "verification_pending"
 
-    validator_store = ValidatorStore(tmp_path / "validator.sqlite3", start_block=10)
+    validator_store = ValidatorStore(tmp_path / "validator.sqlite3")
 
     def client_factory(endpoint: MinerEndpoint) -> SignedMinerClient:
         return SignedMinerClient(
@@ -400,15 +399,13 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
             TWEET_ID: EngagementFetch(engagements={}, provider_available=True),
         },
     )
-    qualification = HistoricalQualificationChecker(
-        QualificationReader(
-            chain,
-            QualificationConfig(
-                owner_hotkey=validator_hotkey,
-                minimum_conviction_alpha=Decimal("0"),
-                effective_block=0,
-            ),
-        )
+    qualification = QualificationReader(
+        chain,
+        QualificationConfig(
+            owner_hotkey=validator_hotkey,
+            minimum_conviction_alpha=Decimal("0"),
+            effective_block=0,
+        ),
     )
     attributions = await CampaignReconciler(
         validator_store,
@@ -418,8 +415,9 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     coordinator = RewardCoordinator(
         validator_store,
         AttributionScorer(evidence, brief_filter=PassingBriefFilter()),
+        score_blend=0.0,
     )
-    scored = await coordinator.freeze_scores(feed, attributions)
+    scored = await coordinator.freeze_scores(feed, attributions, block=30)
     weights, rewards = coordinator.shadow_weights(
         feed,
         scored,
@@ -432,7 +430,15 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         validator_store,
         publisher,  # type: ignore[arg-type]
         endpoint="https://ingestion.example/api/v1/brief-tweets",
-    ).publish(feed, scored, rewards, block=35, hotkey_to_uid={miner_hotkey: 7})
+        preview_store=PreviewStore(tmp_path / "preview.sqlite3"),
+    ).publish(
+        feed,
+        scored,
+        rewards,
+        block=35,
+        hotkey_to_uid={miner_hotkey: 7},
+        completed_campaign_ids=coordinator.completed_campaign_ids,
+    )
 
     assert len(attributions) == 1
     assert attributions[0].accepted is True
@@ -446,6 +452,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     assert weights == {0: 0.0, 7: 1.0}
     assert len(rewards) == 1
     assert published == 1
+    assert publisher.payloads[0]["brief_id"] == CAMPAIGN_ID
     tweets = publisher.payloads[0]["tweets"]
     assert isinstance(tweets, list)
     assert tweets[0]["meets_brief"] is True
@@ -454,3 +461,5 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
     assert isinstance(decisions, list)
     assert decisions[0]["reward_status"] == "rewarded"
     assert decisions[0]["reward_reason"] == "accepted"
+    assert decisions[0]["daily_usd_floor"] == rewards[0].daily_usd_floor
+    assert validator_store.publication_succeeded(CAMPAIGN_ID) is True

@@ -3,12 +3,13 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.config import Settings
+from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
@@ -20,17 +21,17 @@ BLOCK = 10_000_000
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 
 
-def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
+def campaign(campaign_id: str) -> CampaignRecord:
     return CampaignRecord(
         access=CampaignAccess(
             campaign_id=campaign_id,
             mechanism_id=1,
-            mining_protocol=protocol,
+            mining_protocol=MiningProtocol.PRECLAIM_V2,
             scoring_close_block=BLOCK - 10,
         ),
-        title=campaign_id,
+        display=campaign_id,
         brief="brief",
-        ecosystem_id="eco",
+        pools=("eco",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
         reward_pool_usd="700",
@@ -39,34 +40,33 @@ def campaign(campaign_id: str, protocol: MiningProtocol) -> CampaignRecord:
     )
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "case", ["empty", "preclaim", "pending_preclaim", "legacy", "mixed", "frozen_legacy"]
+    "case", ["empty", "preclaim", "pending_preclaim", "invalid_feed", "preview", "publish_fails"]
 )
-async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
+async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    preclaim = campaign("preclaim", MiningProtocol.PRECLAIM_V2)
-    legacy = campaign("legacy", MiningProtocol.LEGACY_CONNECTION)
+    preclaim = campaign("preclaim")
+    open_campaign = campaign("open").model_copy(
+        update={
+            "access": preclaim.access.model_copy(
+                update={"campaign_id": "open", "scoring_close_block": BLOCK + 10}
+            ),
+            "emission_start_block": BLOCK + 11,
+            "emission_end_block": BLOCK + 20,
+        }
+    )
     records = {
         "empty": (),
         "preclaim": (preclaim,),
-        "pending_preclaim": (preclaim,),
-        "legacy": (legacy,),
-        "mixed": (preclaim, legacy),
-        "frozen_legacy": (preclaim,),
+        "pending_preclaim": (preclaim, campaign("pending")),
+        "invalid_feed": (preclaim,),
+        "preview": (open_campaign,),
+        "publish_fails": (preclaim,),
     }[case]
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    if case in {"preclaim", "mixed", "frozen_legacy"}:
+    if case in {"preclaim", "pending_preclaim", "invalid_feed", "publish_fails"}:
         frozen = preclaim
-        if case == "frozen_legacy":
-            frozen = preclaim.model_copy(
-                update={
-                    "access": preclaim.access.model_copy(
-                        update={"mining_protocol": MiningProtocol.LEGACY_CONNECTION}
-                    )
-                }
-            )
         store.bind_campaign_protocols((frozen,))
         store.persist_reconciliation(
             snapshot_id="old",
@@ -74,7 +74,7 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
             campaign_json=frozen.model_dump_json(),
             results=[],
         )
-        store.persist_scores("old", "preclaim", [])
+        store.persist_scores("preclaim", [])
         store.persist_campaign_rewards(
             snapshot_id="old",
             campaign_id="preclaim",
@@ -92,8 +92,6 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
             decisions=[],
         )
     before = shadow_report(tmp_path)
-    archive = tmp_path / "connections.db"
-    archive.write_bytes(b"historical archive must not be opened or modified")
     ops = SimpleNamespace(started=True, should_exit=False, serve=AsyncMock())
     feed = CampaignFeed(
         snapshot_id="new",
@@ -102,8 +100,17 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
         ecosystem_maps=(),
     )
 
+    def feed_client(_settings: Settings) -> SimpleNamespace:
+        assert ops.serve.called, "liveness must be served before economics opens"
+        return SimpleNamespace(fetch=fetch, close=AsyncMock())
+
     async def fetch() -> CampaignFeed:
         ops.should_exit = True  # Finish after this one complete cycle.
+        if case == "invalid_feed":
+            # A feed carrying a retired campaign mode no longer parses.
+            payload = feed.model_dump(mode="json")
+            payload["campaigns"][0]["access"]["mining_protocol"] = "legacy_connection"
+            return CampaignFeed.model_validate(payload)
         return feed
 
     graph = SimpleNamespace(
@@ -124,8 +131,16 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
     reconciler = SimpleNamespace(
         reconcile_feed=AsyncMock(return_value=[]),
         completed_campaign_ids=frozenset(),
+        verified_events=Mock(return_value="events"),
+        reconcile_campaign=AsyncMock(return_value=[]),
     )
-    publisher = SimpleNamespace(publish=AsyncMock(), publish_preview=AsyncMock())
+    # A final payload that cannot be built (for example, a rewarded miner that
+    # has since deregistered) must not block weights.
+    publish_error = ProtocolError("rewarded tweet has no registered miner")
+    publisher = SimpleNamespace(
+        publish=AsyncMock(side_effect=publish_error if case == "publish_fails" else None),
+        publish_preview=AsyncMock(),
+    )
     submit = AsyncMock()
     monkeypatch.setattr(
         service,
@@ -140,15 +155,18 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
     monkeypatch.setattr(
         service,
         "CampaignFeedClient",
-        lambda *_args, **_kwargs: SimpleNamespace(fetch=fetch, close=AsyncMock()),
+        SimpleNamespace(from_settings=feed_client),
     )
     monkeypatch.setattr(service, "CampaignReconciler", lambda *_args, **_kwargs: reconciler)
     monkeypatch.setattr(
         service, "DesearchProvider", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
     )
-    monkeypatch.setattr(
-        service, "LlmBriefFilter", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
-    )
+
+    def brief_filter(*, api_key: str, **_kwargs: object) -> SimpleNamespace:
+        assert api_key == "existing-openrouter-key"
+        return SimpleNamespace(close=AsyncMock())
+
+    monkeypatch.setattr(service, "JevBriefFilter", brief_filter)
     monkeypatch.setattr(
         service, "DataPublisher", lambda *_args, **_kwargs: SimpleNamespace(close=AsyncMock())
     )
@@ -160,27 +178,34 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_legacy(
             _env_file=None,
             state_dir=tmp_path,
             desearch_api_key="offline-test",
-            chutes_api_key="offline-test",
+            openrouter_api_key="existing-openrouter-key",
             enable_data_publish=True,
             enable_weight_submission=True,
         )
     ).run()
 
-    assert archive.read_bytes() == b"historical archive must not be opened or modified"
     publisher.publish_preview.assert_not_awaited()
-    if case in {"legacy", "mixed", "frozen_legacy"}:
+    if case == "preview":
+        reconciler.verified_events.assert_called_once_with(BLOCK)
+        assert reconciler.reconcile_campaign.await_args is not None
+        assert reconciler.reconcile_campaign.await_args.kwargs == {
+            "through_block": BLOCK,
+            "events": "events",
+            "defer_unavailable_tweets": True,
+        }
+    else:
+        reconciler.reconcile_campaign.assert_not_awaited()
+    if case == "invalid_feed":
         reconciler.reconcile_feed.assert_not_awaited()
         publisher.publish.assert_not_awaited()
         submit.assert_not_awaited()
         assert shadow_report(tmp_path) == before
     else:
         publisher.publish.assert_awaited_once()
-        if case == "pending_preclaim":
-            submit.assert_not_awaited()
-            assert shadow_report(tmp_path)["shadow_blocks"] == 0
-        else:
-            submit.assert_awaited_once()
-            assert submit.await_args is not None
-            expected = {0: 0.0, 7: 1.0} if case == "preclaim" else {0: 1.0, 7: 0.0}
-            assert submit.await_args.args[3] == expected
-            assert shadow_report(tmp_path)["shadow_blocks"] == 1
+        # A campaign still waiting to settle gets no weight and holds back no other.
+        submit.assert_awaited_once()
+        assert submit.await_args is not None
+        frozen_rewards = case in {"preclaim", "pending_preclaim", "publish_fails"}
+        expected = {0: 0.0, 7: 1.0} if frozen_rewards else {0: 1.0, 7: 0.0}
+        assert submit.await_args.args[3] == expected
+        assert shadow_report(tmp_path)["shadow_blocks"] == 1

@@ -12,12 +12,17 @@ from fastapi import FastAPI
 
 from bitcast_x.campaigns import CampaignFeedClient
 from bitcast_x.config import Settings
-from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.api import create_control_app
 from bitcast_x.miner.control import MinerControlService
 from bitcast_x.miner.results import MinerResultsClient
-from bitcast_x.miner.service import build_sdk, load_wallet
-from bitcast_x.transport import create_miner_app
+from bitcast_x.miner.service import (
+    advertise_endpoint,
+    build_sdk,
+    commit_until,
+    create_protocol_app,
+    is_permitted_validator,
+    load_wallet,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -58,13 +63,7 @@ def build_miner_api(settings: Settings) -> MinerApps:
 
     async def authorize_validator(hotkey: str) -> bool:
         chain = runtime.get("chain")
-        if chain is None:
-            return False
-        metagraph = await chain.metagraph()
-        if metagraph is None:
-            return False
-        neuron = metagraph.by_hotkey(hotkey)
-        return neuron is not None and bool(neuron.validator_permit)
+        return chain is not None and await is_permitted_validator(chain, hotkey)
 
     def get_service() -> MinerControlService:
         service = runtime.get("service")
@@ -72,14 +71,11 @@ def build_miner_api(settings: Settings) -> MinerApps:
             raise RuntimeError("miner control service is not ready")
         return service
 
-    protocol_app = create_miner_app(
+    protocol_app = create_protocol_app(
+        settings,
         miner_hotkey=str(wallet.hotkey.ss58_address),
         provider=lambda request, caller: get_service().sdk.engine.batch_page(request, caller),
         authorize_validator=authorize_validator,
-        max_request_bytes=settings.max_request_bytes,
-        auth_max_age=settings.auth_max_age_seconds,
-        auth_allowed_skew=settings.auth_allowed_skew_seconds,
-        requests_per_minute=settings.validator_requests_per_minute,
         readiness=is_ready,
     )
 
@@ -106,14 +102,6 @@ def build_miner_api(settings: Settings) -> MinerApps:
             enabled_ecosystem_ids=settings.miner_enabled_ecosystem_ids,
         )
 
-        async def commit_loop() -> None:
-            while True:
-                try:
-                    await sdk.engine.commit_ready()
-                except Exception:
-                    LOGGER.exception("queued commitment failed; durable state retained")
-                await asyncio.sleep(min(0.5, settings.batch_max_age_seconds / 2))
-
         async def results_loop() -> None:
             while True:
                 try:
@@ -125,13 +113,9 @@ def build_miner_api(settings: Settings) -> MinerApps:
         commit_task: asyncio.Task[None] | None = None
         results_task: asyncio.Task[None] | None = None
         try:
-            try:
-                await chain.advertise_endpoint(wallet, ip=public_ip, port=settings.port)
-            except ChainOperationError:
-                LOGGER.exception(
-                    "endpoint advertisement failed; continuing with existing on-chain endpoint"
-                )
-            commit_task = asyncio.create_task(commit_loop())
+            await advertise_endpoint(chain, wallet, ip=public_ip, port=settings.port)
+            # Both loops run until cancelled below at shutdown.
+            commit_task = asyncio.create_task(commit_until(sdk.engine, settings, lambda: False))
             results_task = asyncio.create_task(results_loop())
             runtime["ready"] = True
             LOGGER.info("miner API ready hotkey=%s", sdk.engine.miner_hotkey)

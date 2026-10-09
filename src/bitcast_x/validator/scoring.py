@@ -3,7 +3,6 @@
 import asyncio
 import logging
 
-import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from bitcast_x.brief_filter import BriefEvaluation, BriefFilter
@@ -17,7 +16,11 @@ from bitcast_x.campaigns import (
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionResult
-from bitcast_x.scoring import EngagementContribution, calculate_tweet_score
+from bitcast_x.scoring import (
+    BASELINE_TWEET_SCORE_FACTOR,
+    EngagementContribution,
+    calculate_tweet_score,
+)
 from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch, XProvider
 
 LOGGER = logging.getLogger(__name__)
@@ -63,27 +66,19 @@ class AttributionScorer:
         feed: CampaignFeed,
         attributions: list[AttributionResult],
         *,
-        cached_evidence: dict[str, tuple[TweetFetch, EngagementFetch]] | None = None,
         defer_unavailable_tweets: bool = False,
     ) -> list[ScoredAttribution]:
         """Score accepted results, optionally deferring unavailable tweet evidence."""
 
         accepted = [result for result in attributions if result.accepted]
         tweet_ids = sorted({item.tweet_id for item in accepted})
-        evidence_values = await asyncio.gather(
-            *(
-                self._evidence_for_score(
-                    item,
-                    cached=(cached_evidence or {}).get(item),
-                )
-                for item in tweet_ids
-            )
-        )
+        evidence_values = await asyncio.gather(*(self._fetch_evidence(item) for item in tweet_ids))
         evidence = dict(zip(tweet_ids, evidence_values, strict=True))
+        context = _CampaignContext(feed)
         scored: list[ScoredAttribution] = []
         for item in accepted:
             try:
-                scored.append(self._score_one(feed, item, *evidence[item.tweet_id]))
+                scored.append(self._score_one(context, item, *evidence[item.tweet_id]))
             except ReconciliationUnavailableError as exc:
                 if not defer_unavailable_tweets:
                     raise
@@ -125,16 +120,6 @@ class AttributionScorer:
                 item.attribution.miner_hotkey or "",
             ),
         )
-
-    async def _evidence_for_score(
-        self,
-        tweet_id: str,
-        *,
-        cached: tuple[TweetFetch, EngagementFetch] | None,
-    ) -> tuple[TweetFetch, EngagementFetch]:
-        if cached is not None:
-            return cached
-        return await self._fetch_evidence(tweet_id)
 
     async def _evaluate_with_deferral(
         self,
@@ -183,7 +168,7 @@ class AttributionScorer:
 
     def _score_one(
         self,
-        feed: CampaignFeed,
+        context: "_CampaignContext",
         attribution: AttributionResult,
         tweet_result: TweetFetch,
         engagement_result: EngagementFetch,
@@ -198,12 +183,14 @@ class AttributionScorer:
             )
         tweet = tweet_result.tweet
         campaign = next(
-            item for item in feed.campaigns if item.access.campaign_id == attribution.campaign_id
+            item
+            for item in context.feed.campaigns
+            if item.access.campaign_id == attribution.campaign_id
         )
-        tweet_ecosystem = _campaign_map_at(feed, campaign, tweet)
+        tweet_ecosystem = _campaign_map_at(context, campaign, tweet)
         try:
-            considered, current_ecosystem = considered_accounts_for_campaign(
-                feed, campaign, ecosystem_id=tweet_ecosystem.ecosystem_id
+            considered, current_ecosystem, relationships = context.considered(
+                campaign, tweet_ecosystem.ecosystem_id
             )
         except ValueError as exc:
             raise ReconciliationUnavailableError(str(exc)) from exc
@@ -232,14 +219,6 @@ class AttributionScorer:
             for value in (tweet_time_influence, current_influence, minimum)
             if value is not None
         )
-        usernames = sorted(considered)
-        indexes = {username: index for index, username in enumerate(usernames)}
-        relationships = np.zeros((len(usernames), len(usernames)), dtype=np.float64)
-        for edge in current_ecosystem.relationships:
-            source = indexes.get(edge.source_username.lower())
-            target = indexes.get(edge.target_username.lower())
-            if source is not None and target is not None:
-                relationships[source, target] = edge.score
         engagements = {
             username.lower(): kind
             for username, kind in engagement_result.engagements.items()
@@ -250,15 +229,14 @@ class AttributionScorer:
             author_influence=author_influence,
             author=tweet.author,
             considered_accounts=considered,
-            relationship_scores=relationships,
-            username_to_index=indexes,
+            relationships=relationships,
         )
         return ScoredAttribution(
             attribution=attribution,
             tweet=tweet,
             score=score,
             author_influence=round(author_influence, 6),
-            baseline_score=round(author_influence * 2.0, 6),
+            baseline_score=round(author_influence * BASELINE_TWEET_SCORE_FACTOR, 6),
             details=tuple(details),
             engagements=tuple(sorted(engagement_result.engagements)),
             author_followers_count=(
@@ -267,19 +245,62 @@ class AttributionScorer:
         )
 
 
-def _campaign_map_at(feed: CampaignFeed, campaign: CampaignRecord, tweet: Tweet) -> EcosystemMap:
+class _CampaignContext:
+    """Campaign-wide scoring inputs, built once per pool for one scoring call."""
+
+    def __init__(self, feed: CampaignFeed) -> None:
+        self.feed = feed
+        self._eligible: dict[tuple[str, str], frozenset[str]] = {}
+        self._considered: dict[
+            tuple[str, str],
+            tuple[dict[str, float], EcosystemMap, dict[tuple[str, str], float]],
+        ] = {}
+
+    def eligible(self, campaign: CampaignRecord, pool: str) -> frozenset[str]:
+        """Return the creators eligible for one campaign pool."""
+
+        key = (campaign.access.campaign_id, pool)
+        if key not in self._eligible:
+            self._eligible[key] = eligible_creator_ids_for_campaign(
+                self.feed, campaign, ecosystem_id=pool
+            )
+        return self._eligible[key]
+
+    def considered(
+        self, campaign: CampaignRecord, pool: str
+    ) -> tuple[dict[str, float], EcosystemMap, dict[tuple[str, str], float]]:
+        """Return considered influence, the current map, and its relationship edges.
+
+        Edges are keyed by lowercased ``(source, target)`` usernames and kept only
+        when both ends are considered; a later duplicate edge replaces an earlier one.
+        """
+
+        key = (campaign.access.campaign_id, pool)
+        if key not in self._considered:
+            considered, current = considered_accounts_for_campaign(
+                self.feed, campaign, ecosystem_id=pool
+            )
+            relationships: dict[tuple[str, str], float] = {}
+            for edge in current.relationships:
+                source = edge.source_username.lower()
+                target = edge.target_username.lower()
+                if source in considered and target in considered:
+                    relationships[(source, target)] = edge.score
+            self._considered[key] = (considered, current, relationships)
+        return self._considered[key]
+
+
+def _campaign_map_at(
+    context: _CampaignContext, campaign: CampaignRecord, tweet: Tweet
+) -> EcosystemMap:
     """Select the first configured pool in which the tweet author is eligible."""
     available: list[EcosystemMap] = []
     for pool in campaign.pools:
-        ecosystem = ecosystem_map_at(feed, pool, tweet.created_at)
+        ecosystem = ecosystem_map_at(context.feed, pool, tweet.created_at)
         if ecosystem is None:
             continue
         available.append(ecosystem)
-        if tweet.author_x_id in eligible_creator_ids_for_campaign(
-            feed,
-            campaign,
-            ecosystem_id=pool,
-        ):
+        if tweet.author_x_id in context.eligible(campaign, pool):
             return ecosystem
     if not available:
         raise ReconciliationUnavailableError(

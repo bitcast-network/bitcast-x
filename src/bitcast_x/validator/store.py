@@ -4,8 +4,7 @@ import json
 import logging
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,12 +15,11 @@ from pydantic import TypeAdapter
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
-    CommitmentEnvelope,
     CommitmentPosition,
     CommittedBatch,
 )
 from bitcast_x.protocol.models import AttributionResult
-from bitcast_x.sqlite import apply_migrations
+from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
 
 LOGGER = logging.getLogger(__name__)
 
@@ -30,21 +28,9 @@ if TYPE_CHECKING:
     from bitcast_x.campaigns import CampaignRecord
     from bitcast_x.rewards import RewardDecision, TweetReward
     from bitcast_x.validator.scoring import ScoredAttribution
-    from bitcast_x.x_provider import Tweet
 
 
 _CAMPAIGN_IDENTITY_FIELDS = ("access",)
-
-
-def _default_finalized_block_provider() -> int:
-    """Fallback chain cursor when no provider is wired: assume scoring is over.
-
-    Bind-time adoption of a pinned campaign is only safe while the campaign's
-    scoring window is still open; a store constructed without a chain cursor
-    (tooling, tests) must therefore keep the conservative post-close behavior.
-    """
-
-    return 2**63 - 1
 
 
 def _campaign_field_diffs(
@@ -72,19 +58,24 @@ def _campaign_field_diffs(
 
 
 def _same_campaign_contract(first: str, second: str) -> bool:
-    """Compare campaign records after removing backward-compatible null placeholders."""
+    """Compare stored campaign contracts, ignoring a max_members missing on one side."""
 
+    if first == second:
+        # Contracts are stored as model dumps, so identical text is the common case.
+        return True
     from bitcast_x.campaigns import CampaignRecord
 
     try:
         first_record = CampaignRecord.model_validate_json(first)
         second_record = CampaignRecord.model_validate_json(second)
-        if (first_record.max_members is None) != (second_record.max_members is None):
-            first_record = first_record.model_copy(update={"max_members": None})
-            second_record = second_record.model_copy(update={"max_members": None})
-        return first_record == second_record
     except ValueError:
         return False
+    # Feeds before max_members existed bound some campaigns without it, so a contract
+    # missing it on one side still matches; that placeholder never changed a result.
+    if (first_record.max_members is None) != (second_record.max_members is None):
+        first_record = first_record.model_copy(update={"max_members": None})
+        second_record = second_record.model_copy(update={"max_members": None})
+    return first_record == second_record
 
 
 def _campaign_has_frozen_results(connection: sqlite3.Connection, campaign_id: str) -> bool:
@@ -188,7 +179,7 @@ class VerifiedBatchRecord:
 
 @dataclass(frozen=True, slots=True)
 class FeaturedTweetSelection:
-    """One creator-visible featured tweet pinned near campaign close."""
+    """One creator-visible featured tweet announced near campaign close."""
 
     campaign_id: str
     tweet_id: str
@@ -237,21 +228,9 @@ def _featured_tweet_selection(
 class ValidatorStore:
     """Persist observed chain anchors before atomically advancing verified cursors."""
 
-    def __init__(
-        self,
-        path: Path,
-        *,
-        start_block: int = 0,
-        finalized_block_provider: Callable[[], int] | None = None,
-    ) -> None:
-        if start_block < 0:
-            raise ValueError("start_block cannot be negative")
+    def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._initial_scanned_block = start_block - 1
-        self._finalized_block_provider = (
-            finalized_block_provider or _default_finalized_block_provider
-        )
         self._lock = threading.RLock()
         try:
             self._initialize()
@@ -265,6 +244,12 @@ class ValidatorStore:
                 [str(item) for item in quarantined],
             )
             self._initialize()
+        self._release = hold_open(self, path)
+
+    def close(self) -> None:
+        """Release the connection held open for this store's lifetime."""
+
+        self._release()
 
     def _quarantine_unreadable_database(self) -> tuple[Path, ...]:
         """Preserve an unreadable journal and SQLite sidecars before rebuilding."""
@@ -281,28 +266,11 @@ class ValidatorStore:
             raise FileNotFoundError(f"unreadable validator database disappeared: {self.path}")
         return tuple(moved)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        return connection
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return session(self.path)
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.commit()
-            except BaseException:
-                if connection.in_transaction:
-                    connection.rollback()
-                raise
-            finally:
-                connection.close()
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return transaction(self.path, self._lock)
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
@@ -414,21 +382,6 @@ class ValidatorStore:
                 connection.execute(
                     "ALTER TABLE campaign_protocols ADD COLUMN campaign_contract_json TEXT"
                 )
-            connection.execute(
-                """
-                UPDATE campaign_protocols
-                SET campaign_contract_json = (
-                    SELECT reconciliations.campaign_json
-                    FROM reconciliations
-                    WHERE reconciliations.campaign_id = campaign_protocols.campaign_id
-                )
-                WHERE campaign_contract_json IS NULL
-                  AND EXISTS (
-                    SELECT 1 FROM reconciliations
-                    WHERE reconciliations.campaign_id = campaign_protocols.campaign_id
-                  )
-                """
-            )
             # Version four records the guarded additive column. The no-op SQL
             # keeps re-adoption safe when an otherwise-current DB has its
             # user_version cleared by an operator or older tooling.
@@ -499,34 +452,14 @@ class ValidatorStore:
                 )
                 """
             )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS store_audit_events (
-                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_kind TEXT NOT NULL,
-                    campaign_id TEXT NOT NULL,
-                    tweet_id TEXT,
-                    event_json TEXT NOT NULL,
-                    recorded_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO scan_state(singleton, last_finalized_block)
-                VALUES (1, ?)
-                """,
-                (self._initial_scanned_block,),
-            )
 
     def bind_campaign_protocols(
         self,
         campaigns: tuple["CampaignRecord", ...],
     ) -> tuple["CampaignRecord", ...]:
-        """Adopt mutable feed records and retain creator-visible pinned contracts."""
+        """Treat campaign ID as stable and adopt feed edits until results freeze."""
 
         bound_campaigns: list[CampaignRecord] = []
-        observed_campaign_ids = {item.access.campaign_id for item in campaigns}
         with self._transaction() as connection:
             for campaign in campaigns:
                 campaign_id = campaign.access.campaign_id
@@ -563,64 +496,19 @@ class ValidatorStore:
                 if unchanged:
                     bound_campaigns.append(campaign)
                     continue
-                featured_selection_exists = connection.execute(
-                    "SELECT 1 FROM featured_tweet_selections WHERE campaign_id = ?",
-                    (campaign_id,),
-                ).fetchone()
-                frozen_campaign = _load_frozen_campaign(stored_json, campaign_id)
-                durable_state = (
-                    _campaign_has_frozen_results(connection, campaign_id)
-                    or featured_selection_exists is not None
-                )
-                if durable_state:
+                if _campaign_has_frozen_results(connection, campaign_id):
+                    # A changed feed record must never replace the contract that
+                    # produced durable results. It also must not deny service to
+                    # every unrelated campaign in the feed. Keep using the
+                    # frozen contract for this campaign and make the rejected
+                    # mutation operationally visible.
+                    frozen_campaign = _load_frozen_campaign(stored_json, campaign_id)
                     if frozen_campaign is None:
                         LOGGER.critical(
                             "quarantined campaign with unreadable frozen contract campaign=%s",
                             campaign_id,
                         )
                         continue
-                    finalized_block_now = self._finalized_block_provider()
-                    pre_close_pin = featured_selection_exists is not None and not (
-                        _campaign_has_frozen_results(connection, campaign_id)
-                        or finalized_block_now >= campaign.access.scoring_close_block
-                    )
-                    if pre_close_pin:
-                        # The featured-tweet pin is created before the brief ends,
-                        # and creators legitimately edit their briefs while the
-                        # campaign is still open. Adopt the edited feed contract
-                        # and refresh the pinned selection's stored contract so
-                        # replay stays consistent; the pinned tweet itself is
-                        # untouched (it remains in its original selection pool).
-                        connection.execute(
-                            """
-                            UPDATE featured_tweet_selections
-                            SET campaign_json = ?
-                            WHERE campaign_id = ?
-                            """,
-                            (campaign_json, campaign_id),
-                        )
-                        connection.execute(
-                            """
-                            UPDATE campaign_protocols
-                            SET mining_protocol = ?, exclusive_miner_hotkey = ?,
-                                campaign_contract_json = ?
-                            WHERE campaign_id = ?
-                            """,
-                            (protocol, exclusive_hotkey, campaign_json, campaign_id),
-                        )
-                        LOGGER.warning(
-                            "adopted pre-close campaign edit with pinned featured "
-                            "tweet campaign=%s changed_fields=%s",
-                            campaign_id,
-                            ",".join(_campaign_field_diffs(campaign, frozen_campaign)) or "unknown",
-                        )
-                        bound_campaigns.append(campaign)
-                        continue
-                    # A changed feed record must never replace the contract that
-                    # produced durable results. It also must not deny service to
-                    # every unrelated campaign in the feed. Keep using the
-                    # frozen contract for this campaign and make the rejected
-                    # mutation operationally visible.
                     LOGGER.error(
                         "rejected campaign mutation after durable state froze; "
                         "using frozen contract campaign=%s changed_fields=%s",
@@ -643,6 +531,13 @@ class ValidatorStore:
                     """,
                     (protocol, exclusive_hotkey, campaign_json, campaign_id),
                 )
+                # Releases up to 3.0 (#119-#140) reject a pin whose recorded
+                # contract differs from the bound one; keep it current so a
+                # rollback to them stays safe.
+                connection.execute(
+                    "UPDATE featured_tweet_selections SET campaign_json = ? WHERE campaign_id = ?",
+                    (campaign_json, campaign_id),
+                )
                 if reopening_provisional:
                     LOGGER.warning(
                         "reopened zero-value campaign with latest contract campaign=%s",
@@ -654,49 +549,15 @@ class ValidatorStore:
                         campaign_id,
                     )
                 bound_campaigns.append(campaign)
-            omitted_selections = connection.execute(
-                """
-                SELECT campaign_id, campaign_json
-                FROM featured_tweet_selections
-                ORDER BY campaign_id
-                """
-            ).fetchall()
-            for row in omitted_selections:
-                campaign_id = str(row["campaign_id"])
-                if campaign_id in observed_campaign_ids or _campaign_has_frozen_results(
-                    connection,
-                    campaign_id,
-                ):
-                    continue
-                pinned_campaign = _load_frozen_campaign(
-                    str(row["campaign_json"]),
-                    campaign_id,
-                )
-                if pinned_campaign is None:
-                    LOGGER.critical(
-                        "quarantined omitted campaign with unreadable featured contract "
-                        "campaign=%s",
-                        campaign_id,
-                    )
-                    continue
-                LOGGER.warning(
-                    "retained omitted campaign with pinned featured tweet campaign=%s",
-                    campaign_id,
-                )
-                bound_campaigns.append(pinned_campaign)
         return tuple(bound_campaigns)
 
-    def featured_tweet_selection(
-        self,
-        campaign_id: str,
-        campaign_json: str,
-    ) -> FeaturedTweetSelection | None:
-        """Return the durable featured selection for an unchanged campaign."""
+    def featured_tweet_selection(self, campaign_id: str) -> FeaturedTweetSelection | None:
+        """Return the featured tweet pinned for a campaign, if one was selected."""
 
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT campaign_json, tweet_id, selection_pool_json,
+                SELECT tweet_id, selection_pool_json,
                        selected_block, selected_at
                 FROM featured_tweet_selections
                 WHERE campaign_id = ?
@@ -705,8 +566,6 @@ class ValidatorStore:
             ).fetchone()
         if row is None:
             return None
-        if not _same_campaign_contract(str(row["campaign_json"]), campaign_json):
-            raise ProtocolError(f"campaign {campaign_id} changed after featured tweet selection")
         return _featured_tweet_selection(row, campaign_id)
 
     def pin_featured_tweet_selection(
@@ -719,7 +578,12 @@ class ValidatorStore:
         selected_block: int,
         selected_at: datetime,
     ) -> FeaturedTweetSelection:
-        """Atomically pin the first valid selection and replay it thereafter."""
+        """Atomically pin the first valid selection and return it thereafter.
+
+        The pin fixes which tweet is announced as featured; it does not freeze
+        the campaign contract. ``campaign_json`` is kept current for older
+        releases that still validate it.
+        """
 
         if not campaign_id or not tweet_id:
             raise ValueError("campaign_id and tweet_id cannot be blank")
@@ -737,7 +601,7 @@ class ValidatorStore:
         with self._transaction() as connection:
             row = connection.execute(
                 """
-                SELECT campaign_json, tweet_id, selection_pool_json,
+                SELECT tweet_id, selection_pool_json,
                        selected_block, selected_at
                 FROM featured_tweet_selections
                 WHERE campaign_id = ?
@@ -768,153 +632,7 @@ class ValidatorStore:
                     selected_block=selected_block,
                     selected_at=normalized_at,
                 )
-            if not _same_campaign_contract(str(row["campaign_json"]), campaign_json):
-                raise ProtocolError(
-                    f"campaign {campaign_id} changed after featured tweet selection"
-                )
             return _featured_tweet_selection(row, campaign_id)
-
-    def release_featured_tweet_selection(
-        self,
-        *,
-        campaign_id: str,
-        campaign_json: str,
-        tweet_id: str,
-        released_at: datetime,
-    ) -> bool:
-        """Drop a featured selection that the active campaign contract excludes.
-
-        The pinned featured identity is durable creator-visible state, but it
-        is only meaningful while its tweet qualifies under the campaign
-        contract in force. When that contract is adopted from an operator
-        edit (for example a scoring window that no longer contains the
-        pinned tweet's publication time), the exclusion is permanent for
-        this campaign, and retaining the pin would defer the campaign's
-        final economics for the rest of its emission window. This removes
-        the pin so a replacement can be selected from the tweets that do
-        qualify, and records the decision in the store audit log. Returns
-        True when a matching selection was released.
-        """
-
-        if released_at.tzinfo is None or released_at.utcoffset() is None:
-            raise ValueError("released_at must be timezone-aware")
-        released_at_utc = released_at.astimezone(UTC)
-        with self._transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT tweet_id FROM featured_tweet_selections
-                WHERE campaign_id = ?
-                """,
-                (campaign_id,),
-            ).fetchone()
-            if row is None or str(row["tweet_id"]) != tweet_id:
-                return False
-            connection.execute(
-                """
-                INSERT INTO store_audit_events(
-                    event_kind, campaign_id, tweet_id, event_json, recorded_at
-                )
-                VALUES ('featured_selection_released', ?, ?, ?, ?)
-                """,
-                (
-                    campaign_id,
-                    tweet_id,
-                    json.dumps(
-                        {
-                            "campaign_json": campaign_json,
-                            "released_at": released_at_utc.isoformat(),
-                        },
-                        separators=(",", ":"),
-                    ),
-                    released_at_utc.isoformat(),
-                ),
-            )
-            connection.execute(
-                """
-                DELETE FROM featured_tweet_selections WHERE campaign_id = ?
-                """,
-                (campaign_id,),
-            )
-        return True
-
-    def featured_selection_release_events(self, campaign_id: str) -> list[dict[str, str]]:
-        """Return audit events recorded when featured selections were released."""
-
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT tweet_id, event_json, recorded_at FROM store_audit_events
-                WHERE event_kind = 'featured_selection_released' AND campaign_id = ?
-                ORDER BY event_id
-                """,
-                (campaign_id,),
-            ).fetchall()
-        return [
-            {
-                "tweet_id": str(row["tweet_id"]),
-                "event": str(row["event_json"]),
-                "recorded_at": str(row["recorded_at"]),
-            }
-            for row in rows
-        ]
-
-    def scanned_block(self) -> int:
-        """Return the last fully persisted finalized block."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT last_finalized_block FROM scan_state WHERE singleton = 1"
-            ).fetchone()
-        return int(row["last_finalized_block"])
-
-    def persist_block(self, block: int, observations: list[ChainCommitment]) -> None:
-        """Atomically journal all observations and advance the global block scan cursor."""
-
-        with self._transaction() as connection:
-            current = int(
-                connection.execute(
-                    "SELECT last_finalized_block FROM scan_state WHERE singleton = 1"
-                ).fetchone()["last_finalized_block"]
-            )
-            if block <= current:
-                return
-            if block != current + 1:
-                raise ProtocolError(f"expected finalized block {current + 1}")
-            for observation in observations:
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO commitments(
-                        hotkey, block, extrinsic_index, block_timestamp,
-                        history_id, sequence, event_count, batch_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        observation.hotkey,
-                        observation.block,
-                        observation.extrinsic_index,
-                        observation.timestamp.isoformat(),
-                        observation.envelope.history_id.hex()
-                        if observation.envelope.history_id is not None
-                        else "",
-                        observation.envelope.sequence,
-                        observation.envelope.event_count,
-                        observation.envelope.batch_hash.hex(),
-                    ),
-                )
-            connection.execute(
-                "UPDATE scan_state SET last_finalized_block = ? WHERE singleton = 1",
-                (block,),
-            )
-
-    def cursor(self, hotkey: str) -> tuple[int, str | None]:
-        """Return the last atomically verified sequence and hash for a miner."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT last_sequence, last_batch_hash FROM miner_cursors WHERE hotkey = ?",
-                (hotkey,),
-            ).fetchone()
-        return (int(row["last_sequence"]), row["last_batch_hash"]) if row else (0, None)
 
     def history_cursor(self, hotkey: str) -> tuple[str | None, int, str | None]:
         """Return the active history ID and its independently scoped batch cursor."""
@@ -931,68 +649,6 @@ class ValidatorStore:
             return None, 0, None
         history_id = str(row["history_id"])
         return (history_id or None, int(row["last_sequence"]), row["last_batch_hash"])
-
-    def commitment_for_sequence(
-        self,
-        hotkey: str,
-        sequence: int,
-        *,
-        event_count: int | None = None,
-        batch_hash: str | None = None,
-    ) -> ChainCommitment | None:
-        """Return the finalized anchor proving the exact batch served by a miner."""
-
-        if (event_count is None) != (batch_hash is None):
-            raise ValueError("event_count and batch_hash must be supplied together")
-
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT block, extrinsic_index, block_timestamp, history_id,
-                       event_count, batch_hash
-                FROM commitments
-                WHERE hotkey = ? AND sequence = ? ORDER BY block, extrinsic_index
-                """,
-                (hotkey, sequence),
-            ).fetchall()
-        if not rows:
-            return None
-        if batch_hash is not None and event_count is not None:
-            rows = [
-                row
-                for row in rows
-                if int(row["event_count"]) == event_count and row["batch_hash"] == batch_hash
-            ]
-            if not rows:
-                raise ProtocolError(f"no finalized commitment matches batch sequence {sequence}")
-        elif len(rows) != 1:
-            raise ProtocolError(f"multiple commitments claim sequence {sequence}")
-        row = rows[0]
-        return ChainCommitment(
-            hotkey=hotkey,
-            block=int(row["block"]),
-            extrinsic_index=int(row["extrinsic_index"]),
-            timestamp=datetime.fromisoformat(row["block_timestamp"]),
-            envelope=CommitmentEnvelope(
-                sequence=sequence,
-                event_count=int(row["event_count"]),
-                batch_hash=bytes.fromhex(row["batch_hash"]),
-                history_id=(bytes.fromhex(str(row["history_id"])) if row["history_id"] else None),
-            ),
-        )
-
-    def next_commitment_sequence(self, hotkey: str, after_sequence: int) -> int | None:
-        """Return the lowest observed sequence beyond a miner's verified cursor."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT MIN(sequence) AS sequence FROM commitments
-                WHERE hotkey = ? AND sequence > ?
-                """,
-                (hotkey, after_sequence),
-            ).fetchone()
-        return int(row["sequence"]) if row and row["sequence"] is not None else None
 
     def persist_verified(self, batch: CommittedBatch, observation: ChainCommitment) -> None:
         """Atomically journal a targeted chain proof and advance one miner cursor."""
@@ -1163,21 +819,6 @@ class ValidatorStore:
                 (batch.miner_hotkey, batch_history_id, batch.sequence, batch.batch_hash),
             )
 
-    def record_error(self, hotkey: str, error: str) -> None:
-        """Record an explanatory reconciliation error without advancing state."""
-
-        with self._transaction() as connection:
-            history_id, sequence, batch_hash = self.history_cursor(hotkey)
-            connection.execute(
-                """
-                INSERT INTO miner_cursors(
-                    hotkey, history_id, last_sequence, last_batch_hash, last_error
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(hotkey) DO UPDATE SET last_error = excluded.last_error
-                """,
-                (hotkey, history_id or "", sequence, batch_hash, error),
-            )
-
     def verified_batches(self, *, through_block: int | None = None) -> list[VerifiedBatchRecord]:
         """Return globally ordered verified history for deterministic replay."""
 
@@ -1331,8 +972,6 @@ class ValidatorStore:
     def reconciled_campaigns(self) -> list["CampaignRecord"]:
         """Return campaigns retained by a positive, immutable reward allocation."""
 
-        from bitcast_x.campaigns import CampaignRecord
-
         with self._connect() as connection:
             rows = connection.execute(
                 "SELECT campaign_id, campaign_json FROM reconciliations ORDER BY campaign_id"
@@ -1342,11 +981,19 @@ class ValidatorStore:
                 for row in rows
                 if _campaign_has_frozen_results(connection, str(row["campaign_id"]))
             ]
-        return [CampaignRecord.model_validate_json(row["campaign_json"]) for row in frozen_rows]
+        campaigns: list[CampaignRecord] = []
+        for row in frozen_rows:
+            campaign = _load_frozen_campaign(str(row["campaign_json"]), str(row["campaign_id"]))
+            if campaign is None:
+                LOGGER.critical(
+                    "quarantined campaign with unreadable frozen contract campaign=%s",
+                    row["campaign_id"],
+                )
+                continue
+            campaigns.append(campaign)
+        return campaigns
 
-    def scored_reconciliation(
-        self, snapshot_id: str, campaign_id: str
-    ) -> list["ScoredAttribution"] | None:
+    def scored_reconciliation(self, campaign_id: str) -> list["ScoredAttribution"] | None:
         """Return a previously frozen score set without refetching mutable engagements."""
 
         from bitcast_x.validator.scoring import ScoredAttribution
@@ -1365,7 +1012,6 @@ class ValidatorStore:
 
     def persist_scores(
         self,
-        snapshot_id: str,
         campaign_id: str,
         scored: list["ScoredAttribution"],
     ) -> None:
@@ -1407,36 +1053,6 @@ class ValidatorStore:
                 """,
                 (frozen_snapshot_id, campaign_id, payload),
             )
-
-    def persisted_scored_tweet(self, campaign_id: str, tweet_id: str) -> "Tweet | None":
-        """Return the stored tweet snapshot for one scored tweet, if any.
-
-        Scores are persisted per campaign before economics freeze, so the
-        stored snapshot survives the scoring close even when reconciliation
-        would now reject the tweet under an edited contract. This is the
-        authoritative record of what the pinned tweet looked like when it
-        was scored.
-        """
-
-        from bitcast_x.validator.scoring import ScoredAttribution
-
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT scored_json FROM scored_reconciliations
-                WHERE campaign_id = ?
-                """,
-                (campaign_id,),
-            ).fetchall()
-        for row in rows:
-            try:
-                scored = TypeAdapter(list[ScoredAttribution]).validate_json(str(row["scored_json"]))
-            except ValueError:
-                continue
-            for item in scored:
-                if item.attribution.tweet_id == tweet_id:
-                    return item.tweet
-        return None
 
     def persist_shadow_weights(
         self, block: int, snapshot_id: str, weights: dict[int, float]
@@ -1493,7 +1109,7 @@ class ValidatorStore:
             )
         return result
 
-    def publication_succeeded(self, snapshot_id: str, campaign_id: str) -> bool:
+    def publication_succeeded(self, campaign_id: str) -> bool:
         """Return whether ingestion accepted a positive final allocation already."""
 
         with self._connect() as connection:
@@ -1578,7 +1194,11 @@ class ValidatorStore:
                 """,
                 (campaign_id,),
             ).fetchone()
-            if row is None or not _campaign_has_frozen_results(connection, campaign_id):
+            if row is None:
+                return None
+            if not _rewards_have_positive_allocation(
+                str(row["rewards_json"])
+            ) and not _campaign_has_frozen_results(connection, campaign_id):
                 return None
         if not _same_campaign_contract(row["campaign_json"], campaign_json):
             raise ProtocolError(f"campaign {campaign_id} changed after reward assignment")
@@ -1650,3 +1270,15 @@ class ValidatorStore:
                     )
                 except sqlite3.IntegrityError as exc:
                     raise ProtocolError(f"tweet {decision.tweet_id} was already rewarded") from exc
+            if _rewards_have_positive_allocation(rewards_json):
+                # These rewards are now frozen. Drop a pin they did not use so
+                # releases up to 3.0 (#119-#140), which publish the stored pin,
+                # agree with the frozen rewards after a rollback.
+                featured_tweet_id = next(
+                    (item.featured_tweet_id for item in rewards if item.featured_tweet_id), None
+                )
+                connection.execute(
+                    "DELETE FROM featured_tweet_selections "
+                    "WHERE campaign_id = ? AND tweet_id IS NOT ?",
+                    (campaign_id, featured_tweet_id),
+                )
