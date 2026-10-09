@@ -1,10 +1,13 @@
 """Tests for time-pinned v2 engagement scoring after attribution."""
 
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import httpx
 import pytest
 
-from bitcast_x.brief_filter import BriefEvaluation
+from bitcast_x.brief_filter import BriefEvaluation, JevBriefFilter
 from bitcast_x.campaigns import (
     CampaignFeed,
     CampaignRecord,
@@ -14,7 +17,9 @@ from bitcast_x.campaigns import (
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
+from bitcast_x.validator.rewards import RewardCoordinator
 from bitcast_x.validator.scoring import AttributionScorer
+from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -218,3 +223,105 @@ async def test_preview_scoring_defers_only_the_tweet_with_unavailable_evidence(
     results = await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
 
     assert [item.attribution.tweet_id for item in results] == ["999"]
+
+
+async def test_jev_outage_grace_recovery_and_frozen_rewards_survive_restart(tmp_path: Path) -> None:
+    snapshot = feed()
+    campaign = snapshot.campaigns[0].model_copy(
+        update={"prompt_version": 6, "emission_start_block": 30, "emission_end_block": 2000}
+    )
+    ready = campaign.model_copy(
+        update={
+            "access": campaign.access.model_copy(update={"campaign_id": "ready"}),
+            "brief": "Ready campaign",
+        }
+    )
+    snapshot = snapshot.model_copy(update={"campaigns": (campaign, ready)})
+    attributions = [accepted("999"), accepted("998", campaign_id="ready")]
+    path = tmp_path / "validator.sqlite3"
+    store = ValidatorStore(path)
+    for record, attribution in zip(snapshot.campaigns, attributions, strict=True):
+        store.persist_reconciliation(
+            snapshot_id=snapshot.snapshot_id,
+            campaign_id=record.access.campaign_id,
+            campaign_json=record.model_dump_json(),
+            results=[attribution],
+        )
+    pin = store.pin_featured_tweet_selection(
+        campaign_id="campaign",
+        campaign_json=campaign.model_dump_json(),
+        tweet_id="999",
+        selection_pool=("999",),
+        selected_block=19,
+        selected_at=NOW,
+    )
+    unavailable = True
+    requests: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.content)
+        if unavailable and json.loads(request.content)["state"]["campaign_brief"] == campaign.brief:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={
+                "model": "typesafe/jev-1.13-20260917",
+                "answers": {
+                    "verdict": {"type": "choice", "probabilities": {"ACCEPT": 0.9, "REJECT": 0.1}},
+                    "identity": {
+                        "type": "choice",
+                        "probabilities": {"MATCH": 0.99, "MISMATCH": 0.01, "UNESTABLISHED": 0.0},
+                    },
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        evaluator = JevBriefFilter(api_key="existing-key", cache=store, client=client, attempts=1)
+        coordinator = RewardCoordinator(
+            store, AttributionScorer(FakeX(), brief_filter=evaluator), score_blend=1.0
+        )
+        for block in (30, 930):
+            scores = await coordinator.freeze_scores(snapshot, attributions, block=block)
+            assert [item.attribution.campaign_id for item in scores] == ["ready"]
+            weights, rewards = coordinator.shadow_weights(
+                snapshot, scores, block=block, hotkey_to_uid={MINER: 1}, uids=[0, 1]
+            )
+            assert weights == {0: 0.0, 1: 1.0}
+            assert [item.campaign_id for item in rewards] == ["ready"]
+            assert not store.campaign_finalized("campaign")
+            assert coordinator.pending_reward_campaign_ids(snapshot, block=block) == (
+                ("campaign",) if block == 30 else ()
+            )
+        unavailable = False
+        scores = await coordinator.freeze_scores(snapshot, attributions, block=931)
+        weights, rewards = coordinator.shadow_weights(
+            snapshot, scores, block=931, hotkey_to_uid={MINER: 1}, uids=[0, 1]
+        )
+        assert len(rewards) == 2
+        assert store.campaign_finalized("campaign")
+        assert store.featured_tweet_selection("campaign") == pin
+        assert next(item for item in rewards if item.campaign_id == "campaign").featured_tweet_bonus
+        request_count = len(requests)
+        assert request_count == 4
+        store.close()
+
+        # Reopened state must reuse both the JEV verdict and frozen positive economics.
+        unavailable = True
+        store = ValidatorStore(path)
+        evaluator = JevBriefFilter(api_key="existing-key", cache=store, client=client, attempts=1)
+        assert (await evaluator.evaluate(campaign, scores[0].tweet)).meets_brief
+        restarted = RewardCoordinator(
+            store, AttributionScorer(FakeX(), brief_filter=evaluator), score_blend=1.0
+        )
+        replay = await restarted.freeze_scores(snapshot, attributions, block=932)
+        assert replay == scores
+        replay_weights, replay_rewards = restarted.shadow_weights(
+            snapshot, replay, block=932, hotkey_to_uid={MINER: 1}, uids=[0, 1]
+        )
+        assert replay_weights == weights
+        assert {item.campaign_id: item for item in replay_rewards} == {
+            item.campaign_id: item for item in rewards
+        }
+        assert len(requests) == request_count
+        store.close()

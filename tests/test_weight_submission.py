@@ -64,7 +64,7 @@ def _qualification_schedule(*thresholds: tuple[int, str]) -> QualificationSchedu
     [
         pytest.param(
             {},
-            "BITCAST_X_DESEARCH_API_KEY, BITCAST_X_CHUTES_API_KEY",
+            "BITCAST_X_DESEARCH_API_KEY, BITCAST_X_OPENROUTER_API_KEY",
             id="enabled_outputs_require_reconciliation_providers",
         ),
         pytest.param(
@@ -73,7 +73,7 @@ def _qualification_schedule(*thresholds: tuple[int, str]) -> QualificationSchedu
             id="disabled_outputs_allow_ingestion_only_diagnostic_run",
         ),
         pytest.param(
-            {"desearch_api_key": "desearch", "chutes_api_key": "chutes"},
+            {"desearch_api_key": "desearch", "openrouter_api_key": "openrouter"},
             None,
             id="complete_provider_configuration",
         ),
@@ -90,6 +90,16 @@ def test_production_outputs_require_reconciliation_providers(
     else:
         with pytest.raises(ValueError, match=missing):
             ensure_production_outputs_configured(settings)
+
+
+def test_production_outputs_accept_existing_openrouter_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BITCAST_X_DESEARCH_API_KEY", "desearch")
+    monkeypatch.setenv("BITCAST_X_OPENROUTER_API_KEY", "existing-openrouter-key")
+    monkeypatch.setenv("BITCAST_X_LLM_PROVIDER", "openrouter")
+
+    ensure_production_outputs_configured(Settings(_env_file=None))
 
 
 ZERO = _qualification_schedule((0, "0"))

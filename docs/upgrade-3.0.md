@@ -1,8 +1,10 @@
 # Upgrading to software 3.0
 
 Software 3.0.0 retires `legacy_connection` campaign execution and the temporary Python interfaces
-used by that engine. It is a major release under the [release policy](release-policy.md). The
-version number in this checkout prepares the release; it does not mean a release tag or image has
+used by that engine, and replaces chat-model brief evaluation with JEV through OpenRouter. It also
+includes the validator reliability and soft featured-pin changes in the changelog. It is a major
+release under the [release policy](release-policy.md). The version number in this checkout prepares
+the release; it does not mean a release tag or image has
 been published. Use a reviewed, immutable release revision for deployment.
 
 The canonical network's final legacy campaign emission window ended on 2026-09-01. Operators of
@@ -22,6 +24,8 @@ integration has stopped using these interfaces.
 | Python chain integrations | `BittensorChain.legacy_daily_miner_alpha` | Remove legacy alpha-pricing calls; preclaim economics do not use this calculation. |
 | Configuration integrations | `Settings.legacy_*` fields and `config.LEGACY_CONNECTION_TWEET_IDS` | Remove attribute and constant references. Old environment keys are ignored by settings parsing, but no longer control behavior. |
 | Python protocol and feed integrations | `MiningProtocol.LEGACY_CONNECTION`, `validator.service.ensure_supported_campaigns`, `CampaignFeedClient.cached()`, `EcosystemMap.max_referral_amount`, and v3 manifest / v2 full-feed parsing | Use `preclaim_v2` and the v4 manifest. An invalid or retired feed raises a validation error, which the validator reports as a rejected cycle. |
+| Validators | Chat-model brief evaluation: `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY`, `BITCAST_X_LLM_NUM_CHECKS` and `Settings.llm_api_key` | JEV runs through OpenRouter using the existing `BITCAST_X_OPENROUTER_API_KEY`. Keep that key; validators previously using only Chutes must set it. A validator with production outputs enabled refuses to start without it. No separate TypeSafe key is needed. Retired settings are ignored. |
+| Python brief-evaluation integrations | `LlmBriefFilter`, `parse_brief_evaluation` and the `bitcast_x.prompts` markdown prompt generators | Use `JevBriefFilter`; `bitcast_x.prompts.build_request` builds the pinned JEV request. |
 
 The retired environment keys are `BITCAST_X_LEGACY_CONNECTIONS_PATH`,
 `BITCAST_X_LEGACY_SNAPSHOTS_PATH`, `BITCAST_X_LEGACY_TWEET_STORE_PATH`,
@@ -54,6 +58,18 @@ nor settles outstanding historical obligations.
 Existing preclaim miners do not need a new history, wallet, batch format or application endpoint
 because of retirement. Changes already on main since software 2.2.0 also retain the direct
 submission grace-period fix and reduce repeated campaign/qualification reads; see the changelog.
+
+JEV changes semantic evaluation for campaigns without frozen positive rewards. Existing frozen
+positive results remain immutable; chat-model cache entries remain stored but are not reused as
+JEV verdicts. Keep `BITCAST_X_OPENROUTER_API_KEY` configured and coordinate validator rollout so
+active campaigns are evaluated with the same release. An unavailable evaluator defers settlement
+for that campaign during the 900-block evidence grace period while other campaigns keep emitting;
+after grace, available tweets can settle without classifying missing evidence as rejected content.
+
+Preview caching now uses `preview.sqlite3`, with a restricted, read-only import of legacy diskcache
+entries. Preserve both caches in the state backup. Featured pins remain fixed without freezing an
+unpaid campaign's contract. Follow the runbook's rollback restriction for older releases when a
+campaign settles at zero after its pinned tweet becomes ineligible.
 
 ## Automatic updates and rollout notice
 

@@ -14,6 +14,15 @@ from bitcast_x.qualification import (
 ROOT = Path(__file__).parents[1]
 
 
+def test_existing_openrouter_environment_key_is_loaded(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BITCAST_X_OPENROUTER_API_KEY", "existing-openrouter-key")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.openrouter_api_key == "existing-openrouter-key"
+    assert "existing-openrouter-key" not in repr(settings)
+
+
 def test_operator_defaults_match_the_published_network() -> None:
     settings = Settings(_env_file=None)
 
@@ -32,7 +41,7 @@ def test_operator_defaults_match_the_published_network() -> None:
     assert settings.auto_update is False
     assert settings.validator_preview_max_concurrency == 2
     # Host identity and secrets are injected at runtime; Loki forwarding waits for its token.
-    for unconfigured in ("public_ip", "desearch_api_key", "llm_api_key", "loki_token"):
+    for unconfigured in ("public_ip", "desearch_api_key", "openrouter_api_key", "loki_token"):
         assert getattr(settings, unconfigured) is None, unconfigured
     assert (settings.loki_url, settings.loki_username) == (
         "https://logs-prod-042.grafana.net",

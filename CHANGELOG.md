@@ -52,6 +52,17 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `history_has_batches`, `start_history` and `submission_id` are removed. `MinerSdk`,
   `MinerControlService` (including its `CampaignSource` fallback), `config.QUALIFICATION_OWNER_HOTKEY`
   and the miner HTTP API are unchanged.
+- Replace chat-model brief evaluation with JEV through OpenRouter. One JEV request per tweet scores the
+  campaign's prompt-version rules (v1, v2, v5, v6) as separate yes/no gates beside a final verdict
+  and a product-identity check; required tags and links are checked in code, and the tweet passes
+  only when every check passes. Each version's request is pinned by a golden digest. Verdicts share
+  the durable evaluation cache, and provider failure defers settlement during the evidence grace
+  period rather than rejecting content. Validators retain their existing
+  `BITCAST_X_OPENROUTER_API_KEY`, which is required when production outputs are enabled; no separate
+  TypeSafe key is needed.
+  `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY` and
+  `BITCAST_X_LLM_NUM_CHECKS` are removed, along with `LlmBriefFilter`, `parse_brief_evaluation`
+  and the `bitcast_x.prompts` markdown prompt generators.
 
 ### Compatibility
 
@@ -83,9 +94,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   reader. An oversized campaign feed previously raised a bare `ValueError`.
 - Validator settings logic lives in `config.py`: one `missing_validator_settings()` rule used by
   the startup check, the economics on/off decision and the PM2 launcher (the copies disagreed on
-  empty strings), and the LLM endpoint and model table. The env templates no longer pin the
-  consensus-relevant LLM check settings or the weight cadence and version key; existing `.env`
-  files that set them keep their values, so remove those lines to follow release defaults.
+  empty strings). All three require the existing OpenRouter key for JEV. The env templates no
+  longer pin the tweet-length limit or the weight cadence and version key; existing `.env` files
+  that set them keep their values, so remove those lines to follow release defaults.
 - Miner claims fetch the central campaign once per request.
 - Miner submission no longer decodes every stored submission, and result polling skips the central
   API when nothing is pending. Batch selection uses one store read and a binary search instead of

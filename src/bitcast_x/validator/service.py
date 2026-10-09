@@ -12,7 +12,7 @@ import uvicorn
 from bittensor.result import BittensorError
 
 from bitcast_x import __version__
-from bitcast_x.brief_filter import LlmBriefFilter
+from bitcast_x.brief_filter import JevBriefFilter
 from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient
 from bitcast_x.chain import BittensorChain
 from bitcast_x.config import Settings
@@ -224,7 +224,7 @@ class ValidatorService:
             settings.missing_validator_settings()
             or qualification_policy is None
             or settings.desearch_api_key is None
-            or settings.llm_api_key is None
+            or settings.openrouter_api_key is None
         ):
             return None
         feed = CampaignFeedClient.from_settings(settings)
@@ -243,17 +243,11 @@ class ValidatorService:
         preview_store = PreviewStore(preview_path)
         stack.callback(preview_store.close)
         preview_provider = PreviewXProvider(x_provider, preview_store)
-        endpoint = settings.llm_endpoint
-        brief_filter = LlmBriefFilter(
-            api_url=endpoint.url,
-            api_key=settings.llm_api_key,
-            model=endpoint.model,
+        brief_filter = JevBriefFilter(
+            api_key=settings.openrouter_api_key,
             cache=store,
-            num_checks=settings.llm_num_checks,
             tweet_max_length=settings.llm_tweet_max_length,
             max_response_bytes=settings.max_response_bytes,
-            timeout=endpoint.timeout,
-            extra_headers=endpoint.headers,
         )
         stack.push_async_callback(brief_filter.close)
         publisher: ShadowResultPublisher | None = None

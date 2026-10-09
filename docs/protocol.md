@@ -258,12 +258,15 @@ zero-value campaigns adopt the current cutoff when retried.
 
 Only accepted attributions that pass the campaign's semantic brief evaluation enter rewards.
 Engagement evidence is taken from the configured X provider and retained provisionally until the
-campaign produces a positive allocation. The
-validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
-passes the tweet. Final scoring waits out the same 900-block grace period; engagement or semantic
-evidence still unavailable after it leaves only that tweet's reward disposition pending, and
-available tweets continue without translating the outage into rejection.
-Prompt text and parsing behavior are shipped in this repository. A new prompt version is dormant
+campaign produces a positive allocation. The validator sends one JEV request per tweet to
+OpenRouter's `/api/v1/systemone` endpoint, using the pinned `typesafe/jev-1.13` model and the
+existing `BITCAST_X_OPENROUTER_API_KEY`. The request carries the brief, the selected version's rules,
+a final verdict, a product-identity check and that version's yes/no rule gates. The validator also
+checks in code that every tag or link the brief explicitly requires is present. The tweet passes
+only when every check passes. Final scoring waits out the same 900-block grace period; engagement
+or semantic evidence still unavailable after it leaves only that tweet's reward disposition
+pending, and available tweets continue without translating the outage into rejection.
+Request text and decision thresholds are shipped in this repository. A new prompt version is dormant
 until selected by a campaign; changing an existing version would change its durable cache key and
 evaluation behavior.
 
@@ -324,8 +327,8 @@ validator. See the [operator runbook](operator-runbook.md).
   HTTP. The draft is private only until its submission is batched.
 - Campaign service: manifest and ecosystem-map requests.
 - X provider: public tweet and engagement lookup identifiers and campaign discovery queries.
-- LLM provider: public tweet text and campaign brief content; no wallet secret or private draft is
-  required for semantic scoring.
+- OpenRouter / TypeSafe JEV: public tweet text and campaign brief content; no wallet secret or
+  private draft is required for semantic scoring.
 - Central ingestion, when explicitly enabled: hotkey-signed frozen campaign, attribution, scoring,
   and reward output.
 - Remote logging, when configured: application log records. Operators must treat logs as potentially
