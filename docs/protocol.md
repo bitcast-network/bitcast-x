@@ -270,6 +270,12 @@ Request text and decision thresholds are shipped in this repository. A new promp
 until selected by a campaign; changing an existing version would change its durable cache key and
 evaluation behavior.
 
+The published `reasoning` explains failed checks in plain language for creators. It does not
+include internal check names or model scores. An overall rejection without a more specific result
+states that no specific unmet requirement was identified. These messages describe the scored
+conditions, not a model-written explanation. Numeric results remain in the validator's durable
+`detailed_breakdown` for audit; wording does not change pass/fail decisions.
+
 The engagement score starts at twice the author's influence. Retweets from considered accounts add
 `1 * influence`; quotes add `3 * influence`. When a positive relationship score exists from an
 engager to the author, that contribution is multiplied by `0.1 + 0.9 / relationship_score`.

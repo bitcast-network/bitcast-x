@@ -75,6 +75,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Changed
 
+- Publish JEV brief-check reasons in plain language for creator dashboards, including missing
+  required mentions and links. Keep model scores in the stored audit breakdown and make generic
+  rejections explicit when no specific unmet requirement is known. Decisions and thresholds are
+  unchanged.
 - Cache the miner qualification snapshot for 60 seconds and reuse a fetched campaign during direct
   submission, reducing repeated upstream reads.
 - Final and preview reconciliation load the verified batch history once per pass, grouped by

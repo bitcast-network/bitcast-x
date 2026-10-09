@@ -133,7 +133,7 @@ def test_decision_accepts_only_when_every_check_passes() -> None:
 
     assert decide(answers(), BRIEF, post).meets_brief
     focus = decide(answers(gate=0.59), BRIEF, post)
-    assert not focus.meets_brief and "focus80 not met" in focus.reasoning
+    assert not focus.meets_brief and "at least 80% of the content" in focus.reasoning
     assert not decide(answers(accept=0.01), BRIEF, post).meets_brief
     assert not decide(answers(mismatch=0.5), BRIEF, post).meets_brief
     missing = decide(answers(), BRIEF, "Bitcast pays creators")

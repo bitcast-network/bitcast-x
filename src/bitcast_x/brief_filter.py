@@ -32,6 +32,25 @@ VERDICT_ACCEPT_MIN = 0.02
 GATE_MIN = 0.6
 IDENTITY_MISMATCH_MAX = 0.5
 
+_GATE_FAILURE_REASONS = {
+    "nonnegative": (
+        "The post did not meet this campaign's requirement for a positive or neutral tone "
+        "toward the sponsor or product."
+    ),
+    "focus80": (
+        "The post does not focus enough on the sponsor or its topic. "
+        "This campaign requires at least 80% of the content to stay on topic."
+    ),
+    "primary": (
+        "The post needs to focus mainly on the product or service, "
+        "or a comparison with alternatives."
+    ),
+    "substance": (
+        "The review needs a specific assessment supported by a reason, example, "
+        "product feature, result, or experience."
+    ),
+}
+
 
 class BriefEvaluation(BaseModel):
     """Frozen outcome of one campaign/tweet content evaluation."""
@@ -105,14 +124,25 @@ def decide(answers: dict[str, Any], brief: str, post: str) -> BriefEvaluation:
     missing = missing_required_items(brief, post)
     failures: list[str] = []
     if mismatch >= IDENTITY_MISMATCH_MAX:
-        failures.append(f"describes a different product (mismatch {mismatch:.2f})")
-    if accept < VERDICT_ACCEPT_MIN:
-        failures.append(f"verdict rejects (accept {accept:.2f})")
+        failures.append(
+            "The post appears to describe a different product or service "
+            "from the one in the campaign brief."
+        )
     failures.extend(
-        f"{name} not met ({value:.2f})" for name, value in gates.items() if value < GATE_MIN
+        _GATE_FAILURE_REASONS[name] for name, value in gates.items() if value < GATE_MIN
     )
-    if missing:
-        failures.append("missing required " + ", ".join(missing))
+    missing_handles = [item for item in missing if item != "link"]
+    if missing_handles:
+        failures.append(
+            "The post is missing required mentions: " + ", ".join(missing_handles) + "."
+        )
+    if "link" in missing:
+        failures.append("The post is missing a link required by the campaign brief.")
+    if accept < VERDICT_ACCEPT_MIN:
+        reason = "The post did not pass the overall brief check."
+        if not failures:
+            reason += " A specific unmet requirement was not identified."
+        failures.insert(0, reason)
     breakdown = json.dumps(
         {
             "verdict_accept": accept,
@@ -124,7 +154,7 @@ def decide(answers: dict[str, Any], brief: str, post: str) -> BriefEvaluation:
     )
     return BriefEvaluation(
         meets_brief=not failures,
-        reasoning="Meets the brief" if not failures else "; ".join(failures),
+        reasoning="The post meets the campaign brief." if not failures else " ".join(failures),
         detailed_breakdown=breakdown,
         checks_used=1,
     )
