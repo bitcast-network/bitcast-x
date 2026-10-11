@@ -199,3 +199,16 @@ async def test_quotes_override_retweets_and_false_quote_search_hits_are_ignored(
 
     assert result.provider_available is True
     assert result.engagements == {"alice": "quote", "bob": "retweet"}
+
+
+async def test_failed_quote_search_keeps_retweeters_but_stays_unavailable() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/retweeters"):
+            return httpx.Response(200, json={"users": [{"username": "Alice"}]})
+        return httpx.Response(503)
+
+    async with desearch(handler, retry_delay=0) as provider:
+        result = await provider.fetch_engagements("123")
+
+    assert result.provider_available is False
+    assert result.engagements == {"alice": "retweet"}

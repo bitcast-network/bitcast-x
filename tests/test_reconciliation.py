@@ -1344,16 +1344,21 @@ async def test_finalization_isolates_an_unavailable_tweet(tmp_path: Path) -> Non
     assert campaign_a_decision["reward_status"] == "pending"
 
 
-async def test_final_scoring_isolates_an_unavailable_tweet(tmp_path: Path) -> None:
+async def test_final_scoring_keeps_a_fetched_tweet_with_incomplete_engagement(
+    tmp_path: Path,
+) -> None:
     store, snapshot, campaign_a, campaign_b = _two_campaign_finalization(tmp_path)
 
     run = await run_rewards(store, _unavailable_998_engagements(), snapshot, block=AFTER_GRACE)
 
-    assert [item.attribution.campaign_id for item in run.scored] == ["campaign-b"]
-    assert store.scored_reconciliation("campaign-a") == []
-    assert store.scored_reconciliation("campaign-b") is not None
+    # The tweet and author are confirmed, so after the grace period the failed
+    # engagement lookup costs only its engagers, never the tweet's baseline reward.
+    assert [item.attribution.campaign_id for item in run.scored] == ["campaign-a", "campaign-b"]
+    [partial] = store.scored_reconciliation("campaign-a") or []
+    assert partial.attribution.tweet_id == "998"
+    assert partial.score == partial.baseline_score > 0
     assert run.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
-    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is None
+    assert store.campaign_rewards("campaign-a", campaign_a.model_dump_json()) is not None
     assert store.campaign_rewards("campaign-b", campaign_b.model_dump_json()) is not None
 
 

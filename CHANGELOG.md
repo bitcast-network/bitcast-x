@@ -138,6 +138,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Validators submit weights before publishing final results. A campaign whose final payload could
   not be built, such as one whose rewarded miner had deregistered, stopped weight submission for
   every campaign until its emission ended.
+- Settlement no longer drops a tweet because its engagement lookup failed. Desearch's quote search
+  stopped answering on 2026-10-09, and once the 900-block grace period ended every affected tweet
+  was settled out of its campaign (15 of `125_exploit`'s 16 accepted tweets), although the tweet
+  and author were confirmed and the baseline they fix is about 95% of a typical score. After the
+  grace period, and in previews, such a tweet is now scored from its baseline and the engagers that
+  were fetched. Tweets whose post cannot be fetched are still left out.
 - Validators submit weights before refreshing open-campaign previews. Previews refetch X evidence
   for every open campaign, and while Desearch's quote search was timing out a preview pass took
   over two hours, so weights waited for it and, because the cadence check reads the cycle's start

@@ -68,7 +68,11 @@ class AttributionScorer:
         *,
         defer_unavailable_tweets: bool = False,
     ) -> list[ScoredAttribution]:
-        """Score accepted results, optionally deferring unavailable tweet evidence."""
+        """Score accepted results, optionally deferring unavailable tweet evidence.
+
+        With ``defer_unavailable_tweets``, a tweet whose post lookup fails is left out,
+        but a confirmed tweet with incomplete engagement is scored with what was fetched.
+        """
 
         accepted = [result for result in attributions if result.accepted]
         tweet_ids = sorted({item.tweet_id for item in accepted})
@@ -78,7 +82,14 @@ class AttributionScorer:
         scored: list[ScoredAttribution] = []
         for item in accepted:
             try:
-                scored.append(self._score_one(context, item, *evidence[item.tweet_id]))
+                scored.append(
+                    self._score_one(
+                        context,
+                        item,
+                        *evidence[item.tweet_id],
+                        incomplete_engagement_ok=defer_unavailable_tweets,
+                    )
+                )
             except ReconciliationUnavailableError as exc:
                 if not defer_unavailable_tweets:
                     raise
@@ -172,14 +183,26 @@ class AttributionScorer:
         attribution: AttributionResult,
         tweet_result: TweetFetch,
         engagement_result: EngagementFetch,
+        *,
+        incomplete_engagement_ok: bool,
     ) -> ScoredAttribution:
         if (
             not tweet_result.provider_available
             or tweet_result.tweet is None
-            or not engagement_result.provider_available
+            or (not engagement_result.provider_available and not incomplete_engagement_ok)
         ):
             raise ReconciliationUnavailableError(
                 f"scoring evidence unavailable for tweet {attribution.tweet_id}"
+            )
+        if not engagement_result.provider_available:
+            # The confirmed tweet and author fix the baseline, which is nearly all of
+            # a score, so a missing engagement lookup only omits some engagers.
+            LOGGER.warning(
+                "scoring tweet with incomplete engagement evidence campaign=%s tweet_id=%s "
+                "engagements=%s",
+                attribution.campaign_id,
+                attribution.tweet_id,
+                len(engagement_result.engagements),
             )
         tweet = tweet_result.tweet
         campaign = next(

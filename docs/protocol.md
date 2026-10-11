@@ -23,8 +23,9 @@ consensus-visible rule.
   mechanism-1 weights.
 - X-data and LLM providers are availability and evidence dependencies. Their failure does not
   become a rejection. Settlement waits up to 900 blocks (three hours) for evidence a provider could
-  not return; after that, an unavailable tweet remains explicitly pending while independently
-  verifiable campaign tweets continue through final scoring and rewards.
+  not return; after that, a tweet whose post cannot be fetched remains explicitly pending while
+  independently verifiable campaign tweets continue through final scoring and rewards, and a
+  fetched tweet with an incomplete engagement lookup is scored with the engagers that were found.
 
 The campaign publisher, X provider, and configured LLM are not decentralized by this protocol.
 Validators independently verify miner history and repeat the scoring rules, but they consume the
@@ -263,9 +264,12 @@ OpenRouter's `/api/v1/systemone` endpoint, using the pinned `typesafe/jev-1.13` 
 existing `BITCAST_X_OPENROUTER_API_KEY`. The request carries the brief, the selected version's rules,
 a final verdict, a product-identity check and that version's yes/no rule gates. The validator also
 checks in code that every tag or link the brief explicitly requires is present. The tweet passes
-only when every check passes. Final scoring waits out the same 900-block grace period; engagement
-or semantic evidence still unavailable after it leaves only that tweet's reward disposition
-pending, and available tweets continue without translating the outage into rejection.
+only when every check passes. Final scoring waits out the same 900-block grace period. After it,
+a tweet whose post is available but whose engagement lookup (retweeters or quote search) is still
+incomplete is scored from its baseline and the engagers that were fetched, because the baseline is
+nearly all of a score. Semantic evidence still unavailable leaves only that tweet's reward
+disposition pending, and available tweets continue without translating the outage into rejection.
+Previews score the same way.
 Request text and decision thresholds are shipped in this repository. A new prompt version is dormant
 until selected by a campaign; changing an existing version would change its durable cache key and
 evaluation behavior.

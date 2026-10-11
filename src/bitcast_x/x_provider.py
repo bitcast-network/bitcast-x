@@ -63,7 +63,10 @@ class TweetFetch(BaseModel):
 
 
 class EngagementFetch(BaseModel):
-    """Normalized max-one-contribution engagement map for v2 scoring."""
+    """Normalized max-one-contribution engagement map for v2 scoring.
+
+    When ``provider_available`` is false the map holds only what could be fetched.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -164,8 +167,6 @@ class DesearchProvider:
         )
         retweeters, retweeters_available = retweeters_result
         quotes, quotes_available = quotes_result
-        if not retweeters_available or not quotes_available:
-            return EngagementFetch(engagements={}, provider_available=False)
         engagements: dict[str, str] = {}
         users = retweeters.get("users", []) if isinstance(retweeters, dict) else []
         for user in users:
@@ -185,7 +186,12 @@ class DesearchProvider:
             parsed = _parse_desearch_tweet(payload)
             if parsed is not None and parsed.quoted_tweet_id == tweet_id:
                 engagements[parsed.author] = "quote"
-        return EngagementFetch(engagements=engagements, provider_available=True)
+        # A failed lookup leaves the result unavailable, so settlement still waits
+        # for complete evidence, but it keeps whatever the other lookup returned.
+        return EngagementFetch(
+            engagements=engagements,
+            provider_available=retweeters_available and quotes_available,
+        )
 
     async def _request_json(
         self, path: str, params: dict[str, Any]

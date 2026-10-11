@@ -80,10 +80,17 @@ class PassingBriefFilter:
         )
 
 
-class SelectivelyUnavailableEngagementX(FakeX):
+class PartialEngagementX(FakeX):
+    """Answers the retweeters lookup for 998 but not its quote search; 997 is gone."""
+
+    async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
+        if tweet_id == "997":
+            return TweetFetch(tweet=None, provider_available=False)
+        return await super().fetch_tweet_by_id(tweet_id)
+
     async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
         if tweet_id == "998":
-            return EngagementFetch(engagements={}, provider_available=False)
+            return EngagementFetch(engagements={"bob": "retweet"}, provider_available=False)
         return await super().fetch_engagements(tweet_id)
 
 
@@ -192,37 +199,41 @@ async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     assert [detail.username for detail in alice.details] == ["carol"]
 
 
-@pytest.mark.parametrize(
-    ("provider", "brief_filter", "error"),
-    [
-        pytest.param(
-            SelectivelyUnavailableEngagementX(),
-            None,
-            "scoring evidence unavailable",
-            id="engagements-unavailable",
-        ),
-        pytest.param(
-            FakeX(),
-            SelectivelyUnavailableBriefFilter(),
-            "provider unavailable",
-            id="brief-check-unavailable",
-        ),
-    ],
-)
-async def test_preview_scoring_defers_only_the_tweet_with_unavailable_evidence(
-    provider: FakeX,
-    brief_filter: PassingBriefFilter | None,
-    error: str,
-) -> None:
+async def test_preview_scoring_defers_only_the_tweet_with_unavailable_brief_check() -> None:
     attributions = [accepted("998"), accepted("999")]
-    scorer = AttributionScorer(provider, brief_filter=brief_filter)
+    scorer = AttributionScorer(FakeX(), brief_filter=SelectivelyUnavailableBriefFilter())
 
-    with pytest.raises(ReconciliationUnavailableError, match=error):
+    with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
         await scorer.score(feed(), attributions)
 
     results = await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
 
     assert [item.attribution.tweet_id for item in results] == ["999"]
+
+
+async def test_incomplete_engagement_waits_then_scores_the_confirmed_tweet() -> None:
+    attributions = [accepted("997"), accepted("998"), accepted("999")]
+    scorer = AttributionScorer(PartialEngagementX())
+
+    # Within the settlement grace period, incomplete evidence keeps the campaign waiting.
+    with pytest.raises(ReconciliationUnavailableError, match="scoring evidence unavailable"):
+        await scorer.score(feed(), attributions)
+
+    results = {
+        item.attribution.tweet_id: item
+        for item in await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
+    }
+
+    # Only the tweet that cannot be fetched is left out; a missing quote search
+    # costs 998 its quote engagers, not its baseline or its retweets.
+    assert sorted(results) == ["998", "999"]
+    partial = results["998"]
+    assert partial.baseline_score == results["999"].baseline_score
+    assert [detail.username for detail in partial.details] == ["bob"]
+    assert partial.score == pytest.approx(
+        partial.baseline_score + partial.details[0].weighted_contribution
+    )
+    assert partial.baseline_score < partial.score < results["999"].score
 
 
 async def test_jev_outage_grace_recovery_and_frozen_rewards_survive_restart(tmp_path: Path) -> None:
