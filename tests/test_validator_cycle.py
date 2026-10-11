@@ -41,7 +41,16 @@ def campaign(campaign_id: str) -> CampaignRecord:
 
 
 @pytest.mark.parametrize(
-    "case", ["empty", "preclaim", "pending_preclaim", "invalid_feed", "preview", "publish_fails"]
+    "case",
+    [
+        "empty",
+        "preclaim",
+        "pending_preclaim",
+        "invalid_feed",
+        "preview",
+        "preview_fails",
+        "publish_fails",
+    ],
 )
 async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     case: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -62,10 +71,11 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         "pending_preclaim": (preclaim, campaign("pending")),
         "invalid_feed": (preclaim,),
         "preview": (open_campaign,),
+        "preview_fails": (preclaim, open_campaign),
         "publish_fails": (preclaim,),
     }[case]
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    if case in {"preclaim", "pending_preclaim", "invalid_feed", "publish_fails"}:
+    if case in {"preclaim", "pending_preclaim", "invalid_feed", "preview_fails", "publish_fails"}:
         frozen = preclaim
         store.bind_campaign_protocols((frozen,))
         store.persist_reconciliation(
@@ -128,11 +138,21 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         discover=AsyncMock(return_value=[]),
         reconcile_all=AsyncMock(return_value=[]),
     )
+    submit = AsyncMock()
+    submitted_before_preview: list[int] = []
+
+    async def reconcile_preview(*_args: object, **_kwargs: object) -> list[object]:
+        # Previews refresh slow, mutable X evidence, so weights must already be out.
+        submitted_before_preview.append(submit.await_count)
+        if case == "preview_fails":
+            raise OSError("X provider stalled")
+        return []
+
     reconciler = SimpleNamespace(
         reconcile_feed=AsyncMock(return_value=[]),
         completed_campaign_ids=frozenset(),
         verified_events=Mock(return_value="events"),
-        reconcile_campaign=AsyncMock(return_value=[]),
+        reconcile_campaign=AsyncMock(side_effect=reconcile_preview),
     )
     # A final payload that cannot be built (for example, a rewarded miner that
     # has since deregistered) must not block weights.
@@ -141,7 +161,6 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         publish=AsyncMock(side_effect=publish_error if case == "publish_fails" else None),
         publish_preview=AsyncMock(),
     )
-    submit = AsyncMock()
     monkeypatch.setattr(
         service,
         "load_wallet",
@@ -185,7 +204,8 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     ).run()
 
     publisher.publish_preview.assert_not_awaited()
-    if case == "preview":
+    if case in {"preview", "preview_fails"}:
+        assert submitted_before_preview == [1]
         reconciler.verified_events.assert_called_once_with(BLOCK)
         assert reconciler.reconcile_campaign.await_args is not None
         assert reconciler.reconcile_campaign.await_args.kwargs == {
@@ -200,6 +220,13 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         publisher.publish.assert_not_awaited()
         submit.assert_not_awaited()
         assert shadow_report(tmp_path) == before
+    elif case == "preview_fails":
+        # A failed preview pass still ends the cycle, but only after weights.
+        publisher.publish.assert_not_awaited()
+        submit.assert_awaited_once()
+        assert submit.await_args is not None
+        assert submit.await_args.args[3] == {0: 0.0, 7: 1.0}
+        assert shadow_report(tmp_path)["shadow_blocks"] == 1
     else:
         publisher.publish.assert_awaited_once()
         # A campaign still waiting to settle gets no weight and holds back no other.

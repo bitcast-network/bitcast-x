@@ -138,6 +138,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Validators submit weights before publishing final results. A campaign whose final payload could
   not be built, such as one whose rewarded miner had deregistered, stopped weight submission for
   every campaign until its emission ended.
+- Validators submit weights before refreshing open-campaign previews. Previews refetch X evidence
+  for every open campaign, and while Desearch's quote search was timing out a preview pass took
+  over two hours, so weights waited for it and, because the cadence check reads the cycle's start
+  block, were submitted only every other cycle.
 - Final result payloads now sign the form ingestion verifies. Payloads rewarding UIDs of different
   digit counts (for example 9 and 10) failed signature verification with 401 and were resent every
   cycle without being accepted.

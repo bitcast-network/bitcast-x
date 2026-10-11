@@ -344,7 +344,7 @@ class ValidatorService:
         economics: _Economics,
         block: int,
     ) -> list[AttributionResult]:
-        """Reconcile and score the feed, submit weights when due, then publish results."""
+        """Score the feed, submit weights when due, then publish previews and results."""
 
         try:
             feed = await economics.feed.fetch()
@@ -372,10 +372,6 @@ class ValidatorService:
             raise ChainOperationError("finalized metagraph is unavailable")
         uids = [int(neuron.uid) for neuron in graph.neurons]
         hotkey_to_uid = {str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons}
-        if economics.publisher is not None:
-            await self._publish_previews(
-                store, economics, economics.publisher, feed, block, hotkey_to_uid
-            )
         weights, floors = economics.rewards.shadow_weights(
             feed,
             scored,
@@ -406,6 +402,13 @@ class ValidatorService:
         # Publish only after weights, so a campaign whose results cannot be
         # published never holds back consensus output for every campaign.
         if economics.publisher is not None:
+            # Previews refresh mutable X evidence for every open campaign, which
+            # can take hours while the provider is degraded. They follow weight
+            # submission so a slow preview pass never delays consensus output or
+            # stretches the weight cadence to every other cycle.
+            await self._publish_previews(
+                store, economics, economics.publisher, feed, block, hotkey_to_uid
+            )
             await economics.publisher.publish(
                 feed,
                 scored,
