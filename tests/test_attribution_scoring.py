@@ -30,6 +30,7 @@ class FakeX:
     def __init__(self) -> None:
         self.tweet_fetches = 0
         self.engagement_fetches = 0
+        self.quote_counts: dict[str, int | None] = {}
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         self.tweet_fetches += 1
@@ -44,8 +45,11 @@ class FakeX:
             provider_available=True,
         )
 
-    async def fetch_engagements(self, _tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         self.engagement_fetches += 1
+        self.quote_counts[tweet_id] = quote_count
         return EngagementFetch(
             engagements={"alice": "retweet", "bob": "retweet", "carol": "quote"},
             provider_available=True,
@@ -88,10 +92,12 @@ class PartialEngagementX(FakeX):
             return TweetFetch(tweet=None, provider_available=False)
         return await super().fetch_tweet_by_id(tweet_id)
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         if tweet_id == "998":
             return EngagementFetch(engagements={"bob": "retweet"}, provider_available=False)
-        return await super().fetch_engagements(tweet_id)
+        return await super().fetch_engagements(tweet_id, quote_count=quote_count)
 
 
 class SelectivelyUnavailableBriefFilter(PassingBriefFilter):
@@ -234,6 +240,17 @@ async def test_incomplete_engagement_waits_then_scores_the_confirmed_tweet() -> 
         partial.baseline_score + partial.details[0].weighted_contribution
     )
     assert partial.baseline_score < partial.score < results["999"].score
+
+
+async def test_engagement_lookup_receives_the_fetched_posts_quote_count() -> None:
+    provider = PartialEngagementX()
+
+    await AttributionScorer(provider).score(
+        feed(), [accepted("997"), accepted("999")], defer_unavailable_tweets=True
+    )
+
+    # 999's post reports no quotes; 997's post could not be fetched, so its count is unknown.
+    assert provider.quote_counts == {"997": None, "999": 0}
 
 
 async def test_jev_outage_grace_recovery_and_frozen_rewards_survive_restart(tmp_path: Path) -> None:

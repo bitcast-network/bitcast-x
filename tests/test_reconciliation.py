@@ -75,7 +75,9 @@ class FakeX:
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         return self.evidence[tweet_id]
 
-    async def fetch_engagements(self, _tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, _tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         return EngagementFetch(engagements={}, provider_available=True)
 
     async def close(self) -> None:
@@ -1230,7 +1232,9 @@ def _unavailable_998_provider() -> FakeX:
 
 
 class _SelectiveEngagementProvider(FakeX):
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         return EngagementFetch(engagements={}, provider_available=tweet_id != "998")
 
 

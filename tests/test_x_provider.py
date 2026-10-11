@@ -212,3 +212,24 @@ async def test_failed_quote_search_keeps_retweeters_but_stays_unavailable() -> N
 
     assert result.provider_available is False
     assert result.engagements == {"alice": "retweet"}
+
+
+@pytest.mark.parametrize(("quote_count", "available"), [(0, True), (3, False)])
+async def test_quote_search_is_skipped_for_a_post_nobody_quoted(
+    quote_count: int, available: bool
+) -> None:
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/retweeters"):
+            return httpx.Response(200, json={"users": [{"username": "Alice"}]})
+        # Desearch holds a search with no matches past the request timeout.
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    async with desearch(handler, retry_delay=0) as provider:
+        result = await provider.fetch_engagements("123", quote_count=quote_count)
+
+    assert result.provider_available is available
+    assert result.engagements == {"alice": "retweet"}
+    assert ("/twitter" in paths) is (quote_count > 0)

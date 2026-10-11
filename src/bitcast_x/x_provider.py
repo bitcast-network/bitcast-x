@@ -79,7 +79,9 @@ class XProvider(Protocol):
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch: ...
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch: ...
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch: ...
 
     async def close(self) -> None: ...
 
@@ -155,18 +157,29 @@ class DesearchProvider:
         tweet = _parse_desearch_tweet(payload)
         return TweetFetch(tweet=tweet, provider_available=tweet is not None)
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
-        """Fetch retweeters and quotes concurrently; quotes override retweets as in v2."""
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
+        """Fetch retweeters and quotes concurrently; quotes override retweets as in v2.
 
-        retweeters_result, quotes_result = await asyncio.gather(
-            self._request_json("/twitter/post/retweeters", {"id": tweet_id}),
-            self._request_json(
-                "/twitter",
-                {"query": f"quoted_tweet_id:{tweet_id}", "sort": "Latest", "count": 100},
-            ),
-        )
-        retweeters, retweeters_available = retweeters_result
-        quotes, quotes_available = quotes_result
+        ``quote_count`` is the post's own quote count when the caller has it. Zero
+        skips the quote search, which can only come back empty.
+        """
+
+        lookups = [self._request_json("/twitter/post/retweeters", {"id": tweet_id})]
+        # Since 2026-10-09 Desearch holds a search with no matches for about 30
+        # seconds before answering, longer than the request timeout, so searching
+        # for quotes of an unquoted post made its engagement unavailable.
+        if quote_count != 0:
+            lookups.append(
+                self._request_json(
+                    "/twitter",
+                    {"query": f"quoted_tweet_id:{tweet_id}", "sort": "Latest", "count": 100},
+                )
+            )
+        results = await asyncio.gather(*lookups)
+        retweeters, retweeters_available = results[0]
+        quotes, quotes_available = results[1] if len(results) > 1 else ([], True)
         engagements: dict[str, str] = {}
         users = retweeters.get("users", []) if isinstance(retweeters, dict) else []
         for user in users:

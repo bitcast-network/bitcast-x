@@ -388,15 +388,16 @@ class PreviewXProvider:
         )
         return effective.result
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         """Fetch new/due engagement identities, preserving the cumulative set."""
 
         current = self._now()
         cached = self._store.preview_engagement_evidence(tweet_id)
         tweet = self._store.preview_tweet_evidence(tweet_id)
-        refresh_interval = (
-            _FEATURED_TWEET_ENGAGEMENT_REFRESH if tweet_id in self._featured_tweet_ids else None
-        )
+        featured = tweet_id in self._featured_tweet_ids
+        refresh_interval = _FEATURED_TWEET_ENGAGEMENT_REFRESH if featured else None
         if cached is not None and not _engagement_refresh_due(
             cached,
             tweet,
@@ -404,7 +405,11 @@ class PreviewXProvider:
             refresh_interval=refresh_interval,
         ):
             return cached.result
-        fresh = await self._upstream.fetch_engagements(tweet_id)
+        # A featured tweet's engagement refreshes faster than its cached post, whose
+        # quote count may be stale, so always search for its quotes.
+        fresh = await self._upstream.fetch_engagements(
+            tweet_id, quote_count=None if featured else quote_count
+        )
         effective = self._store.record_preview_engagement_evidence(
             tweet_id,
             fresh,

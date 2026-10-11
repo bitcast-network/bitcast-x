@@ -24,6 +24,7 @@ class Provider:
         self.tweet_fetches = 0
         self.engagement_fetches = 0
         self.engagement_tweet_ids: list[str] = []
+        self.quote_counts: list[int | None] = []
         self.available = True
         self.tweet_age = tweet_age
 
@@ -43,9 +44,12 @@ class Provider:
             provider_available=True,
         )
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         self.engagement_fetches += 1
         self.engagement_tweet_ids.append(tweet_id)
+        self.quote_counts.append(quote_count)
         if not self.available:
             return EngagementFetch(engagements={}, provider_available=False)
         username = "bob" if self.engagement_fetches > 1 else "alice"
@@ -135,6 +139,22 @@ async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_othe
     await provider.fetch_engagements("101")
 
     assert upstream.engagement_tweet_ids == ["101", "202", "101"]
+
+
+async def test_preview_forwards_quote_count_except_for_featured_tweets(tmp_path: Path) -> None:
+    upstream = Provider()
+    provider = PreviewXProvider(
+        upstream,
+        PreviewStore(tmp_path / "preview.sqlite3"),
+        now=lambda: NOW,
+    )
+    provider.set_featured_tweet_ids({"101"})
+
+    await provider.fetch_engagements("101", quote_count=0)
+    await provider.fetch_engagements("202", quote_count=0)
+
+    # A featured tweet's engagement refreshes hourly, faster than its cached post's quote count.
+    assert upstream.quote_counts == [None, 0]
 
 
 async def test_preview_outage_reuses_evidence_and_retries_once_per_minute(tmp_path: Path) -> None:

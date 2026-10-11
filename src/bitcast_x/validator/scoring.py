@@ -171,10 +171,15 @@ class AttributionScorer:
         tweet_id: str,
     ) -> tuple[TweetFetch, EngagementFetch]:
         async with self._semaphore:
-            tweet, engagements = await asyncio.gather(
-                self._x.fetch_tweet_by_id(tweet_id),
-                self._x.fetch_engagements(tweet_id),
+            tweet = await self._x.fetch_tweet_by_id(tweet_id)
+            # The post's quote count lets the provider skip a quote search that
+            # could only come back empty.
+            quote_count = (
+                tweet.tweet.quote_count
+                if tweet.provider_available and tweet.tweet is not None
+                else None
             )
+            engagements = await self._x.fetch_engagements(tweet_id, quote_count=quote_count)
             return tweet, engagements
 
     def _score_one(

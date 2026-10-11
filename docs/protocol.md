@@ -281,7 +281,8 @@ conditions, not a model-written explanation. Numeric results remain in the valid
 `detailed_breakdown` for audit; wording does not change pass/fail decisions.
 
 The engagement score starts at twice the author's influence. Retweets from considered accounts add
-`1 * influence`; quotes add `3 * influence`. When a positive relationship score exists from an
+`1 * influence`; quotes add `3 * influence`. Quotes come from a quote search, which is skipped when
+the post itself reports a quote count of zero. When a positive relationship score exists from an
 engager to the author, that contribution is multiplied by `0.1 + 0.9 / relationship_score`.
 Self-engagement is excluded. After brief evaluation, passing campaign participants cannot increase
 one another's scores. Influence uses the maximum of the tweet-time value, current considered value,

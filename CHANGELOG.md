@@ -138,12 +138,19 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Validators submit weights before publishing final results. A campaign whose final payload could
   not be built, such as one whose rewarded miner had deregistered, stopped weight submission for
   every campaign until its emission ended.
-- Settlement no longer drops a tweet because its engagement lookup failed. Desearch's quote search
-  stopped answering on 2026-10-09, and once the 900-block grace period ended every affected tweet
-  was settled out of its campaign (15 of `125_exploit`'s 16 accepted tweets), although the tweet
+- Settlement no longer drops a tweet because its engagement lookup failed. From 2026-10-09
+  Desearch's quote search timed out for nearly every tweet (see the next entry), and once the
+  900-block grace period ended every affected tweet was settled out of its campaign (15 of `125_exploit`'s 16 accepted tweets), although the tweet
   and author were confirmed and the baseline they fix is about 95% of a typical score. After the
   grace period, and in previews, such a tweet is now scored from its baseline and the engagers that
   were fetched. Tweets whose post cannot be fetched are still left out.
+- Validators no longer search for quotes of a post whose own quote count is zero. Since 2026-10-09
+  Desearch has held a search with no matches for about 30 seconds before answering, longer than the
+  15-second request timeout, so the quote search for every unquoted post, nearly every campaign
+  tweet, failed and left its engagement unavailable. Scoring now reads the post first and skips
+  the search when the post reports no quotes, which yields the same engagers a completed empty
+  search would. Previews still search for a featured tweet's quotes, because its engagement
+  refreshes hourly while its cached post can be a day old.
 - Validators submit weights before refreshing open-campaign previews. Previews refetch X evidence
   for every open campaign, and while Desearch's quote search was timing out a preview pass took
   over two hours, so weights waited for it and, because the cadence check reads the cycle's start
