@@ -11,7 +11,7 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.pricing import PricingSnapshot
 from bitcast_x.protocol import (
-    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     CampaignAccess,
@@ -155,7 +155,7 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
 
 def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
     designation = CommittedBatch.create(
         miner_hotkey=MINER_B,
         sequence=1,

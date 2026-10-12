@@ -12,7 +12,7 @@ from bitcast_x.errors import ChainOperationError, ProtocolError
 from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.store import EventStatus, MinerStore, OperationMetadata
 from bitcast_x.protocol import (
-    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentEnvelope,
     CommitmentPosition,
@@ -132,10 +132,10 @@ class MinerEngine:
 
         if beneficiary_hotkey == self.miner_hotkey:
             raise ProtocolError("a miner cannot be its own surplus beneficiary")
-        if block < SURPLUS_BENEFICIARY_ACTIVATION_BLOCK:
+        if block < SURPLUS_DESIGNATION_ACTIVATION_BLOCK:
             raise ProtocolError(
                 "surplus beneficiaries activate at block "
-                f"{SURPLUS_BENEFICIARY_ACTIVATION_BLOCK}; current block is {block}"
+                f"{SURPLUS_DESIGNATION_ACTIVATION_BLOCK}; current block is {block}"
             )
         latest = self.store.latest_surplus_beneficiary()
         current = latest.beneficiary_hotkey if latest is not None else None

@@ -19,7 +19,7 @@ from bitcast_x.miner import (
     MinerStore,
 )
 from bitcast_x.protocol import (
-    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentPosition,
     CommittedBatch,
@@ -632,7 +632,7 @@ BENEFICIARY = "5FHneW46xGXgs5mUiveU4sbTyGBzmst2jfFvCw9zThqAXhGK"
 async def test_surplus_beneficiary_designation_commits_beside_claims(tmp_path: Path) -> None:
     sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
     engine = sdk.engine
-    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
 
     with pytest.raises(ProtocolError, match="activate at block"):
         engine.designate_surplus_beneficiary(BENEFICIARY, block=active - 1)

@@ -19,7 +19,7 @@ from bitcast_x.miner.service import (
     is_permitted_validator,
     sync_surplus_beneficiary,
 )
-from bitcast_x.protocol import SURPLUS_BENEFICIARY_ACTIVATION_BLOCK, SurplusBeneficiaryEvent
+from bitcast_x.protocol import SURPLUS_DESIGNATION_ACTIVATION_BLOCK, SurplusBeneficiaryEvent
 from bitcast_x.transport import BATCHES_PATH
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -224,7 +224,7 @@ class BlockChain:
 
 
 async def test_configured_beneficiary_waits_for_activation_then_is_designated() -> None:
-    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
     engine = DesignationEngine()
     chain = BlockChain(active - 1, -1, active)
 
@@ -241,7 +241,7 @@ async def test_configured_beneficiary_waits_for_activation_then_is_designated() 
 
 @pytest.mark.parametrize(
     ("latest", "designated"),
-    [(None, []), (BENEFICIARY, [(None, SURPLUS_BENEFICIARY_ACTIVATION_BLOCK)])],
+    [(None, []), (BENEFICIARY, [(None, SURPLUS_DESIGNATION_ACTIVATION_BLOCK)])],
     ids=["never-designated", "clears-earlier-designation"],
 )
 async def test_unset_beneficiary_only_clears_an_earlier_designation(
@@ -251,7 +251,7 @@ async def test_unset_beneficiary_only_clears_an_earlier_designation(
 
     await sync_surplus_beneficiary(
         engine,  # type: ignore[arg-type]
-        BlockChain(SURPLUS_BENEFICIARY_ACTIVATION_BLOCK),  # type: ignore[arg-type]
+        BlockChain(SURPLUS_DESIGNATION_ACTIVATION_BLOCK),  # type: ignore[arg-type]
         None,
         retry_seconds=0,
     )

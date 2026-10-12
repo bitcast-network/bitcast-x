@@ -18,7 +18,7 @@ from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.chain import BittensorCommitmentSubmitter
 from bitcast_x.miner.engine import BatchPolicy, MinerEngine, MinerSdk
 from bitcast_x.miner.store import MinerStore
-from bitcast_x.protocol import SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+from bitcast_x.protocol import SURPLUS_DESIGNATION_ACTIVATION_BLOCK
 from bitcast_x.qualification import (
     QualificationReader,
 )
@@ -180,19 +180,19 @@ async def sync_surplus_beneficiary(
     while True:
         try:
             block = await chain.current_block()
-            if block >= SURPLUS_BENEFICIARY_ACTIVATION_BLOCK:
-                event_id = engine.designate_surplus_beneficiary(beneficiary_hotkey, block=block)
-                if event_id is not None:
+            if block >= SURPLUS_DESIGNATION_ACTIVATION_BLOCK:
+                if engine.designate_surplus_beneficiary(beneficiary_hotkey, block=block):
+                    # The hotkey is public, but CodeQL treats beneficiary values as
+                    # private data, so the configured value is not repeated here.
                     LOGGER.info(
-                        "queued surplus beneficiary designation beneficiary=%s event_id=%s",
-                        beneficiary_hotkey,
-                        event_id,
+                        "queued surplus beneficiary designation action=%s",
+                        "clear" if beneficiary_hotkey is None else "set",
                     )
                 return
             LOGGER.info(
                 "surplus beneficiary waits for activation block=%s activation_block=%s",
                 block,
-                SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+                SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
             )
         except Exception:
             LOGGER.exception("surplus beneficiary designation failed; retrying")

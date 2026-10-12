@@ -15,7 +15,7 @@ from pydantic import TypeAdapter
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
-    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     CommitmentPosition,
     CommittedBatch,
     SurplusBeneficiaryEvent,
@@ -1114,7 +1114,7 @@ class ValidatorStore:
                   AND json_extract(e.value, '$.kind') = 'surplus_beneficiary'
                 ORDER BY b.block, b.extrinsic_index, CAST(e.key AS INTEGER)
                 """,
-                (SURPLUS_BENEFICIARY_ACTIVATION_BLOCK, through_block),
+                (SURPLUS_DESIGNATION_ACTIVATION_BLOCK, through_block),
             ).fetchall()
         beneficiaries: dict[str, str] = {}
         for row in rows:

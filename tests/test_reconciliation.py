@@ -23,7 +23,7 @@ from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
     MAX_ACTIVE_CLAIMS,
-    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     CampaignAccess,
@@ -1663,7 +1663,7 @@ def test_surplus_beneficiaries_follow_the_latest_designation_from_activation(
     tmp_path: Path,
 ) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
     early = designation_batch(MINER, OTHER_MINER, sequence=1, previous=None)
     other = designation_batch(OTHER_MINER, MINER, sequence=1, previous=None)
     later = designation_batch(MINER, OTHER_MINER, sequence=2, previous=early)
@@ -1690,10 +1690,10 @@ def test_reconciliation_skips_designations_beside_campaign_events(tmp_path: Path
     batch = designation_batch(
         MINER, OTHER_MINER, sequence=1, previous=None, claim=claim_event(reveal)
     )
-    persist_batch(store, batch, block=SURPLUS_BENEFICIARY_ACTIVATION_BLOCK, timestamp=NOW)
+    persist_batch(store, batch, block=SURPLUS_DESIGNATION_ACTIVATION_BLOCK, timestamp=NOW)
 
     events = CampaignReconciler(store, FakeX({}), FakeQualification()).verified_events(
-        SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+        SURPLUS_DESIGNATION_ACTIVATION_BLOCK
     )
 
     assert list(events.by_campaign) == ["campaign"]

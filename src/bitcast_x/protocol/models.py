@@ -26,7 +26,7 @@ CREATOR_BINDING_ACTIVATION_BLOCK: Final = 8_920_000
 # Surplus-beneficiary designations committed before this block are ignored, and
 # miners do not emit them earlier: validators that predate the event quarantine
 # any batch carrying it, so every validator must upgrade before this block.
-SURPLUS_BENEFICIARY_ACTIVATION_BLOCK: Final = 9_420_000
+SURPLUS_DESIGNATION_ACTIVATION_BLOCK: Final = 9_420_000
 # Longest claim draft. A reveal stores the draft NFKC-normalized and every read
 # re-checks this limit, so it bounds the normalized text.
 MAX_DRAFT_CHARS: Final = 20_000
