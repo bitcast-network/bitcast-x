@@ -334,10 +334,12 @@ there is no surplus.
 
 The **pricing snapshot** for a weight block has three inputs. The daily miner emission is
 `7200 x alpha_out_emission x 0.41 x` the mechanism's share of the emission split. Alpha's TAO price
-is the subnet pool's `tao_in / alpha_in`. Both are read from finalized state at that block. TAO/USD
-comes from CoinGecko; a failed request reuses the last quote for up to an hour. A snapshot is fixed
-once per block. When no snapshot is available, all weight is split in floor proportions. That
-still covers floors whenever they are funded, and only the surplus split changes for that cycle.
+is the chain's moving average, `SubnetMovingPrice` (about an eight-hour half-life for SN93), not
+the pool's spot `tao_in / alpha_in`, so one block's trading cannot move it. Both are read from
+finalized state at that block. TAO/USD comes from CoinGecko; a failed request reuses the last quote
+for up to an hour. A snapshot is fixed once per block. When no snapshot is available, all weight is
+split in floor proportions. That still covers floors whenever they are funded, and only the
+surplus split changes for that cycle.
 
 ### Surplus beneficiary
 

@@ -24,6 +24,8 @@ _BLOCKS_PER_DAY = 7200
 # Subnet emission splits 18% to the owner and the rest evenly between miners and validators.
 _MINER_EMISSION_SHARE = 0.41
 _RAO_PER_ALPHA = 1_000_000_000
+# The runtime encodes the moving price as I96F32, with 32 fractional bits.
+_I96F32_ONE = 1 << 32
 _WEIGHT_NONCE_ATTEMPTS = 3
 _WEIGHT_NONCE_RETRY_MIN_MS = 250
 _WEIGHT_NONCE_RETRY_JITTER_MS = 750
@@ -308,10 +310,12 @@ class BittensorChain:
         return coldkey_ss58, target, conviction_rao, self_stake_rao
 
     async def miner_emission_pricing(self, *, block: int) -> tuple[float, float]:
-        """Return this mechanism's daily miner emission in alpha and alpha's pool price in TAO.
+        """Return this mechanism's daily miner emission in alpha and alpha's TAO price.
 
-        Both come from finalized state at ``block``, so every validator reading
-        the same block gets the same values.
+        The price is the chain's moving average (``SubnetMovingPrice``, about an
+        eight-hour half-life), not the pool's spot ratio, so one block's trading
+        cannot move it. Both come from finalized state at ``block``, so every
+        validator reading the same block gets the same values.
         """
 
         client = await self._client.at(block)
@@ -322,13 +326,14 @@ class BittensorChain:
         if not isinstance(dynamic, Mapping) or not isinstance(split, list):
             raise ChainOperationError("subnet emission inputs are unavailable")
         alpha_out_rao = int(dynamic.get("alpha_out_emission", 0))
-        alpha_in_rao = int(dynamic.get("alpha_in", 0))
-        tao_in_rao = int(dynamic.get("tao_in", 0))
+        moving_price = dynamic.get("moving_price")
+        moving_price_bits = (
+            int(moving_price.get("bits", 0)) if isinstance(moving_price, Mapping) else 0
+        )
         split_total = sum(int(item) for item in split)
         if (
             alpha_out_rao <= 0
-            or alpha_in_rao <= 0
-            or tao_in_rao <= 0
+            or moving_price_bits <= 0
             or split_total <= 0
             or self.mechanism_id >= len(split)
             or int(split[self.mechanism_id]) <= 0
@@ -338,7 +343,7 @@ class BittensorChain:
         daily_miner_alpha = (
             _BLOCKS_PER_DAY * (alpha_out_rao / _RAO_PER_ALPHA) * _MINER_EMISSION_SHARE * ratio
         )
-        return daily_miner_alpha, tao_in_rao / alpha_in_rao
+        return daily_miner_alpha, moving_price_bits / _I96F32_ONE
 
     async def submit_commitment(self, wallet: Any, envelope: OnChainEnvelope) -> Any:
         """Submit one finalized raw commitment signed by the miner hotkey."""

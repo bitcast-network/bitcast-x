@@ -80,11 +80,12 @@ campaign settles at zero after its pinned tweet becomes ineligible.
 ## Floor-first weights and surplus beneficiaries
 
 Mechanism-1 weights again cover every miner's USD floors first: each miner's daily floors are
-converted to weight at the block's pricing snapshot (alpha's pool price and the miner emission from
-chain state, and TAO/USD from CoinGecko). The surplus left after floors is split by tweet-score
-share. This replaces the pure score-share allocation and its `weight_score_blend` setting.
-`BITCAST_X_WEIGHT_SCORE_BLEND` is removed and ignored if still set. Validators need outbound HTTPS
-to `api.coingecko.com`; without a price, a cycle's weights fall back to floor proportions.
+converted to weight at the block's pricing snapshot (alpha's moving-average price and the miner
+emission from chain state, and TAO/USD from CoinGecko). The surplus left after floors is split by
+tweet-score share. This replaces the pure score-share allocation and its `weight_score_blend`
+setting. `BITCAST_X_WEIGHT_SCORE_BLEND` is removed and ignored if still set. Validators need
+outbound HTTPS to `api.coingecko.com`; without a price, a cycle's weights fall back to floor
+proportions.
 
 Miners may name a hotkey to receive their surplus weight with
 `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (or the chart's `surplusBeneficiary`). The miner commits the

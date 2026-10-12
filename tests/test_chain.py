@@ -450,12 +450,14 @@ class EmissionClient:
 
 SN93_POOL = {
     "alpha_out_emission": 1_000_000_000,
-    "alpha_in": 1_268_460_652_438_774,
-    "tao_in": 24_487_229_556_909,
+    "alpha_in": 1_272_170_755_675_928,
+    "tao_in": 24_429_192_461_556,
+    # SubnetMovingPrice as the runtime returns it: I96F32 bits.
+    "moving_price": {"bits": 82_305_291},
 }
 
 
-async def test_miner_emission_pricing_reads_pool_and_mechanism_share_at_block() -> None:
+async def test_miner_emission_pricing_reads_moving_price_and_mechanism_share_at_block() -> None:
     client = EmissionClient(SN93_POOL, [1311, 64224])
     chain = BittensorChain(client, netuid=93, mechanism_id=1)
 
@@ -464,13 +466,16 @@ async def test_miner_emission_pricing_reads_pool_and_mechanism_share_at_block() 
     assert client.at_block == 9_266_414
     # 7200 blocks x 1 alpha x 41% miner share x mechanism 1's 98% split.
     assert daily_alpha == pytest.approx(7200 * 0.41 * 64224 / 65535)
-    assert alpha_price_tao == pytest.approx(0.019305, rel=1e-4)
+    # The moving average (82_305_291 / 2**32), not the pool's spot tao_in / alpha_in.
+    assert alpha_price_tao == pytest.approx(0.01916319, rel=1e-6)
+    assert alpha_price_tao != pytest.approx(SN93_POOL["tao_in"] / SN93_POOL["alpha_in"], rel=1e-6)
 
 
 @pytest.mark.parametrize(
     ("dynamic", "split"),
     [
-        ({**SN93_POOL, "alpha_in": 0}, [1311, 64224]),
+        ({**SN93_POOL, "moving_price": {"bits": 0}}, [1311, 64224]),
+        ({key: value for key, value in SN93_POOL.items() if key != "moving_price"}, [1311, 64224]),
         ({**SN93_POOL, "alpha_out_emission": 0}, [1311, 64224]),
         (SN93_POOL, [65535]),
         (SN93_POOL, [65535, 0]),

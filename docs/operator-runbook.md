@@ -54,9 +54,9 @@ the validator logs `scoring tweet with incomplete engagement evidence`.
 ### Floor-first weights and pricing
 
 Weights cover each miner's USD floors before splitting the surplus by score share (see the
-[protocol](protocol.md#floor-first-weights)). Each cycle reads alpha's pool price and the miner
-emission at the finalized block and requests TAO/USD from `api.coingecko.com`, so validators need
-outbound HTTPS to it. A failed request reuses the last quote for up to an hour. After that the
+[protocol](protocol.md#floor-first-weights)). Each cycle reads alpha's moving-average price and the
+miner emission at the finalized block and requests TAO/USD from `api.coingecko.com`, so validators
+need outbound HTTPS to it. A failed request reuses the last quote for up to an hour. After that the
 cycle logs `pricing unavailable; weights follow floor proportions` and splits all weight by floors
 until a price returns. Each block's split (pricing inputs, emission value, total floors, funding
 ratio, and per-UID floor, surplus and donated weight) is stored in the `weight_allocations`
