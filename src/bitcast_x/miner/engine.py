@@ -12,6 +12,7 @@ from bitcast_x.errors import ChainOperationError, ProtocolError
 from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.store import EventStatus, MinerStore, OperationMetadata
 from bitcast_x.protocol import (
+    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentEnvelope,
     CommitmentPosition,
@@ -20,6 +21,7 @@ from bitcast_x.protocol import (
     OnChainEnvelope,
     ProtocolEvent,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
 from bitcast_x.protocol.canonical import canonical_json, normalize_text
 from bitcast_x.transport import (
@@ -116,6 +118,34 @@ class MinerEngine:
             max_pending_bytes=self.policy.max_pending_bytes,
             reveal=reveal,
             metadata=metadata,
+        )
+
+    def designate_surplus_beneficiary(
+        self, beneficiary_hotkey: str | None, *, block: int
+    ) -> str | None:
+        """Queue a surplus-beneficiary designation when it changes the latest one.
+
+        ``None`` clears an earlier designation. Returns the queued event ID, or
+        None when nothing needed to change. Validators that predate the event
+        quarantine any batch carrying it, so it is refused before activation.
+        """
+
+        if beneficiary_hotkey == self.miner_hotkey:
+            raise ProtocolError("a miner cannot be its own surplus beneficiary")
+        if block < SURPLUS_BENEFICIARY_ACTIVATION_BLOCK:
+            raise ProtocolError(
+                "surplus beneficiaries activate at block "
+                f"{SURPLUS_BENEFICIARY_ACTIVATION_BLOCK}; current block is {block}"
+            )
+        latest = self.store.latest_surplus_beneficiary()
+        current = latest.beneficiary_hotkey if latest is not None else None
+        if current == beneficiary_hotkey:
+            return None
+        return self.enqueue(
+            SurplusBeneficiaryEvent(
+                event_id=secrets.token_hex(16),
+                beneficiary_hotkey=beneficiary_hotkey,
+            )
         )
 
     async def commit_ready(self, *, force: bool = False) -> CommittedBatch | None:

@@ -15,8 +15,10 @@ from pydantic import TypeAdapter
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
+    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
     CommitmentPosition,
     CommittedBatch,
+    SurplusBeneficiaryEvent,
 )
 from bitcast_x.protocol.models import AttributionResult
 from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
@@ -437,9 +439,17 @@ class ValidatorStore:
                     """,
                 ),
             )
-            # This table is a rollback-safe additive extension. It deliberately
-            # leaves user_version unchanged so an older binary can ignore it
-            # during rollback while newer binaries recreate it after recovery.
+            # These tables are rollback-safe additive extensions. They deliberately
+            # leave user_version unchanged so an older binary can ignore them
+            # during rollback while newer binaries recreate them after recovery.
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS weight_allocations (
+                    block INTEGER PRIMARY KEY,
+                    allocation_json TEXT NOT NULL
+                )
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS featured_tweet_selections (
@@ -1075,6 +1085,46 @@ class ValidatorStore:
                 """,
                 (block, snapshot_id, payload),
             )
+
+    def persist_weight_allocation(self, block: int, allocation: dict[str, object]) -> None:
+        """Record how a block's weights split into floor, surplus and donated weight."""
+
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO weight_allocations(block, allocation_json) VALUES (?, ?)
+                ON CONFLICT(block) DO UPDATE SET allocation_json = excluded.allocation_json
+                """,
+                (block, json.dumps(allocation, sort_keys=True, separators=(",", ":"))),
+            )
+
+    def surplus_beneficiaries(self, *, through_block: int) -> dict[str, str]:
+        """Return each miner's surplus beneficiary in force at ``through_block``.
+
+        The latest designation committed from the activation block onward wins,
+        in chain order; one with a null beneficiary clears the miner's entry.
+        """
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT b.hotkey, e.value AS event_json
+                FROM verified_batches b, json_each(b.batch_json, '$.events') e
+                WHERE b.block >= ? AND b.block <= ?
+                  AND json_extract(e.value, '$.kind') = 'surplus_beneficiary'
+                ORDER BY b.block, b.extrinsic_index, CAST(e.key AS INTEGER)
+                """,
+                (SURPLUS_BENEFICIARY_ACTIVATION_BLOCK, through_block),
+            ).fetchall()
+        beneficiaries: dict[str, str] = {}
+        for row in rows:
+            event = SurplusBeneficiaryEvent.model_validate_json(row["event_json"])
+            hotkey = str(row["hotkey"])
+            if event.beneficiary_hotkey is None:
+                beneficiaries.pop(hotkey, None)
+            else:
+                beneficiaries[hotkey] = event.beneficiary_hotkey
+        return beneficiaries
 
     def llm_evaluation(self, prompt_hash: str) -> "BriefEvaluation | None":
         """Return one frozen semantic-evaluation result by exact prompt digest."""

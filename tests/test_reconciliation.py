@@ -23,6 +23,7 @@ from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
     MAX_ACTIVE_CLAIMS,
+    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     CampaignAccess,
@@ -32,6 +33,7 @@ from bitcast_x.protocol import (
     DraftReveal,
     MiningProtocol,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
 from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
@@ -386,7 +388,7 @@ async def run_rewards(
         provider,
         FakeQualification(),
     ).reconcile_feed(snapshot, finalized_block=block)
-    coordinator = RewardCoordinator(store, AttributionScorer(provider), score_blend=0.0)
+    coordinator = RewardCoordinator(store, AttributionScorer(provider))
     scored = await coordinator.freeze_scores(snapshot, attributions, block=block)
     weights, floors = coordinator.shadow_weights(
         snapshot,
@@ -1636,3 +1638,67 @@ async def test_independent_restarted_validators_produce_identical_full_shadow_re
     assert reports[0] == reports[1]
     assert reports[0]["campaigns_frozen"] == 1
     assert reports[0]["shadow_blocks"] == 1
+
+
+def designation_batch(
+    miner: str,
+    beneficiary: str | None,
+    *,
+    sequence: int,
+    previous: CommittedBatch | None,
+    claim: ClaimEvent | None = None,
+) -> CommittedBatch:
+    designation = SurplusBeneficiaryEvent(
+        event_id=f"{sequence:02x}" * 16, beneficiary_hotkey=beneficiary
+    )
+    return CommittedBatch.create(
+        miner_hotkey=miner,
+        sequence=sequence,
+        previous_batch_hash=previous.batch_hash if previous is not None else None,
+        events=(claim, designation) if claim is not None else (designation,),
+    )
+
+
+def test_surplus_beneficiaries_follow_the_latest_designation_from_activation(
+    tmp_path: Path,
+) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    early = designation_batch(MINER, OTHER_MINER, sequence=1, previous=None)
+    other = designation_batch(OTHER_MINER, MINER, sequence=1, previous=None)
+    later = designation_batch(MINER, OTHER_MINER, sequence=2, previous=early)
+    cleared = designation_batch(OTHER_MINER, None, sequence=2, previous=other)
+    persist_batch(store, early, block=active - 1, timestamp=NOW)
+    persist_batch(store, other, block=active, timestamp=NOW)
+    persist_batch(store, later, block=active + 1, timestamp=NOW)
+    persist_batch(store, cleared, block=active + 2, timestamp=NOW)
+
+    # A designation committed before activation never takes effect.
+    assert store.surplus_beneficiaries(through_block=active - 1) == {}
+    assert store.surplus_beneficiaries(through_block=active) == {OTHER_MINER: MINER}
+    assert store.surplus_beneficiaries(through_block=active + 1) == {
+        OTHER_MINER: MINER,
+        MINER: OTHER_MINER,
+    }
+    assert store.surplus_beneficiaries(through_block=active + 2) == {MINER: OTHER_MINER}
+    store.close()
+
+
+def test_reconciliation_skips_designations_beside_campaign_events(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    reveal = DraftReveal(claim_id="0a" * 16, draft="A draft", nonce="0b" * 32)
+    batch = designation_batch(
+        MINER, OTHER_MINER, sequence=1, previous=None, claim=claim_event(reveal)
+    )
+    persist_batch(store, batch, block=SURPLUS_BENEFICIARY_ACTIVATION_BLOCK, timestamp=NOW)
+
+    events = CampaignReconciler(store, FakeX({}), FakeQualification()).verified_events(
+        SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    )
+
+    assert list(events.by_campaign) == ["campaign"]
+    assert [item.claim.claim_id for item in events.by_campaign["campaign"].claims] == [
+        reveal.claim_id
+    ]
+    assert events.by_campaign["campaign"].submissions == []
+    store.close()

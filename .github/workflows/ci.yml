@@ -62,6 +62,12 @@ jobs:
           helm template t . $required --set mode=run-miner-api --set minerApi.existingSecret=api > /dev/null
           helm template t . $required --set service.type=NodePort --set port=30095 \
             | grep -q "nodePort: 30095"
+          helm template t . $required --set surplusBeneficiary=5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY \
+            -s templates/deployment.yaml | grep -q "name: BITCAST_X_MINER_SURPLUS_BENEFICIARY"
+          if helm template t . $required -s templates/deployment.yaml \
+              | grep -q BITCAST_X_MINER_SURPLUS_BENEFICIARY; then
+            echo "an unset surplus beneficiary must not reach the container"; exit 1
+          fi
           # extraVolumes/extraVolumeMounts reach the pod spec verbatim.
           helm template t . $required \
             --set-json 'extraVolumes=[{"name":"cfg","configMap":{"name":"c"}}]' \

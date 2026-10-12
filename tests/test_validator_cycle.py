@@ -1,5 +1,7 @@
 """Exercise economic output gating through a complete offline validator cycle."""
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +12,7 @@ import pytest
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.config import Settings
 from bitcast_x.errors import ProtocolError
+from bitcast_x.pricing import PricingSnapshot
 from bitcast_x.protocol import CampaignAccess, MiningProtocol
 from bitcast_x.rewards import TweetReward
 from bitcast_x.state import shadow_report
@@ -191,6 +194,15 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     )
     monkeypatch.setattr(service, "ShadowResultPublisher", lambda *_args, **_kwargs: publisher)
     monkeypatch.setattr(service, "submit_weights_if_due", submit)
+    pricing = SimpleNamespace(
+        snapshot=AsyncMock(
+            return_value=PricingSnapshot(
+                block=BLOCK, daily_miner_alpha=2893.0, alpha_price_tao=0.02, tao_price_usd=300.0
+            )
+        ),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(service, "PricingService", lambda *_args, **_kwargs: pricing)
 
     await service.ValidatorService(
         Settings(
@@ -236,3 +248,19 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
         expected = {0: 0.0, 7: 1.0} if frozen_rewards else {0: 1.0, 7: 0.0}
         assert submit.await_args.args[3] == expected
         assert shadow_report(tmp_path)["shadow_blocks"] == 1
+        pricing.snapshot.assert_awaited_once_with(BLOCK)
+        connection = sqlite3.connect(tmp_path / "validator.sqlite3")
+        try:
+            row = connection.execute(
+                "SELECT allocation_json FROM weight_allocations WHERE block = ?", (BLOCK,)
+            ).fetchone()
+        finally:
+            connection.close()
+        allocation = json.loads(row[0])
+        assert allocation["pricing"] == {
+            "daily_miner_alpha": 2893.0,
+            "alpha_price_tao": 0.02,
+            "tao_price_usd": 300.0,
+        }
+        # The frozen floors are far below the $17,358 emission value.
+        assert allocation["funding_ratio"] == (1.0 if frozen_rewards else None)

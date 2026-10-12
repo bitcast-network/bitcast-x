@@ -4,15 +4,20 @@ import logging
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
+from numpy.typing import NDArray
+
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ReconciliationUnavailableError
+from bitcast_x.pricing import PricingSnapshot
 from bitcast_x.protocol import AttributionResult
 from bitcast_x.rewards import (
     FeaturedTweetCandidate,
     RewardCampaign,
     RewardTweet,
     TweetReward,
-    aggregate_productive_weights,
+    WeightAllocation,
+    allocate_floor_first_weights,
     apply_v2_featured_bonus,
     apply_v2_performance_bonus,
     assign_tweets_with_reasons,
@@ -125,19 +130,19 @@ def active_emission_campaigns(
 
 
 class RewardCoordinator:
-    """Bridge frozen attribution into seven-day productive miner weights."""
+    """Bridge frozen attribution into seven-day floor-first miner weights."""
 
-    def __init__(
-        self,
-        store: ValidatorStore,
-        scorer: AttributionScorer,
-        *,
-        score_blend: float,
-    ) -> None:
+    def __init__(self, store: ValidatorStore, scorer: AttributionScorer) -> None:
         self.store = store
         self._scorer = scorer
-        self._score_blend = score_blend
         self._completed_campaign_ids: frozenset[str] | None = None
+        self._last_allocation: WeightAllocation | None = None
+
+    @property
+    def last_allocation(self) -> WeightAllocation | None:
+        """Return the floor/surplus breakdown behind the latest weight vector."""
+
+        return self._last_allocation
 
     @property
     def completed_campaign_ids(self) -> frozenset[str]:
@@ -205,8 +210,13 @@ class RewardCoordinator:
         hotkey_to_uid: dict[str, int],
         uids: list[int],
         persist: bool = True,
+        pricing: PricingSnapshot | None = None,
     ) -> tuple[dict[int, float], list[TweetReward]]:
-        """Calculate and audit the current vector without an on-chain write."""
+        """Calculate and audit the current vector without an on-chain write.
+
+        ``pricing`` converts USD floors into weight. Without it every miner is
+        weighted in floor proportions and no surplus is donated.
+        """
 
         by_campaign: dict[str, list[ScoredAttribution]] = {}
         for item in scored:
@@ -272,10 +282,16 @@ class RewardCoordinator:
                 decisions=[item for item in decisions if item.campaign_id == campaign_id],
             )
         floors = frozen_floors + new_floors
-        vector = aggregate_productive_weights(
-            floors, hotkey_to_uid, uids, score_blend=self._score_blend
+        allocation = allocate_floor_first_weights(
+            floors,
+            hotkey_to_uid,
+            uids,
+            emission_value_usd=pricing.emission_value_usd if pricing is not None else None,
+            surplus_beneficiaries=self.store.surplus_beneficiaries(through_block=block),
         )
-        weights = {uid: float(vector[index]) for index, uid in enumerate(uids)}
+        self._last_allocation = allocation
+        _log_allocation(allocation, block=block, priced=pricing is not None)
+        weights = {uid: float(allocation.weights[index]) for index, uid in enumerate(uids)}
         if persist:
             self.store.persist_shadow_weights(block, feed.snapshot_id, weights)
         return weights, floors
@@ -334,6 +350,57 @@ class RewardCoordinator:
         if self._completed_campaign_ids is None:
             return self.store.campaign_reconciled(campaign_id)
         return campaign_id in self._completed_campaign_ids
+
+
+def allocation_record(
+    allocation: WeightAllocation,
+    uids: list[int],
+    pricing: PricingSnapshot | None,
+) -> dict[str, object]:
+    """Return a JSON-ready audit record of one block's floor-first allocation."""
+
+    def by_uid(values: NDArray[np.float64]) -> dict[str, float]:
+        return {str(uid): float(value) for uid, value in zip(uids, values, strict=True) if value}
+
+    return {
+        "pricing": (
+            {
+                "daily_miner_alpha": pricing.daily_miner_alpha,
+                "alpha_price_tao": pricing.alpha_price_tao,
+                "tao_price_usd": pricing.tao_price_usd,
+            }
+            if pricing is not None
+            else None
+        ),
+        "emission_value_usd": allocation.emission_value_usd,
+        "total_floors_usd": allocation.total_floors_usd,
+        "funding_ratio": allocation.funding_ratio,
+        "floor_weights": by_uid(allocation.floor_weights),
+        "surplus_weights": by_uid(allocation.surplus_weights),
+        "donated_weights": by_uid(allocation.donated_weights),
+    }
+
+
+def _log_allocation(allocation: WeightAllocation, *, block: int, priced: bool) -> None:
+    if allocation.total_floors_usd <= 0:
+        return
+    if not priced:
+        LOGGER.warning(
+            "pricing unavailable; weights follow floor proportions block=%s total_floors_usd=%.2f",
+            block,
+            allocation.total_floors_usd,
+        )
+        return
+    LOGGER.info(
+        "floor-first weights block=%s emission_value_usd=%.2f total_floors_usd=%.2f "
+        "funding_ratio=%.4f surplus_weight=%.6f donated_weight=%.6f",
+        block,
+        allocation.emission_value_usd or 0.0,
+        allocation.total_floors_usd,
+        allocation.funding_ratio or 0.0,
+        float(allocation.surplus_weights.sum()),
+        float(allocation.donated_weights.sum()),
+    )
 
 
 def _reward_tweet(

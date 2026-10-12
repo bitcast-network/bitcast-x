@@ -5,9 +5,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from pydantic import TypeAdapter
+from pytest import approx
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
-from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
+from bitcast_x.chain import ChainCommitment
+from bitcast_x.pricing import PricingSnapshot
+from bitcast_x.protocol import (
+    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+    AttributionReason,
+    AttributionResult,
+    CampaignAccess,
+    CommitmentEnvelope,
+    CommittedBatch,
+    MiningProtocol,
+    SurplusBeneficiaryEvent,
+)
 from bitcast_x.rewards import RewardDecision
 from bitcast_x.validator.rewards import RewardCoordinator, preview_performance_rewards
 from bitcast_x.validator.scoring import ScoredAttribution
@@ -84,7 +96,6 @@ def reward_coordinator(
     return RewardCoordinator(
         store,
         scorer if scorer is not None else UnusedScorer(),  # type: ignore[arg-type]
-        score_blend=0.0,
     )
 
 
@@ -140,6 +151,55 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
 
     assert weights == {0: 0.0, 1: 0.5, 2: 0.5}
     assert [item.daily_usd_floor for item in floors] == [100.0, 100.0]
+
+
+def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    designation = CommittedBatch.create(
+        miner_hotkey=MINER_B,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(SurplusBeneficiaryEvent(event_id="0c" * 16, beneficiary_hotkey=MINER_A),),
+    )
+    store.persist_verified(
+        designation,
+        ChainCommitment(
+            hotkey=MINER_B,
+            block=active,
+            extrinsic_index=1,
+            timestamp=NOW,
+            envelope=CommitmentEnvelope(
+                sequence=1, event_count=1, batch_hash=bytes.fromhex(designation.batch_hash)
+            ),
+        ),
+    )
+    window = {"emission_start_block": active, "emission_end_block": active + 10}
+    coordinator = reward_coordinator(store)
+
+    weights, floors = coordinator.shadow_weights(
+        campaign_feed(
+            record("open").model_copy(update=window),
+            record("exclusive", exclusive=MINER_B).model_copy(update=window),
+        ),
+        [scored("open", "1", MINER_A), scored("exclusive", "2", MINER_B, score=30.0)],
+        block=active + 5,
+        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
+        uids=[0, 1, 2],
+        # One day of miner emission is worth $1000; floors are $100 each.
+        pricing=PricingSnapshot(
+            block=active + 5, daily_miner_alpha=1000.0, alpha_price_tao=0.01, tao_price_usd=100.0
+        ),
+    )
+
+    assert [item.daily_usd_floor for item in floors] == [100.0, 100.0]
+    allocation = coordinator.last_allocation
+    assert allocation is not None
+    assert allocation.floor_weights.tolist() == approx([0.0, 0.1, 0.1])
+    # Miner B earned 75% of the 0.8 surplus and gives it to miner A, keeping its floor.
+    assert allocation.donated_weights.tolist() == approx([0.0, 0.0, 0.6])
+    assert weights == approx({0: 0.0, 1: 0.9, 2: 0.1})
+    assert weights[2] * 1000.0 == approx(100.0)
 
 
 def test_outside_emission_window_burns_without_provisional_payment(tmp_path: Path) -> None:

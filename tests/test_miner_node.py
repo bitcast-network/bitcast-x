@@ -13,10 +13,13 @@ from bitcast_x.config import Settings
 from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.service import (
     advertise_endpoint,
+    check_surplus_beneficiary,
     commit_until,
     create_protocol_app,
     is_permitted_validator,
+    sync_surplus_beneficiary,
 )
+from bitcast_x.protocol import SURPLUS_BENEFICIARY_ACTIVATION_BLOCK, SurplusBeneficiaryEvent
 from bitcast_x.transport import BATCHES_PATH
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -183,3 +186,82 @@ async def test_successful_advertisement_does_not_read_the_metagraph() -> None:
     await advertise_endpoint(chain, WALLET, ip="203.0.113.10", port=8093)  # type: ignore[arg-type]
 
     assert chain.metagraph_reads == 0
+
+
+# A checksum-valid ss58 hotkey, as the beneficiary setting requires.
+BENEFICIARY = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+
+
+class DesignationEngine:
+    """Record designations the way MinerEngine would, without a database."""
+
+    miner_hotkey = MINER
+
+    def __init__(self, latest: str | None = None) -> None:
+        self.designated: list[tuple[str | None, int]] = []
+        self.store = SimpleNamespace(
+            latest_surplus_beneficiary=lambda: (
+                SurplusBeneficiaryEvent(event_id="01" * 16, beneficiary_hotkey=latest)
+                if latest is not None
+                else None
+            )
+        )
+
+    def designate_surplus_beneficiary(self, beneficiary: str | None, *, block: int) -> str:
+        self.designated.append((beneficiary, block))
+        return "02" * 16
+
+
+class BlockChain:
+    def __init__(self, *blocks: int) -> None:
+        self.blocks = list(blocks)
+
+    async def current_block(self) -> int:
+        block = self.blocks.pop(0)
+        if block < 0:
+            raise ChainOperationError("chain unavailable")
+        return block
+
+
+async def test_configured_beneficiary_waits_for_activation_then_is_designated() -> None:
+    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+    engine = DesignationEngine()
+    chain = BlockChain(active - 1, -1, active)
+
+    await sync_surplus_beneficiary(
+        engine,  # type: ignore[arg-type]
+        chain,  # type: ignore[arg-type]
+        BENEFICIARY,
+        retry_seconds=0,
+    )
+
+    assert engine.designated == [(BENEFICIARY, active)]
+    assert chain.blocks == []
+
+
+@pytest.mark.parametrize(
+    ("latest", "designated"),
+    [(None, []), (BENEFICIARY, [(None, SURPLUS_BENEFICIARY_ACTIVATION_BLOCK)])],
+    ids=["never-designated", "clears-earlier-designation"],
+)
+async def test_unset_beneficiary_only_clears_an_earlier_designation(
+    latest: str | None, designated: list[tuple[str | None, int]]
+) -> None:
+    engine = DesignationEngine(latest)
+
+    await sync_surplus_beneficiary(
+        engine,  # type: ignore[arg-type]
+        BlockChain(SURPLUS_BENEFICIARY_ACTIVATION_BLOCK),  # type: ignore[arg-type]
+        None,
+        retry_seconds=0,
+    )
+
+    assert engine.designated == designated
+
+
+def test_miner_cannot_configure_itself_as_surplus_beneficiary() -> None:
+    check_surplus_beneficiary(
+        Settings(_env_file=None, miner_surplus_beneficiary=BENEFICIARY), MINER
+    )
+    with pytest.raises(ValueError, match="own hotkey"):
+        check_surplus_beneficiary(Settings(_env_file=None, miner_surplus_beneficiary=MINER), MINER)

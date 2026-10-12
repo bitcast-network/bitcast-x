@@ -63,6 +63,10 @@ wallet:
   # keyfile is for any other key (entrypoint.sh, BITCAST_X_EXPECTED_HOTKEY).
   expectedHotkey: ""
 
+# Optional: the SS58 hotkey that receives this miner's surplus weight (emission beyond the
+# USD floors it owes creators). Removing it later clears the designation.
+surplusBeneficiary: ""
+
 # run-miner-api only: the bearer token for /api/v1, at least 256 bits of entropy.
 minerApi:
   existingSecret: ""

@@ -1,8 +1,8 @@
 # Bitcast X v3 protocol
 
 This document is the self-contained protocol overview for the Bitcast X miner and validator in
-this repository. It covers SN93 mechanism 1, the `preclaim_v2` mining path, the temporary
-scoring and weight construction. No external source repository is
+this repository. It covers SN93 mechanism 1, the `preclaim_v2` mining path, scoring, and
+floor-first weight construction. No external source repository is
 required to understand or implement the released behavior.
 
 The exact schemas and formulas shipped by a release are authoritative. Their primary source files
@@ -27,7 +27,12 @@ consensus-visible rule.
   independently verifiable campaign tweets continue through final scoring and rewards, and a
   fetched tweet with an incomplete engagement lookup is scored with the engagers that were found.
 
-The campaign publisher, X provider, and configured LLM are not decentralized by this protocol.
+- The TAO/USD price is an external input to weights. Alpha's TAO price and the miner emission are
+  read from finalized chain state. When the TAO/USD price is unavailable, weights fall back to floor
+  proportions rather than failing the cycle.
+
+The campaign publisher, X provider, configured LLM, and TAO/USD price source are not decentralized
+by this protocol.
 Validators independently verify miner history and repeat the scoring rules, but they consume the
 same published campaign input and external public-content evidence.
 
@@ -43,6 +48,7 @@ Several version numbers cover different boundaries and must not be conflated:
 | Claim event | `2` | Strict claim schema and draft-commitment hashing |
 | Batch content and envelope | `2` or `3` | Version 3 identifies a post-recovery history; version 2 is historical replay |
 | Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
+| Surplus-beneficiary event | `1` | Names the hotkey that receives a miner's surplus weight; honored from block `9,420,000` |
 | Campaign mining mode | `preclaim_v2` | Uses committed claims and submissions; legacy campaigns are retired |
 
 The strict wire models are in
@@ -302,7 +308,58 @@ Reward construction then:
    accounts when it still qualifies;
 5. divides the daily budget in proportion to `max(score, 0) ** 0.65` and freezes the per-tweet
    daily USD floors;
-6. sums floors by miner UID and normalizes them into the mechanism-1 weight vector.
+6. builds the mechanism-1 weight vector floor-first, as described below.
+
+### Floor-first weights
+
+Each accepted tweet's frozen daily USD **floor** is what its miner owes the creator for each day of
+the campaign's seven-day emission window. A **miner's floor** is the sum over its tweets in campaigns
+whose emission window contains the weight block, counting each `(campaign, tweet)` once. Weights
+cover every miner's floors in USD before anything else:
+
+```text
+V = daily miner emission (alpha) x alpha price (USD)       # emission value
+F = sum of miner floors (USD per day)
+funding ratio = min(1, V / F)
+
+floor weight_i   = floor_i / V                 when V > F
+surplus weight_i = (1 - F / V) x score share_i when V > F
+weight_i         = floor weight_i + surplus weight_i
+```
+
+The **surplus**, the emission value left after floors, is split by **score share**: each miner's
+share of the unique tweet scores behind those floors (or by floors when no score is positive).
+When `V <= F` (a **shortfall**) every miner receives `floor_i / F`: floors are paid pro rata and
+there is no surplus.
+
+The **pricing snapshot** for a weight block has three inputs. The daily miner emission is
+`7200 x alpha_out_emission x 0.41 x` the mechanism's share of the emission split. Alpha's TAO price
+is the subnet pool's `tao_in / alpha_in`. Both are read from finalized state at that block. TAO/USD
+comes from CoinGecko; a failed request reuses the last quote for up to an hour. A snapshot is fixed
+once per block. When no snapshot is available, all weight is split in floor proportions. That
+still covers floors whenever they are funded, and only the surplus split changes for that cycle.
+
+### Surplus beneficiary
+
+A miner may commit a `surplus_beneficiary` event in its ordinary batch history:
+
+```json
+{"version": 1, "kind": "surplus_beneficiary", "event_id": "<128-bit hex>",
+ "beneficiary_hotkey": "<ss58 hotkey or null>"}
+```
+
+The batch's miner hotkey is the donor. The latest designation in chain order (block, extrinsic,
+event index) stays in force until replaced, and a null `beneficiary_hotkey` clears it. Validators
+ignore designations committed before block `9,420,000`. Validators that predate this event
+quarantine any batch carrying it, so every validator must upgrade first, and the reference miner
+refuses to emit it earlier.
+
+At weight time a donor keeps its floor weight and gives its surplus weight to the beneficiary's UID.
+The beneficiary may be any registered hotkey, including the burn UID. Each donation moves only the
+donor's own surplus, computed before any donation, so chains and cycles never pass weight on twice.
+An unregistered beneficiary, a self-designation, a shortfall or an unpriced cycle donates nothing.
+The reference miner commits the hotkey configured in `BITCAST_X_MINER_SURPLUS_BENEFICIARY` once it
+differs from the miner's latest designation; unsetting it commits a clearing event.
 
 If no `preclaim_v2` miner has productive content, its standalone fallback assigns the vector to
 burn UID 0. The formulas are in [`src/bitcast_x/scoring.py`](../src/bitcast_x/scoring.py) and
@@ -340,6 +397,8 @@ validator. See the [operator runbook](operator-runbook.md).
 - X provider: public tweet and engagement lookup identifiers and campaign discovery queries.
 - OpenRouter / TypeSafe JEV: public tweet text and campaign brief content; no wallet secret or
   private draft is required for semantic scoring.
+- CoinGecko: one TAO/USD price request per validator weight cycle; nothing is sent beyond the
+  request.
 - Central ingestion, when explicitly enabled: hotkey-signed frozen campaign, attribution, scoring,
   and reward output.
 - Remote logging, when configured: application log records. Operators must treat logs as potentially

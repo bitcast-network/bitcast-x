@@ -25,6 +25,7 @@ from bitcast_x.errors import (
 from bitcast_x.logging import configure_loki_logging, shutdown_loki_logging
 from bitcast_x.miner.service import load_wallet
 from bitcast_x.ops import RuntimeHealth, create_ops_app
+from bitcast_x.pricing import PricingService
 from bitcast_x.protocol import AttributionResult
 from bitcast_x.publishing import DataPublisher
 from bitcast_x.qualification import (
@@ -43,7 +44,7 @@ from bitcast_x.validator.preview import (
 )
 from bitcast_x.validator.publishing import ShadowResultPublisher
 from bitcast_x.validator.reconciliation import CampaignReconciler
-from bitcast_x.validator.rewards import RewardCoordinator
+from bitcast_x.validator.rewards import RewardCoordinator, allocation_record
 from bitcast_x.validator.scoring import AttributionScorer
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import DesearchProvider
@@ -113,6 +114,7 @@ class _Economics:
     schedule: QualificationSchedule
     reconciler: CampaignReconciler
     rewards: RewardCoordinator
+    pricing: PricingService
     preview_provider: PreviewXProvider
     preview_reconciler: CampaignReconciler
     preview_scorer: AttributionScorer
@@ -250,6 +252,8 @@ class ValidatorService:
             max_response_bytes=settings.max_response_bytes,
         )
         stack.push_async_callback(brief_filter.close)
+        pricing = PricingService(chain, timeout=settings.request_timeout_seconds)
+        stack.push_async_callback(pricing.close)
         publisher: ShadowResultPublisher | None = None
         if settings.enable_data_publish:
             data_publisher = DataPublisher(wallet, timeout=settings.request_timeout_seconds)
@@ -271,8 +275,8 @@ class ValidatorService:
                     brief_filter=brief_filter,
                     max_concurrency=settings.validator_max_concurrency,
                 ),
-                score_blend=settings.weight_score_blend,
             ),
+            pricing=pricing,
             preview_provider=preview_provider,
             preview_reconciler=CampaignReconciler(store, preview_provider, qualification),
             preview_scorer=AttributionScorer(
@@ -372,6 +376,7 @@ class ValidatorService:
             raise ChainOperationError("finalized metagraph is unavailable")
         uids = [int(neuron.uid) for neuron in graph.neurons]
         hotkey_to_uid = {str(neuron.hotkey): int(neuron.uid) for neuron in graph.neurons}
+        pricing = await economics.pricing.snapshot(block)
         weights, floors = economics.rewards.shadow_weights(
             feed,
             scored,
@@ -379,6 +384,7 @@ class ValidatorService:
             hotkey_to_uid=hotkey_to_uid,
             uids=uids,
             persist=False,
+            pricing=pricing,
         )
         pending = economics.rewards.pending_reward_campaign_ids(feed, block=block)
         if pending:
@@ -389,6 +395,9 @@ class ValidatorService:
                 ",".join(pending),
             )
         store.persist_shadow_weights(block, feed.snapshot_id, weights)
+        allocation = economics.rewards.last_allocation
+        if allocation is not None:
+            store.persist_weight_allocation(block, allocation_record(allocation, uids, pricing))
         if self.settings.enable_weight_submission:
             await submit_weights_if_due(
                 chain,

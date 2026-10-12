@@ -18,12 +18,14 @@ from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.chain import BittensorCommitmentSubmitter
 from bitcast_x.miner.engine import BatchPolicy, MinerEngine, MinerSdk
 from bitcast_x.miner.store import MinerStore
+from bitcast_x.protocol import SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
 from bitcast_x.qualification import (
     QualificationReader,
 )
 from bitcast_x.transport import BatchProvider, ReadinessProvider, create_miner_app
 
 LOGGER = logging.getLogger(__name__)
+SURPLUS_BENEFICIARY_RETRY_SECONDS = 300.0
 
 
 def load_wallet(settings: Settings) -> Any:
@@ -153,6 +155,50 @@ async def commit_until(
         await asyncio.sleep(min(0.5, settings.batch_max_age_seconds / 2))
 
 
+def check_surplus_beneficiary(settings: Settings, miner_hotkey: str) -> None:
+    """Reject a configured surplus beneficiary that is the miner itself."""
+
+    if settings.miner_surplus_beneficiary == miner_hotkey:
+        raise ValueError("BITCAST_X_MINER_SURPLUS_BENEFICIARY cannot be the miner's own hotkey")
+
+
+async def sync_surplus_beneficiary(
+    engine: MinerEngine,
+    chain: BittensorChain,
+    beneficiary_hotkey: str | None,
+    *,
+    retry_seconds: float = SURPLUS_BENEFICIARY_RETRY_SECONDS,
+) -> None:
+    """Queue the configured surplus beneficiary once the chain reaches activation.
+
+    An unset beneficiary clears an earlier designation. The batching loop then
+    commits the queued event like any other.
+    """
+
+    if beneficiary_hotkey is None and engine.store.latest_surplus_beneficiary() is None:
+        return
+    while True:
+        try:
+            block = await chain.current_block()
+            if block >= SURPLUS_BENEFICIARY_ACTIVATION_BLOCK:
+                event_id = engine.designate_surplus_beneficiary(beneficiary_hotkey, block=block)
+                if event_id is not None:
+                    LOGGER.info(
+                        "queued surplus beneficiary designation beneficiary=%s event_id=%s",
+                        beneficiary_hotkey,
+                        event_id,
+                    )
+                return
+            LOGGER.info(
+                "surplus beneficiary waits for activation block=%s activation_block=%s",
+                block,
+                SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
+            )
+        except Exception:
+            LOGGER.exception("surplus beneficiary designation failed; retrying")
+        await asyncio.sleep(retry_seconds)
+
+
 class ReferenceMiner:
     """Serve batches, advertise the endpoint, and continuously pace queued events."""
 
@@ -166,6 +212,7 @@ class ReferenceMiner:
     async def run(self) -> None:
         """Run until interrupted, preserving queued work and cleanly closing chain I/O."""
 
+        check_surplus_beneficiary(self.settings, self.sdk.engine.miner_hotkey)
         app = create_protocol_app(
             self.settings,
             miner_hotkey=self.sdk.engine.miner_hotkey,
@@ -182,6 +229,7 @@ class ReferenceMiner:
             )
         )
         server_task = asyncio.create_task(server.serve())
+        beneficiary_task: asyncio.Task[None] | None = None
         try:
             while not server.started:
                 if server_task.done():
@@ -202,9 +250,18 @@ class ReferenceMiner:
                 self.settings.public_ip,
                 self.settings.port,
             )
+            beneficiary_task = asyncio.create_task(
+                sync_surplus_beneficiary(
+                    self.sdk.engine, self.chain, self.settings.miner_surplus_beneficiary
+                )
+            )
             await commit_until(self.sdk.engine, self.settings, lambda: server.should_exit)
         finally:
             self._ready = False
+            if beneficiary_task is not None:
+                beneficiary_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await beneficiary_task
             server.should_exit = True
             with suppress(asyncio.CancelledError):
                 await server_task

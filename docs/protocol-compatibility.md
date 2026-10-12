@@ -26,8 +26,19 @@ strings are consensus-visible contracts.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
   seven-day emission period and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version. Miner
-  schema version 3 and validator schema version 6 key batches by history ID and are forward-only;
-  create a verified backup before upgrading and restore that backup to roll back.
+  schema version 4 and validator schema version 6 key batches by history ID and are forward-only;
+  schema 4 rebuilds the miner event table to admit surplus-beneficiary events. Create a verified
+  backup before upgrading and restore that backup to roll back.
+- Surplus-beneficiary event version 1 adds a third event kind to batches; a golden vector pins its
+  canonical hash. Validators older than software 3.0 quarantine a batch that carries it. Validators
+  therefore ignore designations committed before block `9,420,000`, and miners must not emit one
+  earlier, so every validator must run a release that reads it before that block. Changing that
+  block, the event fields, or how a designation takes effect is a compatibility change.
+- Weights are floor-first: each miner's USD floors are covered at the block's pricing snapshot
+  before the surplus is split by score share. Alpha's price and the emission come from finalized
+  chain state; only the TAO/USD quote differs between validators, so their vectors differ slightly
+  and the chain's consensus reconciles them. Changing the weight formula or its pricing inputs
+  requires a coordinated validator release.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.

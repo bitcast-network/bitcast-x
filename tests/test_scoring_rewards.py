@@ -1,4 +1,4 @@
-"""Bit-identical v2 scoring math and approved residual-emission economics."""
+"""Bit-identical v2 scoring math and floor-first emission economics."""
 
 import numpy as np
 import pytest
@@ -8,7 +8,7 @@ from bitcast_x.rewards import (
     RewardCampaign,
     RewardTweet,
     TweetReward,
-    aggregate_productive_weights,
+    allocate_floor_first_weights,
     apply_v2_featured_bonus,
     apply_v2_performance_bonus,
     assign_tweets_with_reasons,
@@ -114,12 +114,14 @@ def test_v2_assignment_and_floor_fixture_remain_exact() -> None:
     }
 
 
-def test_productive_miners_receive_all_emissions_in_floor_proportions() -> None:
+def test_unpriced_weights_split_all_emissions_in_floor_proportions() -> None:
     campaigns = fixture_campaigns()
 
     hotkey_uid = {"miner-a": 3, "miner-b": 4, "miner-c": 5, "miner-d": 7}
     floors = calculate_tweet_floors(campaigns, assign_tweets_with_reasons(campaigns).assigned)
-    weights = aggregate_productive_weights(floors, hotkey_uid, [0, 3, 4, 5, 7, 9], score_blend=0.0)
+    weights = allocate_floor_first_weights(
+        floors, hotkey_uid, [0, 3, 4, 5, 7, 9], emission_value_usd=None
+    ).weights
     totals: dict[int, float] = {3: 0.0, 4: 0.0, 5: 0.0, 7: 0.0}
     for reward in floors:
         totals[hotkey_uid[reward.miner_hotkey]] += reward.daily_usd_floor
@@ -220,84 +222,196 @@ FLOOR_VS_SCORE = [
     _tweet_reward("c2", "t3", "miner-b", score=80.0, daily_usd_floor=20.0),
 ]
 # Attribution storage re-rows the same match once per validator run; the
-# duplicate must double neither the floor (blend 0.0) nor the score term (blend 1.0).
+# duplicate must double neither its floor nor its score.
 REPEATED_MATCH = [
     _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
     _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=50.0),
     _tweet_reward("c2", "t2", "miner-b", score=30.0, daily_usd_floor=50.0),
 ]
+MINERS = {"miner-a": 1, "miner-b": 2}
 
 
 @pytest.mark.parametrize(
-    ("rewards", "blend", "expected"),
+    ("rewards", "emission_value_usd", "expected", "funding_ratio"),
     [
         pytest.param(
             FLOOR_VS_SCORE,
+            1000.0,
+            # Floors $180/$200 and $20/$200 of $1000 emission, then the 0.8
+            # surplus split 20/80 by score share.
+            approx([0.0, 0.18 + 0.16, 0.02 + 0.64]),
             1.0,
-            approx([0.0, 0.2, 0.8]),
-            id="blend-one-allocates-by-unique-tweet-scores",
+            id="floors-first-then-surplus-by-score-share",
         ),
         pytest.param(
             FLOOR_VS_SCORE,
-            0.5,
-            approx([0.0, 0.55, 0.45]),
-            id="blend-interpolates-between-floor-and-score-vectors",
-        ),
-        pytest.param(
-            REPEATED_MATCH,
-            0.0,
-            approx([0.0, 0.5, 0.5]),
-            id="duplicate-match-counts-once-in-floor-term",
-        ),
-        pytest.param(
-            REPEATED_MATCH,
-            1.0,
-            approx([0.0, 0.5, 0.5]),
-            id="duplicate-match-counts-once-in-score-term",
-        ),
-        pytest.param(
-            [
-                _tweet_reward("c1", "t1", "miner-a", score=0.0, daily_usd_floor=90.0),
-                _tweet_reward("c2", "t2", "miner-b", score=0.0, daily_usd_floor=10.0),
-            ],
-            0.5,
+            200.0,
             approx([0.0, 0.9, 0.1]),
-            id="blend-falls-back-to-floors-without-positive-scores",
+            1.0,
+            id="exactly-funded-floors-leave-no-surplus",
         ),
         pytest.param(
-            [
-                _tweet_reward("c1", "t1", "miner-a", score=30.0, daily_usd_floor=0.0),
-                _tweet_reward("c2", "t2", "miner-b", score=10.0, daily_usd_floor=0.0),
-            ],
+            FLOOR_VS_SCORE,
+            100.0,
+            approx([0.0, 0.9, 0.1]),
             0.5,
-            approx([0.0, 0.75, 0.25]),
-            id="blend-uses-score-shares-alone-when-floors-absent",
+            id="shortfall-pays-floors-pro-rata",
+        ),
+        pytest.param(
+            FLOOR_VS_SCORE,
+            None,
+            approx([0.0, 0.9, 0.1]),
+            None,
+            id="unpriced-weights-follow-floor-proportions",
+        ),
+        pytest.param(
+            REPEATED_MATCH,
+            200.0,
+            approx([0.0, 0.5, 0.5]),
+            1.0,
+            id="duplicate-match-counts-once",
         ),
         pytest.param(
             [
                 _tweet_reward("c1", "t1", "miner-a", score=-5.0, daily_usd_floor=50.0),
                 _tweet_reward("c2", "t2", "miner-b", score=25.0, daily_usd_floor=50.0),
             ],
+            200.0,
+            approx([0.0, 0.25, 0.75]),
             1.0,
-            approx([0.0, 0.0, 1.0]),
-            id="negative-scores-are-ignored-in-score-vector",
+            id="negative-scores-earn-no-surplus",
         ),
-        pytest.param([], 0.0, [1.0, 0.0, 0.0], id="no-productive-content-burns"),
-        pytest.param([], 0.5, [1.0, 0.0, 0.0], id="no-productive-content-burns-when-blended"),
+        pytest.param(
+            [
+                _tweet_reward("c1", "t1", "miner-a", score=0.0, daily_usd_floor=90.0),
+                _tweet_reward("c2", "t2", "miner-b", score=0.0, daily_usd_floor=10.0),
+            ],
+            200.0,
+            approx([0.0, 0.9, 0.1]),
+            1.0,
+            id="surplus-follows-floors-without-positive-scores",
+        ),
     ],
 )
-def test_productive_weights_blend_floor_and_score_shares(
-    rewards: list[TweetReward], blend: float, expected: object
+def test_floor_first_weights(
+    rewards: list[TweetReward],
+    emission_value_usd: float | None,
+    expected: object,
+    funding_ratio: float | None,
 ) -> None:
-    weights = aggregate_productive_weights(
-        rewards, {"miner-a": 1, "miner-b": 2}, [0, 1, 2], score_blend=blend
+    allocation = allocate_floor_first_weights(
+        rewards, MINERS, [0, 1, 2], emission_value_usd=emission_value_usd
     )
 
-    # Plain lists compare bit-exactly (the burn fallback); approx() rows allow float rounding.
-    assert weights.tolist() == expected
+    assert allocation.weights.tolist() == expected
+    assert allocation.weights.sum() == approx(1.0)
+    assert allocation.funding_ratio == (
+        approx(funding_ratio) if funding_ratio is not None else None
+    )
+    assert not allocation.donated_weights.any()
 
 
-@pytest.mark.parametrize("blend", [1.5, -0.1])
-def test_score_blend_out_of_range_is_rejected(blend: float) -> None:
+def test_funded_floors_are_always_covered_in_usd() -> None:
+    allocation = allocate_floor_first_weights(
+        FLOOR_VS_SCORE, MINERS, [0, 1, 2], emission_value_usd=1000.0
+    )
+
+    # Miner a holds 90% of floors but only 20% of score share.
+    assert allocation.weights[1] * 1000.0 >= 180.0
+    assert allocation.weights[2] * 1000.0 >= 20.0
+    assert allocation.total_floors_usd == 200.0
+    assert allocation.floor_weights.tolist() == approx([0.0, 0.18, 0.02])
+    assert allocation.surplus_weights.sum() == approx(0.8)
+
+
+@pytest.mark.parametrize("emission_value_usd", [None, 1000.0])
+def test_no_productive_content_burns(emission_value_usd: float | None) -> None:
+    allocation = allocate_floor_first_weights(
+        [], MINERS, [0, 1, 2], emission_value_usd=emission_value_usd
+    )
+
+    assert allocation.weights.tolist() == [1.0, 0.0, 0.0]
+    assert allocation.funding_ratio is None
+
+
+@pytest.mark.parametrize("emission_value_usd", [0.0, -1.0])
+def test_non_positive_emission_value_is_rejected(emission_value_usd: float) -> None:
     with pytest.raises(ValueError):
-        aggregate_productive_weights([], {}, [0, 1], score_blend=blend)
+        allocate_floor_first_weights(
+            FLOOR_VS_SCORE, MINERS, [0, 1, 2], emission_value_usd=emission_value_usd
+        )
+
+
+@pytest.mark.parametrize(
+    ("beneficiaries", "hotkey_to_uid", "expected", "donated"),
+    [
+        pytest.param(
+            {"miner-b": "miner-a"},
+            MINERS,
+            # Miner b keeps its $20 floor weight and gives its 0.64 surplus away.
+            approx([0.0, 0.34 + 0.64, 0.02]),
+            approx([0.0, 0.0, 0.64]),
+            id="donor-keeps-floor-weight-and-gives-surplus",
+        ),
+        pytest.param(
+            {"miner-b": "owner"},
+            {**MINERS, "owner": 0},
+            approx([0.64, 0.34, 0.02]),
+            approx([0.0, 0.0, 0.64]),
+            id="burn-uid-can-receive-surplus",
+        ),
+        pytest.param(
+            {"miner-a": "miner-b", "miner-b": "miner-a"},
+            MINERS,
+            # Each donation moves only the donor's own surplus, never one received.
+            approx([0.0, 0.18 + 0.64, 0.02 + 0.16]),
+            approx([0.0, 0.16, 0.64]),
+            id="cycle-moves-each-surplus-once",
+        ),
+        pytest.param(
+            {"miner-b": "unregistered"},
+            MINERS,
+            approx([0.0, 0.34, 0.66]),
+            approx([0.0, 0.0, 0.0]),
+            id="unregistered-beneficiary-leaves-surplus-with-donor",
+        ),
+        pytest.param(
+            {"miner-a": "miner-a"},
+            MINERS,
+            approx([0.0, 0.34, 0.66]),
+            approx([0.0, 0.0, 0.0]),
+            id="self-designation-is-ignored",
+        ),
+    ],
+)
+def test_surplus_beneficiaries_receive_donor_surplus(
+    beneficiaries: dict[str, str],
+    hotkey_to_uid: dict[str, int],
+    expected: object,
+    donated: object,
+) -> None:
+    allocation = allocate_floor_first_weights(
+        FLOOR_VS_SCORE,
+        hotkey_to_uid,
+        [0, 1, 2],
+        emission_value_usd=1000.0,
+        surplus_beneficiaries=beneficiaries,
+    )
+
+    assert allocation.weights.tolist() == expected
+    assert allocation.donated_weights.tolist() == donated
+    assert allocation.weights.sum() == approx(1.0)
+
+
+@pytest.mark.parametrize("emission_value_usd", [None, 100.0])
+def test_nothing_is_donated_without_a_surplus(emission_value_usd: float | None) -> None:
+    allocation = allocate_floor_first_weights(
+        FLOOR_VS_SCORE,
+        MINERS,
+        [0, 1, 2],
+        emission_value_usd=emission_value_usd,
+        surplus_beneficiaries={"miner-b": "miner-a"},
+    )
+
+    assert allocation.weights.tolist() == approx([0.0, 0.9, 0.1])
+    assert not allocation.donated_weights.any()

@@ -18,10 +18,12 @@ from bitcast_x.miner.results import MinerResultsClient
 from bitcast_x.miner.service import (
     advertise_endpoint,
     build_sdk,
+    check_surplus_beneficiary,
     commit_until,
     create_protocol_app,
     is_permitted_validator,
     load_wallet,
+    sync_surplus_beneficiary,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -56,6 +58,7 @@ def build_miner_api(settings: Settings) -> MinerApps:
         raise ValueError("BITCAST_X_MINER_API_PORT must differ from BITCAST_X_PORT")
 
     wallet = load_wallet(settings)
+    check_surplus_beneficiary(settings, str(wallet.hotkey.ss58_address))
     runtime: dict[str, Any] = {"ready": False}
 
     async def is_ready() -> bool:
@@ -112,17 +115,21 @@ def build_miner_api(settings: Settings) -> MinerApps:
 
         commit_task: asyncio.Task[None] | None = None
         results_task: asyncio.Task[None] | None = None
+        beneficiary_task: asyncio.Task[None] | None = None
         try:
             await advertise_endpoint(chain, wallet, ip=public_ip, port=settings.port)
             # Both loops run until cancelled below at shutdown.
             commit_task = asyncio.create_task(commit_until(sdk.engine, settings, lambda: False))
             results_task = asyncio.create_task(results_loop())
+            beneficiary_task = asyncio.create_task(
+                sync_surplus_beneficiary(sdk.engine, chain, settings.miner_surplus_beneficiary)
+            )
             runtime["ready"] = True
             LOGGER.info("miner API ready hotkey=%s", sdk.engine.miner_hotkey)
             yield
         finally:
             runtime["ready"] = False
-            for task in (commit_task, results_task):
+            for task in (commit_task, results_task, beneficiary_task):
                 if task is not None:
                     task.cancel()
                     with suppress(asyncio.CancelledError):

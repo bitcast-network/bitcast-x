@@ -23,6 +23,7 @@ from bitcast_x.protocol import (
     CommitmentPosition,
     DraftReveal,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet, XProvider
@@ -194,6 +195,8 @@ class CampaignReconciler:
         for record in self.store.verified_batches(through_block=through_block):
             reveals = {reveal.claim_id: reveal for reveal in record.batch.reveals}
             for event_index, event in enumerate(record.batch.events):
+                if isinstance(event, SurplusBeneficiaryEvent):
+                    continue
                 located = by_campaign[event.campaign_id]
                 if isinstance(event, ClaimEvent):
                     located.claims.append(

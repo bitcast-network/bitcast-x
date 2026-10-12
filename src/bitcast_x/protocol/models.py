@@ -23,6 +23,10 @@ SubmissionProtocolId = Literal[2, 3]
 # Direct submissions committed before this block use the legacy creator-resolution
 # rule. At and after it, validators require the version-3 creator binding.
 CREATOR_BINDING_ACTIVATION_BLOCK: Final = 8_920_000
+# Surplus-beneficiary designations committed before this block are ignored, and
+# miners do not emit them earlier: validators that predate the event quarantine
+# any batch carrying it, so every validator must upgrade before this block.
+SURPLUS_BENEFICIARY_ACTIVATION_BLOCK: Final = 9_420_000
 # Longest claim draft. A reveal stores the draft NFKC-normalized and every read
 # re-checks this limit, so it bounds the normalized text.
 MAX_DRAFT_CHARS: Final = 20_000
@@ -132,7 +136,22 @@ class SubmissionEvent(ProtocolModel):
         return data
 
 
-ProtocolEvent = Annotated[ClaimEvent | SubmissionEvent, Field(discriminator="kind")]
+class SurplusBeneficiaryEvent(ProtocolModel):
+    """A miner's committed choice of hotkey to receive its surplus weight.
+
+    The batch's miner hotkey is the donor. A null beneficiary clears an earlier
+    designation; the latest committed designation stays in force until replaced.
+    """
+
+    version: Literal[1] = 1
+    kind: Literal["surplus_beneficiary"] = "surplus_beneficiary"
+    event_id: Hex128
+    beneficiary_hotkey: Hotkey | None
+
+
+ProtocolEvent = Annotated[
+    ClaimEvent | SubmissionEvent | SurplusBeneficiaryEvent, Field(discriminator="kind")
+]
 
 
 class DraftReveal(ProtocolModel):

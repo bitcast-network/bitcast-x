@@ -76,7 +76,7 @@ def test_sqlite_stores_migrate_and_online_backup_is_consistent(tmp_path: Path) -
     manifest = backup_state(state_dir, destination)
     backup_info = inspect_state(destination)
 
-    assert {item["schema_version"] for item in info["databases"]} == {3, 6}
+    assert {item["schema_version"] for item in info["databases"]} == {4, 6}
     assert {item["integrity"] for item in backup_info["databases"]} == {"ok"}
     assert manifest["files"] == ["miner.sqlite3", "validator.sqlite3"]
     assert json.loads((destination / "manifest.json").read_text())["files"] == manifest["files"]
@@ -127,7 +127,7 @@ def test_unversioned_current_miner_store_keeps_recovery_boundary(tmp_path: Path)
     assert reopened.resume_history() == history_id
     connection = sqlite3.connect(path)
     try:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         connection.close()
 

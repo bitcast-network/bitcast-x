@@ -141,6 +141,7 @@ Then copy the backup off the volume (`kubectl cp`). Upgrade by changing `image.t
 | `wallet.hotkeyKey` / `coldkeypubKey` | `hotkey` / — | keys in that Secret |
 | `wallet.name` / `hotkey` | `default` / `default` | names the miner resolves |
 | `wallet.expectedHotkey` | — | strongly recommended |
+| `surplusBeneficiary` | — | SS58 hotkey that receives this miner's surplus weight |
 | `minerApi.existingSecret` / `tokenKey` | — / `token` | `run-miner-api` only |
 | `minerApi.port` | — | `run-miner-api` only; separate API listener |
 | `minerApi.ingress.enabled` / `host` / `className` / `annotations` / `tlsSecretName` | `false` / — / `traefik` / `{}` / `<release>-api-tls` | needs `minerApi.port` |

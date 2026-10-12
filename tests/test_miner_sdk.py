@@ -1,6 +1,7 @@
 """End-to-end offline tests for durable miner SDK batching and recovery."""
 
 import hashlib
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from bitcast_x.miner import (
     MinerStore,
 )
 from bitcast_x.protocol import (
+    SURPLUS_BENEFICIARY_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentPosition,
     CommittedBatch,
@@ -25,6 +27,7 @@ from bitcast_x.protocol import (
     OnChainEnvelope,
     ProtocolEvent,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
 from bitcast_x.protocol.canonical import canonical_json
 from bitcast_x.transport import BatchPageRequest
@@ -591,3 +594,71 @@ async def test_prepared_batches_keep_their_pinned_bytes(tmp_path: Path) -> None:
         (3, 1, "928c8f16c17514670e5f611ccb5d1f746352dcdc7643624f34a25187feec3884"),
         (4, 1, "89958f6f240aa75a7f4acd48483c7f5c60c218d5f1b15e99701c814d9e2c0e46"),
     ]
+
+
+async def test_miner_schema_four_rebuild_keeps_committed_claims_and_references(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "miner.sqlite3"
+    sdk = build_sdk(path, FakeSubmitter())
+    claim_id = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="A draft")
+    await sdk.engine.commit_ready(force=True)
+    sdk.engine.store.close()
+    connection = sqlite3.connect(path)
+    try:
+        # Replay the events-table rebuild over populated schema-3 state.
+        connection.execute("PRAGMA user_version = 3")
+    finally:
+        connection.close()
+
+    reopened = MinerStore(path)
+
+    assert reopened.status(claim_id) is EventStatus.SAFE_TO_POST
+    assert reopened.active_claim_ids("campaign", "123") == [claim_id]
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("DELETE FROM events WHERE event_id = ?", (claim_id,))
+    finally:
+        connection.close()
+
+
+BENEFICIARY = "5FHneW46xGXgs5mUiveU4sbTyGBzmst2jfFvCw9zThqAXhGK"
+
+
+async def test_surplus_beneficiary_designation_commits_beside_claims(tmp_path: Path) -> None:
+    sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
+    engine = sdk.engine
+    active = SURPLUS_BENEFICIARY_ACTIVATION_BLOCK
+
+    with pytest.raises(ProtocolError, match="activate at block"):
+        engine.designate_surplus_beneficiary(BENEFICIARY, block=active - 1)
+    with pytest.raises(ProtocolError, match="own surplus beneficiary"):
+        engine.designate_surplus_beneficiary(MINER, block=active)
+    claim_id = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="A draft")
+    event_id = engine.designate_surplus_beneficiary(BENEFICIARY, block=active)
+    assert event_id is not None
+    # Repeating the current designation queues nothing.
+    assert engine.designate_surplus_beneficiary(BENEFICIARY, block=active) is None
+
+    batch = await engine.commit_ready(force=True)
+
+    assert batch is not None
+    assert [event.kind for event in batch.events] == ["claim", "surplus_beneficiary"]
+    assert batch.events[1] == SurplusBeneficiaryEvent(
+        event_id=event_id, beneficiary_hotkey=BENEFICIARY
+    )
+    assert sdk.claim_status(claim_id) is EventStatus.SAFE_TO_POST
+    assert engine.store.status(event_id) is EventStatus.COMMITTED
+    # Creator receipts cover claims and submissions only.
+    assert [item["event_id"] for item in engine.store.receipts()] == [claim_id]
+
+    cleared = engine.designate_surplus_beneficiary(None, block=active)
+    assert cleared is not None
+    assert engine.store.latest_surplus_beneficiary() == SurplusBeneficiaryEvent(
+        event_id=cleared, beneficiary_hotkey=None
+    )
+    assert engine.designate_surplus_beneficiary(None, block=active) is None

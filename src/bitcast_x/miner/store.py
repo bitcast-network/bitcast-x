@@ -23,6 +23,7 @@ from bitcast_x.protocol import (
     DraftReveal,
     ProtocolEvent,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
 from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
 
@@ -30,7 +31,11 @@ _EVENT_ADAPTER: TypeAdapter[ProtocolEvent] = TypeAdapter(ProtocolEvent)
 
 
 def _event_id(event: ProtocolEvent) -> str:
-    return event.claim_id if isinstance(event, ClaimEvent) else event.submission_id
+    if isinstance(event, ClaimEvent):
+        return event.claim_id
+    if isinstance(event, SubmissionEvent):
+        return event.submission_id
+    return event.event_id
 
 
 class EventStatus(StrEnum):
@@ -44,6 +49,8 @@ class EventStatus(StrEnum):
     VERIFICATION_PENDING = "verification_pending"
     ATTRIBUTED = "attributed"
     REJECTED = "rejected"
+    # A finalized surplus-beneficiary designation; it has no platform lifecycle.
+    COMMITTED = "committed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +137,10 @@ class MinerStore:
                 # Recover an otherwise-current store whose version pragma was
                 # cleared without destructively replaying the table rebuild.
                 connection.execute("PRAGMA user_version = 3")
+            # Rebuilding a table that others reference requires foreign keys off
+            # (they cannot change inside the migration transaction); the check
+            # below then proves every reference survived.
+            connection.execute("PRAGMA foreign_keys = OFF")
             apply_migrations(
                 connection,
                 (
@@ -232,8 +243,50 @@ class MinerStore:
                     cutoff_ns INTEGER NOT NULL
                 );
                     """,
+                    # SQLite cannot widen a CHECK constraint in place, so the
+                    # events table is rebuilt to admit surplus-beneficiary events.
+                    """
+                CREATE TABLE events_v4 (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL
+                        CHECK (kind IN ('claim', 'submission', 'surplus_beneficiary')),
+                    payload_json TEXT NOT NULL,
+                    private_reveal_json TEXT,
+                    status TEXT NOT NULL,
+                    created_ns INTEGER NOT NULL,
+                    batch_sequence INTEGER,
+                    rejection_reason TEXT,
+                    batch_history_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO events_v4(
+                    event_id, kind, payload_json, private_reveal_json, status,
+                    created_ns, batch_sequence, rejection_reason, batch_history_id
+                )
+                SELECT event_id, kind, payload_json, private_reveal_json, status,
+                       created_ns, batch_sequence, rejection_reason, batch_history_id
+                FROM events;
+                DROP TABLE events;
+                ALTER TABLE events_v4 RENAME TO events;
+                CREATE INDEX idx_events_queue ON events(batch_sequence, created_ns, event_id);
+                    """,
                 ),
             )
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ProtocolError("miner state has a broken reference after migration")
+
+    def latest_surplus_beneficiary(self) -> SurplusBeneficiaryEvent | None:
+        """Return this miner's most recently queued surplus-beneficiary designation."""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT payload_json FROM events
+                WHERE kind = 'surplus_beneficiary'
+                ORDER BY created_ns DESC, rowid DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        return SurplusBeneficiaryEvent.model_validate_json(row["payload_json"]) if row else None
 
     def resume_history(self) -> str:
         """Return an unused current history or atomically rotate to a random one."""
@@ -306,13 +359,15 @@ class MinerStore:
 
         event_id = _event_id(event)
         status = (
-            EventStatus.WAITING_FOR_COMMITMENT
-            if isinstance(event, ClaimEvent)
-            else EventStatus.TWEET_RECEIVED
+            EventStatus.TWEET_RECEIVED
+            if isinstance(event, SubmissionEvent)
+            else EventStatus.WAITING_FOR_COMMITMENT
         )
         payload = event.model_dump_json()
         reveal_json = reveal.model_dump_json() if reveal is not None else None
         if metadata is not None:
+            if isinstance(event, SurplusBeneficiaryEvent):
+                raise ProtocolError("a surplus-beneficiary designation has no creator operation")
             event_creator_x_id = event.creator_x_id
             if event_creator_x_id is None or event_creator_x_id != metadata.creator_x_id:
                 raise ProtocolError("operation creator_x_id must match the committed event")
@@ -448,7 +503,8 @@ class MinerStore:
               ON b.history_id = e.batch_history_id
              AND b.sequence = e.batch_sequence
             LEFT JOIN operation_metadata m ON m.event_id = e.event_id
-            WHERE (? IS NULL OR e.kind = ?)
+            WHERE e.kind IN ('claim', 'submission')
+              AND (? IS NULL OR e.kind = ?)
               AND (? = '[]' OR e.event_id IN (SELECT value FROM json_each(?)))
               AND (? IS NULL OR m.creator_x_id = ?)
               AND (? IS NULL OR m.external_id = ?)
@@ -480,6 +536,8 @@ class MinerStore:
         batches: dict[tuple[str, int], tuple[str | None, dict[str, int]]] = {}
         for row in rows:
             event = _EVENT_ADAPTER.validate_json(row["payload_json"])
+            if isinstance(event, SurplusBeneficiaryEvent):
+                continue
             if campaign_id is not None and event.campaign_id != campaign_id:
                 continue
             history_id = None
@@ -764,12 +822,14 @@ class MinerStore:
                 UPDATE events
                 SET status = CASE kind
                     WHEN 'claim' THEN ?
+                    WHEN 'surplus_beneficiary' THEN ?
                     ELSE ?
                 END
                 WHERE batch_history_id = ? AND batch_sequence = ?
                 """,
                 (
                     EventStatus.SAFE_TO_POST.value,
+                    EventStatus.COMMITTED.value,
                     EventStatus.VERIFICATION_PENDING.value,
                     history_id,
                     batch.sequence,
@@ -787,6 +847,8 @@ class MinerStore:
             )
             committed_batch = CommittedBatch.model_validate_json(batch_row["batch_json"])
             for event_index, event in enumerate(committed_batch.events):
+                if isinstance(event, SurplusBeneficiaryEvent):
+                    continue
                 if isinstance(event, SubmissionEvent):
                     if event.claim_id is not None:
                         connection.execute(

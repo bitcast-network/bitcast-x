@@ -14,14 +14,26 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   its own port (`minerApi.port`, needs `BITCAST_X_MINER_API_PORT` support in the image) behind a
   ClusterIP Service and a TLS Ingress, and `extraVolumes`/`extraVolumeMounts`. CI lints and
   renders it and asserts each refusal.
-- Configurable `weight_score_blend` validator setting, allocating the mechanism-1 weight vector
-  between campaign floors and miners' deduplicated tweet-score shares. **The default is `1.0`:
-  allocation is purely on content value**, independent of carried campaign floors. Operators may
-  set a lower value to blend floors back in; creator reward floors, payouts, and the burn fallback
-  are untouched.
+- Optional surplus beneficiary. A miner names a hotkey with
+  `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (chart value `surplusBeneficiary`). The miner commits it as
+  a `surplus_beneficiary` batch event from block `9,420,000`, and validators then give that
+  hotkey the miner's surplus weight while the miner keeps its floor weight. Any registered hotkey
+  may receive it, including the burn UID. Unsetting the value commits a clearing event.
 
 ### Breaking changes
 
+- Mechanism-1 weights are floor-first again. Each miner's daily USD floors are converted to weight
+  at the block's pricing snapshot first, so its emission is worth what it owes creators. The surplus
+  left over is split by tweet-score share. When floors exceed the emission value they are paid pro
+  rata. The snapshot reads alpha's pool price and the miner emission from finalized chain state, and
+  TAO/USD from CoinGecko; without a price, weights fall back to floor proportions. This replaces
+  the pure score-share allocation that `weight_score_blend=1.0` selected on main since 2026-09-16,
+  which could leave a miner's emission below its floors. `BITCAST_X_WEIGHT_SCORE_BLEND`,
+  `rewards.aggregate_productive_weights` and `RewardCoordinator(score_blend=...)` are removed;
+  use `allocate_floor_first_weights`. Each cycle's split is stored in a rollback-safe
+  `weight_allocations` table.
+- Miner schema 4 rebuilds the miner event table to admit surplus-beneficiary events. It is
+  forward-only, and automatic updates refuse it; back up the miner before upgrading.
 - Retire `legacy_connection` campaign execution, connection collection, legacy reward and referral
   emissions, legacy pricing, and temporary treasury routing. A feed containing a retired campaign
   aborts the entire validator cycle before campaign scoring, result publication, or weight submission.
@@ -68,7 +80,10 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - The retirement does not change the miner application `/api/v1` contract, canonical batch hashes,
   `DX2`/`DX3` commitments, `/v2/batches` or `/v3/batches`, or preclaim reward calculations. Historical
-  `legacy_connection` records remain readable. Miner schema 3 and validator schema 6 are unchanged.
+  `legacy_connection` records remain readable. Validator schema 6 is unchanged; miner schema 4 is
+  described under breaking changes.
+- Validators older than this release quarantine a batch carrying a surplus-beneficiary event, so
+  every validator must upgrade before block `9,420,000`, when miners may start emitting it.
 - Existing legacy archives are left in place. Historical settlement remains separate from validator
   campaign emissions. Automatic source updates following `origin/main` can activate this removal
   at merge time; they do not wait for a release tag or stop at a software major-version boundary.
@@ -90,8 +105,7 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   indie_hacker map). Scores are bit-identical; scoring 400 tweets on that map drops from 7.8 s to
   0.4 s and peak memory from 523 MB to 143 MB.
 - Reward tuning values (performance bonus per metric, featured multiplier, featured pool size) are
-  module constants instead of repeated keyword defaults, and `score_blend` is a required argument
-  so `weight_score_blend` in settings is the only default. When no featured tweet was pinned, the
+  module constants instead of repeated keyword defaults. When no featured tweet was pinned, the
   published `selection_pool` now uses the same view-rank order as a pinned selection (it was
   previously sorted by tweet ID); the selected tweet is unchanged.
 - Oversized campaign-feed, miner and LLM responses all raise `ResponseTooLargeError` from one bounded

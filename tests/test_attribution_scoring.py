@@ -306,9 +306,7 @@ async def test_jev_outage_grace_recovery_and_frozen_rewards_survive_restart(tmp_
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         evaluator = JevBriefFilter(api_key="existing-key", cache=store, client=client, attempts=1)
-        coordinator = RewardCoordinator(
-            store, AttributionScorer(FakeX(), brief_filter=evaluator), score_blend=1.0
-        )
+        coordinator = RewardCoordinator(store, AttributionScorer(FakeX(), brief_filter=evaluator))
         for block in (30, 930):
             scores = await coordinator.freeze_scores(snapshot, attributions, block=block)
             assert [item.attribution.campaign_id for item in scores] == ["ready"]
@@ -339,9 +337,7 @@ async def test_jev_outage_grace_recovery_and_frozen_rewards_survive_restart(tmp_
         store = ValidatorStore(path)
         evaluator = JevBriefFilter(api_key="existing-key", cache=store, client=client, attempts=1)
         assert (await evaluator.evaluate(campaign, scores[0].tweet)).meets_brief
-        restarted = RewardCoordinator(
-            store, AttributionScorer(FakeX(), brief_filter=evaluator), score_blend=1.0
-        )
+        restarted = RewardCoordinator(store, AttributionScorer(FakeX(), brief_filter=evaluator))
         replay = await restarted.freeze_scores(snapshot, attributions, block=932)
         assert replay == scores
         replay_weights, replay_rewards = restarted.shadow_weights(

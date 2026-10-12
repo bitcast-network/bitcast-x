@@ -1,8 +1,9 @@
 # Upgrading to software 3.0
 
 Software 3.0.0 retires `legacy_connection` campaign execution and the temporary Python interfaces
-used by that engine, and replaces chat-model brief evaluation with JEV through OpenRouter. It also
-includes the validator reliability and soft featured-pin changes in the changelog. It is a major
+used by that engine, and replaces chat-model brief evaluation with JEV through OpenRouter. It
+restores floor-first weights, adds optional surplus beneficiaries, and includes the validator
+reliability and soft featured-pin changes in the changelog. It is a major
 release under the [release policy](release-policy.md). The version number in this checkout prepares
 the release; it does not mean a release tag or image has
 been published. Use a reviewed, immutable release revision for deployment.
@@ -25,6 +26,7 @@ integration has stopped using these interfaces.
 | Configuration integrations | `Settings.legacy_*` fields and `config.LEGACY_CONNECTION_TWEET_IDS` | Remove attribute and constant references. Old environment keys are ignored by settings parsing, but no longer control behavior. |
 | Python protocol and feed integrations | `MiningProtocol.LEGACY_CONNECTION`, `validator.service.ensure_supported_campaigns`, `CampaignFeedClient.cached()`, `EcosystemMap.max_referral_amount`, and v3 manifest / v2 full-feed parsing | Use `preclaim_v2` and the v4 manifest. An invalid or retired feed raises a validation error, which the validator reports as a rejected cycle. |
 | Validators | Chat-model brief evaluation: `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY`, `BITCAST_X_LLM_NUM_CHECKS` and `Settings.llm_api_key` | JEV runs through OpenRouter using the existing `BITCAST_X_OPENROUTER_API_KEY`. Keep that key; validators previously using only Chutes must set it. A validator with production outputs enabled refuses to start without it. No separate TypeSafe key is needed. Retired settings are ignored. |
+| Validators and Python reward integrations | `BITCAST_X_WEIGHT_SCORE_BLEND` (`Settings.weight_score_blend`), `rewards.aggregate_productive_weights` and `RewardCoordinator(score_blend=...)` | Remove the setting. Weights are floor-first; use `allocate_floor_first_weights` and pass a `PricingSnapshot` to `RewardCoordinator.shadow_weights`. |
 | Python brief-evaluation integrations | `LlmBriefFilter`, `parse_brief_evaluation` and the `bitcast_x.prompts` markdown prompt generators | Use `JevBriefFilter`; `bitcast_x.prompts.build_request` builds the pinned JEV request. |
 
 The retired environment keys are `BITCAST_X_LEGACY_CONNECTIONS_PATH`,
@@ -47,8 +49,12 @@ batch transport and preclaim scoring/reward rules intact. `DX2`, `DX3`, `/v2/bat
 remain supported for preclaim history. `MiningProtocol.LEGACY_CONNECTION` is removed; stored
 legacy rows are left in place for audit and are never executed.
 
-There is no database schema migration in this change: miner schema 3 and validator schema 6 remain
-in use. Preserve the complete state directory and wallets, including committed batches, pending
+Validator schema 6 is unchanged; validators add two rollback-safe tables (`weight_allocations`
+and `featured_tweet_selections`) without changing it. Miner schema 4 rebuilds the miner event table
+so it can hold surplus-beneficiary designations. It is forward-only: an older miner refuses the
+upgraded database, so roll a miner back only by restoring its pre-upgrade backup. Automatic updates
+reject this schema change, so deploy the miner upgrade manually. Preserve the complete state
+directory and wallets, including committed batches, pending
 events, campaign and ecosystem-map bindings, preview state and frozen results. Follow the
 [backup and rollback procedure](operator-runbook.md#upgrade-and-rollback). `backup-state` copies
 the current miner and validator SQLite databases; archive imported `connections.db`,
@@ -70,6 +76,23 @@ Preview caching now uses `preview.sqlite3`, with a restricted, read-only import 
 entries. Preserve both caches in the state backup. Featured pins remain fixed without freezing an
 unpaid campaign's contract. Follow the runbook's rollback restriction for older releases when a
 campaign settles at zero after its pinned tweet becomes ineligible.
+
+## Floor-first weights and surplus beneficiaries
+
+Mechanism-1 weights again cover every miner's USD floors first: each miner's daily floors are
+converted to weight at the block's pricing snapshot (alpha's pool price and the miner emission from
+chain state, and TAO/USD from CoinGecko). The surplus left after floors is split by tweet-score
+share. This replaces the pure score-share allocation and its `weight_score_blend` setting.
+`BITCAST_X_WEIGHT_SCORE_BLEND` is removed and ignored if still set. Validators need outbound HTTPS
+to `api.coingecko.com`; without a price, a cycle's weights fall back to floor proportions.
+
+Miners may name a hotkey to receive their surplus weight with
+`BITCAST_X_MINER_SURPLUS_BENEFICIARY` (or the chart's `surplusBeneficiary`). The miner commits the
+designation once the chain reaches block `9,420,000`. Every validator must run this release before
+that block, because older validators quarantine a batch carrying the designation. Unsetting the
+value later commits a clearing designation. The miner learns its earlier designation from its own
+database, so restore a lost database before unsetting the value; otherwise the earlier designation
+stays in force.
 
 ## Automatic updates and rollout notice
 

@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
+from bittensor.sp_core import ss58_decode
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -57,6 +58,8 @@ class Settings(BaseSettings):
     miner_results_api_url: str = "https://bitcast-api.bitcast.network"
     miner_results_poll_seconds: float = Field(default=30.0, ge=5.0, le=300.0)
     miner_enabled_ecosystem_ids: tuple[str, ...] = ()
+    # Hotkey that receives this miner's surplus weight. Unset clears an earlier choice.
+    miner_surplus_beneficiary: str | None = None
     qualification_owner_hotkey: str | None = PUBLIC_QUALIFICATION_OWNER_HOTKEY
     qualification_minimum_alpha: str = "15000"
     qualification_minimum_self_stake_alpha: str | None = None
@@ -77,17 +80,6 @@ class Settings(BaseSettings):
     enable_weight_submission: bool = True
     weight_epoch_blocks: int = Field(default=100, ge=1)
     weight_version_key: int = Field(default=0, ge=0)
-    weight_score_blend: float = Field(
-        default=1.0,
-        ge=0,
-        le=1,
-        description=(
-            "Share of mechanism-1 emission weight allocated by deduplicated tweet "
-            "scores instead of campaign floors. 1.0 (the default) allocates purely "
-            "on content value; operators may lower it to reintroduce a "
-            "floor-proportional component."
-        ),
-    )
     data_client_url: str = "https://ingestion.bitcast.network:443"
     ops_host: str = "0.0.0.0"  # noqa: S104 - container health endpoint
     ops_port: int = Field(default=8096, ge=1, le=65535)
@@ -113,6 +105,20 @@ class Settings(BaseSettings):
         if any(not ecosystem_id.strip() for ecosystem_id in value):
             raise ValueError("enabled ecosystem ids must not be blank")
         return tuple(dict.fromkeys(ecosystem_id.strip() for ecosystem_id in value))
+
+    @field_validator("miner_surplus_beneficiary")
+    @classmethod
+    def valid_surplus_beneficiary(cls, value: str | None) -> str | None:
+        """Treat a blank value as unset and reject a malformed ss58 hotkey."""
+
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        try:
+            ss58_decode(value)
+        except ValueError as exc:
+            raise ValueError(f"surplus beneficiary is not a valid ss58 hotkey: {exc}") from exc
+        return value
 
     def missing_validator_settings(self) -> list[str]:
         """Return the settings validator reconciliation, rewards and publishing still need."""

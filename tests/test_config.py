@@ -70,3 +70,16 @@ def test_environment_template_documents_release_owned_qualification_history() ->
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert "qualification history ships with each reviewed release" in text
+
+
+def test_surplus_beneficiary_setting_is_optional_trimmed_and_ss58_checked() -> None:
+    hotkey = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+
+    assert Settings(_env_file=None).miner_surplus_beneficiary is None
+    assert Settings(_env_file=None, miner_surplus_beneficiary=" ").miner_surplus_beneficiary is None
+    assert (
+        Settings(_env_file=None, miner_surplus_beneficiary=f" {hotkey}\n").miner_surplus_beneficiary
+        == hotkey
+    )
+    with pytest.raises(ValueError, match="valid ss58 hotkey"):
+        Settings(_env_file=None, miner_surplus_beneficiary=hotkey[:-1] + "x")

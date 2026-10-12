@@ -14,6 +14,7 @@ from bitcast_x.protocol import (
     CommittedBatch,
     DraftReveal,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -52,6 +53,34 @@ def test_create_batch_golden_hash_and_reveal() -> None:
         BatchContent.model_validate(batch.model_dump(exclude={"batch_hash", "reveals"})).hash()
         == batch.batch_hash
     )
+
+
+def test_surplus_beneficiary_batch_golden_hash() -> None:
+    designation = SurplusBeneficiaryEvent(
+        event_id="05" * 16,
+        beneficiary_hotkey="5FHneW46xGXgs5mUiveU4sbTyGBzmst2jfFvCw9zThqAXhGK",
+    )
+    batch = CommittedBatch.create(
+        miner_hotkey=MINER,
+        sequence=2,
+        previous_batch_hash="06" * 32,
+        events=(designation, SurplusBeneficiaryEvent(event_id="07" * 16, beneficiary_hotkey=None)),
+    )
+
+    assert batch.batch_hash == "8be314595f9d3b69adfc02a992ad45f6c9c5ee1f6f38356fae9a87f267ce1a7c"
+    assert CommittedBatch.model_validate_json(batch.model_dump_json()) == batch
+
+
+def test_surplus_beneficiary_event_rejects_unknown_fields_and_versions() -> None:
+    base = {"kind": "surplus_beneficiary", "event_id": "05" * 16, "beneficiary_hotkey": None}
+
+    assert SurplusBeneficiaryEvent.model_validate(base).version == 1
+    with pytest.raises(ValidationError):
+        SurplusBeneficiaryEvent.model_validate({**base, "version": 2})
+    with pytest.raises(ValidationError):
+        SurplusBeneficiaryEvent.model_validate({**base, "share": 0.5})
+    with pytest.raises(ValidationError):
+        SurplusBeneficiaryEvent.model_validate({**base, "beneficiary_hotkey": "short"})
 
 
 def test_new_history_batch_is_domain_separated_and_self_identifying() -> None:

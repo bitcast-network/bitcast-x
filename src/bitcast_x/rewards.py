@@ -1,4 +1,4 @@
-"""Finalized seven-day campaign floor and unlimited residual-emission scaling."""
+"""Finalized seven-day campaign floors and floor-first emission weights."""
 
 import hashlib
 from collections.abc import Mapping
@@ -60,7 +60,7 @@ class RewardCampaign:
 
 @dataclass(frozen=True, slots=True)
 class TweetReward:
-    """Frozen per-tweet daily floor before residual scaling."""
+    """Frozen per-tweet daily USD floor."""
 
     campaign_id: str
     tweet_id: str
@@ -319,26 +319,46 @@ def _performance_metrics(tweet: RewardTweet) -> dict[str, float]:
     }
 
 
-def aggregate_productive_weights(
+@dataclass(frozen=True, slots=True)
+class WeightAllocation:
+    """Floor-first mechanism-1 weights by UID position, with their audit breakdown.
+
+    ``weights`` is ``floor_weights + surplus_weights`` normalized to sum to 1.
+    ``surplus_weights`` already includes donations: ``donated_weights`` is the
+    surplus weight each UID gave to its beneficiary. ``funding_ratio`` and
+    ``emission_value_usd`` are None when no pricing snapshot was available.
+    """
+
+    weights: NDArray[np.float64]
+    floor_weights: NDArray[np.float64]
+    surplus_weights: NDArray[np.float64]
+    donated_weights: NDArray[np.float64]
+    total_floors_usd: float
+    emission_value_usd: float | None
+    funding_ratio: float | None
+
+
+def allocate_floor_first_weights(
     tweet_rewards: list[TweetReward],
     hotkey_to_uid: dict[str, int],
     uids: list[int],
     *,
-    score_blend: float,
-) -> NDArray[np.float64]:
-    """Allocate emissions across productive miners by floor and score shares.
+    emission_value_usd: float | None,
+    surplus_beneficiaries: Mapping[str, str] | None = None,
+) -> WeightAllocation:
+    """Cover every miner's USD floors first, then split the surplus by score share.
 
-    Weights are the convex blend of the floor-proportional vector and the
-    deduplicated tweet-score vector: ``1 - score_blend`` weight on floors plus
-    ``score_blend`` weight on unique per-tweet scores. ``0.0`` is exact
-    floor-proportional allocation; ``1.0`` (the production setting) allocates
-    purely on content value, independent of the campaign budget each miner
-    carries. When no positive scores exist the floor vector stands alone, so
-    blended modes never burn productive miners over missing score signal.
+    A miner's floor weight is its daily floors divided by the emission value,
+    so its emission is worth its floors. The surplus weight left over is split
+    by each miner's share of unique tweet scores. When floors exceed the
+    emission value (a shortfall) they are paid pro rata and there is no
+    surplus. Without an emission value, all weight is split in floor
+    proportions, which still covers floors whenever they are funded.
+
+    A miner with a registered surplus beneficiary gives its surplus weight to
+    that hotkey. Donations move only the donor's own surplus, computed before
+    any donation, so chains and cycles never pass weight on twice.
     """
-
-    if not 0.0 <= score_blend <= 1.0:
-        raise ValueError("score_blend must be within [0, 1]")
 
     uid_to_index = {uid: index for index, uid in enumerate(uids)}
     floors = np.zeros(len(uids), dtype=np.float64)
@@ -356,15 +376,62 @@ def aggregate_productive_weights(
         if index is not None:
             floors[index] += reward.daily_usd_floor
             scores[index] += max(reward.score, 0.0)
-    floor_shares = _normalized_shares(floors)
+    total_floors = float(floors.sum())
+    zeros = np.zeros(len(uids), dtype=np.float64)
+    if emission_value_usd is not None and emission_value_usd <= 0:
+        raise ValueError("emission_value_usd must be positive")
+    if total_floors <= 0:
+        burn = _burn(uids)
+        return WeightAllocation(
+            weights=burn,
+            floor_weights=zeros,
+            surplus_weights=zeros,
+            donated_weights=zeros,
+            total_floors_usd=0.0,
+            emission_value_usd=emission_value_usd,
+            funding_ratio=None,
+        )
+    if emission_value_usd is None or emission_value_usd <= total_floors:
+        floor_shares = cast(NDArray[np.float64], floors / total_floors)
+        return WeightAllocation(
+            weights=floor_shares,
+            floor_weights=floor_shares,
+            surplus_weights=zeros,
+            donated_weights=zeros,
+            total_floors_usd=total_floors,
+            emission_value_usd=emission_value_usd,
+            funding_ratio=(
+                emission_value_usd / total_floors if emission_value_usd is not None else None
+            ),
+        )
+    floor_weights = cast(NDArray[np.float64], floors / emission_value_usd)
     score_shares = _normalized_shares(scores)
-    if score_blend <= 0.0 or score_shares is None:
-        if floor_shares is not None:
-            return floor_shares
-        return _burn(uids)
-    floor_component = floor_shares if floor_shares is not None else np.zeros_like(score_shares)
-    blended = (1.0 - score_blend) * floor_component + score_blend * score_shares
-    return cast(NDArray[np.float64], blended / blended.sum())
+    if score_shares is None:
+        score_shares = cast(NDArray[np.float64], floors / total_floors)
+    surplus = (1.0 - total_floors / emission_value_usd) * score_shares
+    donated = np.zeros(len(uids), dtype=np.float64)
+    received = np.zeros(len(uids), dtype=np.float64)
+    for donor_hotkey, beneficiary_hotkey in sorted((surplus_beneficiaries or {}).items()):
+        donor_uid = hotkey_to_uid.get(donor_hotkey)
+        beneficiary_uid = hotkey_to_uid.get(beneficiary_hotkey)
+        donor = uid_to_index.get(donor_uid) if donor_uid is not None else None
+        beneficiary = uid_to_index.get(beneficiary_uid) if beneficiary_uid is not None else None
+        # An unregistered beneficiary leaves the surplus with its donor.
+        if donor is None or beneficiary is None or donor == beneficiary:
+            continue
+        donated[donor] += surplus[donor]
+        received[beneficiary] += surplus[donor]
+    surplus_weights = surplus - donated + received
+    combined = floor_weights + surplus_weights
+    return WeightAllocation(
+        weights=cast(NDArray[np.float64], combined / combined.sum()),
+        floor_weights=floor_weights,
+        surplus_weights=surplus_weights,
+        donated_weights=donated,
+        total_floors_usd=total_floors,
+        emission_value_usd=emission_value_usd,
+        funding_ratio=1.0,
+    )
 
 
 def _normalized_shares(values: NDArray[np.float64]) -> NDArray[np.float64] | None:

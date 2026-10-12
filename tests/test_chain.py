@@ -424,3 +424,62 @@ async def test_unregistered_commitment_signer_is_ignored_at_finalized_block() ->
             INCIDENT_HOTKEY,
             CommitmentPosition(block=fixture["block"], extrinsic_index=INCIDENT_EXTRINSIC_INDEX),
         )
+
+
+class EmissionClient:
+    """Expose one historical subnet pool and mechanism emission split."""
+
+    def __init__(self, dynamic: dict[str, Any], split: list[int]) -> None:
+        self.subnets = self
+        self.dynamic = dynamic
+        self.split = split
+        self.at_block: int | None = None
+
+    async def at(self, block: int) -> "EmissionClient":
+        self.at_block = block
+        return self
+
+    async def runtime(self, _api: Any, params: list[Any]) -> dict[str, Any]:
+        assert params == [93]
+        return self.dynamic
+
+    async def mechanism_emission_split(self, *, netuid: int) -> list[int]:
+        assert netuid == 93
+        return self.split
+
+
+SN93_POOL = {
+    "alpha_out_emission": 1_000_000_000,
+    "alpha_in": 1_268_460_652_438_774,
+    "tao_in": 24_487_229_556_909,
+}
+
+
+async def test_miner_emission_pricing_reads_pool_and_mechanism_share_at_block() -> None:
+    client = EmissionClient(SN93_POOL, [1311, 64224])
+    chain = BittensorChain(client, netuid=93, mechanism_id=1)
+
+    daily_alpha, alpha_price_tao = await chain.miner_emission_pricing(block=9_266_414)
+
+    assert client.at_block == 9_266_414
+    # 7200 blocks x 1 alpha x 41% miner share x mechanism 1's 98% split.
+    assert daily_alpha == pytest.approx(7200 * 0.41 * 64224 / 65535)
+    assert alpha_price_tao == pytest.approx(0.019305, rel=1e-4)
+
+
+@pytest.mark.parametrize(
+    ("dynamic", "split"),
+    [
+        ({**SN93_POOL, "alpha_in": 0}, [1311, 64224]),
+        ({**SN93_POOL, "alpha_out_emission": 0}, [1311, 64224]),
+        (SN93_POOL, [65535]),
+        (SN93_POOL, [65535, 0]),
+    ],
+)
+async def test_miner_emission_pricing_fails_closed_on_unusable_inputs(
+    dynamic: dict[str, Any], split: list[int]
+) -> None:
+    chain = BittensorChain(EmissionClient(dynamic, split), netuid=93, mechanism_id=1)
+
+    with pytest.raises(ChainOperationError, match="emission inputs"):
+        await chain.miner_emission_pricing(block=1)
