@@ -16,25 +16,33 @@ integration has stopped using these interfaces.
 
 ## Upgrading a node that runs 3.0.0 from main
 
-- **Validators:** set `BITCAST_X_OPENROUTER_API_KEY` before upgrading. With production outputs
-  enabled, 3.1.0 refuses to start without it; `BITCAST_X_LLM_PROVIDER` and
-  `BITCAST_X_CHUTES_API_KEY` are no longer read. Without the key a container validator
-  crash-loops, `start-pm2-validator.sh` refuses to start, and a plain `pm2 restart` ends `errored`.
-  An auto-updating validator keeps running 3.0.0 and logs `automatic update check failed` with the
-  missing setting every interval until the key is set.
+- **Validators:** set `BITCAST_X_OPENROUTER_API_KEY` and `BITCAST_X_LLM_PROVIDER=openrouter`
+  before upgrading. With production outputs enabled, 3.1.0 refuses to start without the key.
+  Without it a container validator crash-loops, `start-pm2-validator.sh` refuses to start, and a
+  plain `pm2 restart` ends `errored`. An auto-updating validator keeps running 3.0.0 and logs
+  `automatic update check failed` with the missing setting every interval until the key is set.
+  3.1.0 ignores `BITCAST_X_LLM_PROVIDER` and `BITCAST_X_CHUTES_API_KEY`, but 3.0.0 code defaults
+  to Chutes and needs one or the other, so keep them while 3.0.0 code may still run: a rollback,
+  or an auto-update checkout that has not been updated.
 - **Validators:** allow outbound HTTPS to `api.coingecko.com` for the TAO/USD price.
 - **Validators:** upgrade before block `9,420,000` (about 2026-11-02). After it, 3.0.0 quarantines
-  every miner that names a surplus beneficiary. Until then you can roll back to 3.0.0; after it,
-  roll forward instead.
-- **Auto-updating validators:** update the invoking checkout once
+  every miner that names a surplus beneficiary, and stops on every cycle once 3.1.0 has stored a
+  designation. Until then you can roll back to 3.0.0 (set `BITCAST_X_AUTO_UPDATE=false` first, or
+  the supervisor updates again); after it, roll forward instead.
+- **Auto-updating validators:** update the invoking checkout as soon as 3.1.0 is on `main`
   (`git pull --ff-only && uv sync --frozen --all-extras`). The supervisor runs from that checkout,
-  and the 3.0.0 supervisor runs the checkout's code for up to one update interval after every
-  restart.
+  which updates never change, and the 3.0.0 supervisor starts the checkout's code after every
+  restart until its next update check. That code exits at startup without the provider settings
+  above, and from block `9,420,000` once a designation is stored; the supervisor then exits too
+  and the validator stays down until the checkout is updated. 3.1.0 logs
+  `auto-update checkout ... runs a supervisor older than 3.1.0` at startup until you do. Back up
+  any miner that runs from the same checkout first: its next restart moves it to 3.1.0.
 - **Miners:** miners never update themselves. Run `bitcast-x backup-state` before changing the
   image or checkout. The first 3.1.0 start upgrades the miner database to schema 4 and logs
   `upgraded miner state schema 3 -> 4`; 3.0.0 cannot open it afterwards. To roll back, restore
-  that backup into a new state directory and, if 3.1.0 already committed a batch, run
-  `resume-history` so validators accept the miner again.
+  that backup into a new state directory. If 3.1.0 already committed a batch, then run
+  `resume-history` with the 3.0.0 image or checkout before starting the miner, so validators accept
+  it again; the 3.1.0 binary would upgrade the restored database again.
 
 ## Removed interfaces
 

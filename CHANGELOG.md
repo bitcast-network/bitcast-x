@@ -50,8 +50,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Reshape miner store and engine internals: `MinerStore.preview_batch` becomes `batch_draft`,
   `receipts(event_id=...)` becomes `receipts(event_ids=(...))`, `MinerStore.enqueue` requires its
   queue bounds (`MinerEngine.enqueue` supplies them from the batch policy), `resume_history` moves
-  from `MinerEngine` to `MinerStore`, and `MinerStore.close`, `current_history_id`,
-  `history_has_batches`, `start_history` and `submission_id` are removed. `MinerSdk`,
+  from `MinerEngine` to `MinerStore`, and `current_history_id`, `history_has_batches`,
+  `start_history` and `submission_id` are removed. `MinerSdk`,
   `MinerControlService` (including its `CampaignSource` fallback), `config.QUALIFICATION_OWNER_HOTKEY`
   and the miner HTTP API are unchanged.
 - Replace chat-model brief evaluation with JEV through OpenRouter. One JEV request per tweet scores the
@@ -65,8 +65,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY` and
   `BITCAST_X_LLM_NUM_CHECKS` are removed, along with `LlmBriefFilter`, `parse_brief_evaluation`
   and the `bitcast_x.prompts` markdown prompt generators. A validator configured only for Chutes
-  must set `BITCAST_X_OPENROUTER_API_KEY`; the startup error says the Chutes settings are no longer
-  read.
+  must set `BITCAST_X_OPENROUTER_API_KEY`, and should also set `BITCAST_X_LLM_PROVIDER=openrouter`,
+  which 3.0.0 still reads, while a rollback is possible.
 
 ### Compatibility
 
@@ -130,7 +130,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   the validator updates itself, so the candidate check now reads only the validator database.
 - A restarted auto-update supervisor resumes its activated release. It discarded the activation
   record, because a virtualenv's python links outside the release, and ran the invoking checkout's
-  code until its next update check.
+  code until its next update check. Because the supervisor runs from that checkout, the fix applies
+  once the checkout itself is updated; until then the validator logs a warning at startup.
 - A claim whose draft exceeds 20,000 characters once NFKC-normalized is refused (422 from the
   miner API). Its reveal is stored normalized and re-checked on every read, so such a claim could
   be created but never read back to build a batch, after which no event from any creator committed.
@@ -139,10 +140,6 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   deleted it, and the map-binding bootstrap reads map references from any manifest version.
   Cached ecosystem maps that still carry the retired consumer-only `max_referral_amount` default
   are reused rather than all downloaded again on upgrade.
-- Restore the rule that a stored campaign contract missing `max_members` matches one that has it.
-  An earlier change in this release removed it as unused, but campaigns bound before the field
-  existed and frozen afterwards (or the reverse) then failed every replay check, stopping
-  reconciliation, publication and weights for as long as they stayed in the feed.
 - Settlement no longer freezes a campaign without a tweet whose evidence a provider briefly could
   not return. Validators whose fetch failed froze different rewards, and for a pinned tweet no
   featured bonus, from validators whose fetch succeeded, for the campaign's whole emission window.

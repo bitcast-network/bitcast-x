@@ -1099,23 +1099,34 @@ class ValidatorStore:
             )
 
     def latest_tao_quote(self) -> tuple[float, int] | None:
-        """Return the newest TAO/USD quote a weight cycle used and the block it was fetched at."""
+        """Return the newest TAO/USD quote a weight cycle used and the block it was fetched at.
 
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT block, json_extract(allocation_json, '$.pricing') AS pricing_json
-                FROM weight_allocations
-                WHERE json_extract(allocation_json, '$.pricing') IS NOT NULL
-                ORDER BY block DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        if row is None:
+        An unreadable record only costs the restart its fallback quote, so it is
+        logged and ignored rather than stopping the validator.
+        """
+
+        try:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """
+                    SELECT block, json_extract(allocation_json, '$.pricing') AS pricing_json
+                    FROM weight_allocations
+                    WHERE json_extract(allocation_json, '$.pricing') IS NOT NULL
+                    ORDER BY block DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            if row is None:
+                return None
+            pricing = json.loads(row["pricing_json"])
+            # Records written before the fetch block was recorded used a quote from their block.
+            return (
+                float(pricing["tao_price_usd"]),
+                int(pricing.get("tao_price_block", row["block"])),
+            )
+        except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+            LOGGER.warning("ignoring unreadable recorded TAO price error=%s", exc)
             return None
-        pricing = json.loads(row["pricing_json"])
-        # Records written before the fetch block was recorded used a quote from their own block.
-        return float(pricing["tao_price_usd"]), int(pricing.get("tao_price_block", row["block"]))
 
     def surplus_beneficiaries(self, *, through_block: int) -> dict[str, str]:
         """Return each miner's surplus beneficiary in force at ``through_block``.

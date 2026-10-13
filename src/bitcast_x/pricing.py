@@ -109,8 +109,8 @@ class PricingService:
         try:
             price = await self._fetch_tao_price_usd()
         except (httpx.HTTPError, OSError, ResponseTooLargeError, ValueError) as exc:
-            if self._tao_quote is not None and block - self._tao_quote[1] <= (
-                TAO_PRICE_MAX_AGE_BLOCKS
+            if self._tao_quote is not None and (
+                0 <= block - self._tao_quote[1] <= TAO_PRICE_MAX_AGE_BLOCKS
             ):
                 LOGGER.warning(
                     "TAO price request failed; reusing the quote from block %s error=%s",

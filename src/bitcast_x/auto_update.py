@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import tomllib
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,8 @@ from bitcast_x.validator.store import ValidatorStore
 
 LOGGER = logging.getLogger(__name__)
 _ACTIVE_FILE = "active.json"
+# The first release whose supervisor resumes its activated release after a restart.
+_RESTART_SAFE_SUPERVISOR = (3, 1, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +45,28 @@ def find_source_root(start: Path | None = None) -> Path | None:
         if (parent / ".git").exists():
             return parent
     return None
+
+
+def outdated_supervisor_checkout(start: Path | None = None) -> Path | None:
+    """Return the invoking checkout when its supervisor predates restart-safe updates.
+
+    An activated release runs from a worktree of the checkout that started the
+    supervisor, and updates never change that checkout. Before 3.1.0 a restarted
+    supervisor ran the checkout's own code instead of the activated release.
+    """
+
+    root = find_source_root(start)
+    if root is None or not (root / ".git").is_file():
+        return None
+    try:
+        # A linked worktree's .git file names <checkout>/.git/worktrees/<name>.
+        pointer = (root / ".git").read_text(encoding="utf-8").strip()
+        checkout = Path(pointer.removeprefix("gitdir:").strip()).parents[2]
+        project = tomllib.loads((checkout / "pyproject.toml").read_text(encoding="utf-8"))
+        version = tuple(int(part) for part in str(project["project"]["version"]).split(".")[:3])
+    except (IndexError, KeyError, OSError, ValueError):
+        return None
+    return checkout if version < _RESTART_SAFE_SUPERVISOR else None
 
 
 def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:

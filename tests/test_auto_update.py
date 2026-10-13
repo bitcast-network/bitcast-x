@@ -68,7 +68,7 @@ async def test_update_check_refuses_a_candidate_whose_validator_would_not_start(
     if openrouter_api_key is None:
         # The supervisor then keeps the running validator instead of swapping in
         # a release that exits at startup.
-        with pytest.raises(ValueError, match="OPENROUTER_API_KEY.*CHUTES_API_KEY are no longer"):
+        with pytest.raises(ValueError, match="OPENROUTER_API_KEY.*a Chutes key alone is not"):
             await main_module.run_command(check, settings)  # type: ignore[arg-type]
     else:
         result = await main_module.run_command(check, settings)  # type: ignore[arg-type]
@@ -144,6 +144,34 @@ def test_manager_refuses_update_from_modified_checkout(
 
     with pytest.raises(RuntimeError, match="tracked changes"):
         manager.prepare(Release("a" * 40, source, Path(sys.executable)))
+
+
+@pytest.mark.parametrize(
+    ("checkout_version", "outdated"), [("3.0.0", True), ("3.1.0", False), ("10.0.0", False)]
+)
+def test_release_reports_an_invoking_checkout_older_than_restart_safe_supervisors(
+    tmp_path: Path, checkout_version: str, outdated: bool
+) -> None:
+    checkout = tmp_path / "checkout"
+    (checkout / ".git" / "worktrees" / "release").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text(
+        f'[project]\nname = "bitcast-x"\nversion = "{checkout_version}"\n', encoding="utf-8"
+    )
+    release = tmp_path / "updates" / "releases" / ("b" * 40)
+    module = release / "src" / "bitcast_x" / "auto_update.py"
+    module.parent.mkdir(parents=True)
+    (release / ".git").write_text(
+        f"gitdir: {checkout / '.git' / 'worktrees' / 'release'}\n", encoding="utf-8"
+    )
+
+    found = auto_update.outdated_supervisor_checkout(module)
+
+    assert found == (checkout if outdated else None)
+    # The checkout itself, a container image and an unreadable pointer report nothing.
+    assert auto_update.outdated_supervisor_checkout(checkout / "src" / "x.py") is None
+    assert auto_update.outdated_supervisor_checkout(tmp_path / "image" / "x.py") is None
+    (release / ".git").write_text("gitdir: /\n", encoding="utf-8")
+    assert auto_update.outdated_supervisor_checkout(module) is None
 
 
 def test_restarted_supervisor_resumes_the_activated_release(tmp_path: Path) -> None:

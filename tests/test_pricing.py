@@ -85,15 +85,20 @@ async def test_recorded_tao_quote_prices_a_restart_during_an_outage() -> None:
     responses: list[httpx.Response | Exception] = [
         httpx.ConnectError("offline"),
         httpx.ConnectError("offline"),
+        httpx.ConnectError("offline"),
         quote(310.0),
     ]
     async with tao_price_client(responses) as client:
         service = PricingService(FakeChain(), timeout=1, client=client, last_tao_quote=(300.0, 5))
 
+        # A quote recorded at a later block, as in a state directory from another chain, is
+        # never reused.
+        future = await service.snapshot(4)
         reused = await service.snapshot(5 + TAO_PRICE_MAX_AGE_BLOCKS)
         expired = await service.snapshot(6 + TAO_PRICE_MAX_AGE_BLOCKS)
         fresh = await service.snapshot(7 + TAO_PRICE_MAX_AGE_BLOCKS)
 
+    assert future is None
     assert reused is not None and (reused.tao_price_usd, reused.tao_price_block) == (300.0, 5)
     assert expired is None
     assert fresh is not None and fresh.tao_price_usd == 310.0

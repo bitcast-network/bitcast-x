@@ -12,6 +12,7 @@ import uvicorn
 from bittensor.result import BittensorError
 
 from bitcast_x import __version__
+from bitcast_x.auto_update import outdated_supervisor_checkout
 from bitcast_x.brief_filter import JevBriefFilter
 from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient
 from bitcast_x.chain import BittensorChain
@@ -62,8 +63,8 @@ def ensure_production_outputs_configured(settings: Settings) -> None:
         message = "production validator outputs require: " + ", ".join(missing)
         if "BITCAST_X_OPENROUTER_API_KEY" in missing:
             message += (
-                " (brief evaluation runs JEV through OpenRouter; "
-                "BITCAST_X_LLM_PROVIDER and BITCAST_X_CHUTES_API_KEY are no longer read)"
+                " (brief evaluation now runs JEV through OpenRouter, "
+                "so a Chutes key alone is not enough)"
             )
         raise ValueError(message)
 
@@ -164,6 +165,14 @@ class ValidatorService:
                 __version__,
                 source_revision(),
             )
+            checkout = outdated_supervisor_checkout() if self.settings.auto_update else None
+            if checkout is not None:
+                LOGGER.warning(
+                    "auto-update checkout %s runs a supervisor older than 3.1.0, which restarts "
+                    "into that checkout's code instead of this release; update it with "
+                    "`git pull --ff-only && uv sync --frozen --all-extras`",
+                    checkout,
+                )
             store = ValidatorStore(self.settings.state_dir / "validator.sqlite3")
             stack.callback(store.close)
             ingestor = ValidatorIngestor(

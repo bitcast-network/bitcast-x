@@ -283,3 +283,21 @@ def test_latest_tao_quote_skips_unpriced_cycles_and_reads_older_records(tmp_path
     store.persist_weight_allocation(12, {"pricing": None})
 
     assert store.latest_tao_quote() == (310.0, 8)
+
+
+@pytest.mark.parametrize(
+    "allocation_json", ['{"pricing": {"tao_price_block": 8}}', '{"pricing": [1]}', "not json"]
+)
+def test_unreadable_recorded_tao_quote_is_ignored(tmp_path: Path, allocation_json: str) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    connection = sqlite3.connect(tmp_path / "validator.sqlite3")
+    try:
+        with connection:
+            connection.execute(
+                "INSERT INTO weight_allocations(block, allocation_json) VALUES (?, ?)",
+                (10, allocation_json),
+            )
+    finally:
+        connection.close()
+
+    assert store.latest_tao_quote() is None

@@ -149,8 +149,11 @@ releases manually using the backup procedure below.
 
 The supervisor itself runs from the invoking checkout, which updates never change. Before 3.1.0 a
 restarted supervisor ignored its activation record and ran the checkout's code until its next update
-check, up to one interval later. Update the checkout once to 3.1.0 or later
-(`git pull --ff-only && uv sync --frozen --all-extras`) so a restart resumes the activated release. Prepared code and dependency environments
+check, and if that older code could not start, the supervisor exited with it. Update the checkout
+once to 3.1.0 or later (`git pull --ff-only && uv sync --frozen --all-extras`) so a restart resumes
+the activated release; until then a validator logs `auto-update checkout ... runs a supervisor older
+than 3.1.0` at startup. A miner that runs from the same checkout moves to the new code at its next
+restart, so back it up first. Prepared code and dependency environments
 live only beneath `BITCAST_X_AUTO_UPDATE_DIR`; never point that directory at the state directory.
 Operate direct installs beneath systemd, PM2 or another process supervisor so a fatal validator
 error is restarted even when no update is in progress.
@@ -290,7 +293,8 @@ For application rollback, redeploy the recorded image digest. If the newer relea
 that the older binary cannot read, stop the node and restore the pre-upgrade backup into a new state
 directory; never run two writers against one SQLite volume. A restored miner whose newer release
 already committed a batch is behind its on-chain history, and validators quarantine it until it
-runs `resume-history` (see the recovery section above).
+runs `resume-history` (see the recovery section above). Run that command with the older release,
+because a newer binary would migrate the restored database again.
 
 Rolling back from this release to the 3.0 releases that hard-pinned featured tweets (#119-#140) is
 safe except in one case: an active campaign whose pinned featured tweet was disqualified by an edit
