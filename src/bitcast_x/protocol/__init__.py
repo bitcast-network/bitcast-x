@@ -8,7 +8,6 @@ from bitcast_x.protocol.commitments import (
 from bitcast_x.protocol.models import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
     MAX_DRAFT_CHARS,
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     BatchContent,
@@ -28,7 +27,6 @@ __all__ = [
     "CREATOR_BINDING_ACTIVATION_BLOCK",
     "MAX_ACTIVE_CLAIMS",
     "MAX_DRAFT_CHARS",
-    "SURPLUS_DESIGNATION_ACTIVATION_BLOCK",
     "AttributionReason",
     "AttributionResult",
     "BatchContent",

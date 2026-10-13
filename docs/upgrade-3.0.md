@@ -25,15 +25,15 @@ integration has stopped using these interfaces.
   to Chutes and needs one or the other, so keep them while 3.0.0 code may still run: a rollback,
   or an auto-update checkout that has not been updated.
 - **Validators:** allow outbound HTTPS to `api.coingecko.com` for the TAO/USD price.
-- **Validators:** upgrade before block `9,420,000` (about 2026-11-02). After it, 3.0.0 quarantines
-  every miner that names a surplus beneficiary, and stops on every cycle once 3.1.0 has stored a
-  designation. Until then you can roll back to 3.0.0 (set `BITCAST_X_AUTO_UPDATE=false` first, or
-  the supervisor updates again); after it, roll forward instead.
+- **Validators:** upgrade before any miner names a surplus beneficiary. 3.0.0 quarantines every
+  miner that does, and stops on every cycle once 3.1.0 has stored a designation. Until then you can
+  roll back to 3.0.0 (set `BITCAST_X_AUTO_UPDATE=false` first, or the supervisor updates again);
+  after it, roll forward instead.
 - **Auto-updating validators:** update the invoking checkout as soon as 3.1.0 is on `main`
   (`git pull --ff-only && uv sync --frozen --all-extras`). The supervisor runs from that checkout,
   which updates never change, and the 3.0.0 supervisor starts the checkout's code after every
   restart until its next update check. That code exits at startup without the provider settings
-  above, and from block `9,420,000` once a designation is stored; the supervisor then exits too
+  above, and once a designation is stored; the supervisor then exits too
   and the validator stays down until the checkout is updated. 3.1.0 logs
   `auto-update checkout ... runs a supervisor older than 3.1.0` at startup until you do. Back up
   any miner that runs from the same checkout first: its next restart moves it to 3.1.0.
@@ -121,9 +121,8 @@ after a restart; without a price, a cycle's weights fall back to floor proportio
 
 Miners may name a hotkey to receive their surplus weight with
 `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (or the chart's `surplusBeneficiary`). The miner commits the
-designation once the chain reaches block `9,420,000`. Every validator must run 3.1.0 or later before
-that block, because earlier validators quarantine a batch carrying the designation. Validators on
-3.1.0 also quarantine one committed before that block, so until then both releases agree. Unsetting the
+designation with its next batch. Every validator must run 3.1.0 or later first, because earlier
+validators quarantine a batch carrying the designation. Unsetting the
 value later commits a clearing designation. The miner learns its earlier designation from its own
 database, so restore a lost database before unsetting the value; otherwise the earlier designation
 stays in force.

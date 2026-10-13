@@ -18,7 +18,6 @@ from bitcast_x.errors import ChainOperationError
 from bitcast_x.miner.chain import BittensorCommitmentSubmitter
 from bitcast_x.miner.engine import BatchPolicy, MinerEngine, MinerSdk
 from bitcast_x.miner.store import MinerStore
-from bitcast_x.protocol import SURPLUS_DESIGNATION_ACTIVATION_BLOCK
 from bitcast_x.qualification import (
     QualificationReader,
 )
@@ -164,12 +163,11 @@ def check_surplus_beneficiary(settings: Settings, miner_hotkey: str) -> None:
 
 async def sync_surplus_beneficiary(
     engine: MinerEngine,
-    chain: BittensorChain,
     beneficiary_hotkey: str | None,
     *,
     retry_seconds: float = SURPLUS_BENEFICIARY_RETRY_SECONDS,
 ) -> None:
-    """Queue the configured surplus beneficiary once the chain reaches activation.
+    """Queue the configured surplus beneficiary when it changes the latest one.
 
     An unset beneficiary clears an earlier designation. The batching loop then
     commits the queued event like any other.
@@ -179,21 +177,14 @@ async def sync_surplus_beneficiary(
         return
     while True:
         try:
-            block = await chain.current_block()
-            if block >= SURPLUS_DESIGNATION_ACTIVATION_BLOCK:
-                if engine.designate_surplus_beneficiary(beneficiary_hotkey, block=block):
-                    # The hotkey is public, but CodeQL treats beneficiary values as
-                    # private data, so the configured value is not repeated here.
-                    LOGGER.info(
-                        "queued surplus beneficiary designation action=%s",
-                        "clear" if beneficiary_hotkey is None else "set",
-                    )
-                return
-            LOGGER.info(
-                "surplus beneficiary waits for activation block=%s activation_block=%s",
-                block,
-                SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
-            )
+            if engine.designate_surplus_beneficiary(beneficiary_hotkey):
+                # The hotkey is public, but CodeQL treats beneficiary values as
+                # private data, so the configured value is not repeated here.
+                LOGGER.info(
+                    "queued surplus beneficiary designation action=%s",
+                    "clear" if beneficiary_hotkey is None else "set",
+                )
+            return
         except Exception:
             LOGGER.exception("surplus beneficiary designation failed; retrying")
         await asyncio.sleep(retry_seconds)
@@ -251,9 +242,7 @@ class ReferenceMiner:
                 self.settings.port,
             )
             beneficiary_task = asyncio.create_task(
-                sync_surplus_beneficiary(
-                    self.sdk.engine, self.chain, self.settings.miner_surplus_beneficiary
-                )
+                sync_surplus_beneficiary(self.sdk.engine, self.settings.miner_surplus_beneficiary)
             )
             await commit_until(self.sdk.engine, self.settings, lambda: server.should_exit)
         finally:

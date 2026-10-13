@@ -19,7 +19,6 @@ from bitcast_x.miner import (
     MinerStore,
 )
 from bitcast_x.protocol import (
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentPosition,
     CommittedBatch,
@@ -635,17 +634,14 @@ BENEFICIARY = "5FHneW46xGXgs5mUiveU4sbTyGBzmst2jfFvCw9zThqAXhGK"
 async def test_surplus_beneficiary_designation_commits_beside_claims(tmp_path: Path) -> None:
     sdk = build_sdk(tmp_path / "miner.db", FakeSubmitter())
     engine = sdk.engine
-    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
 
-    with pytest.raises(ProtocolError, match="activate at block"):
-        engine.designate_surplus_beneficiary(BENEFICIARY, block=active - 1)
     with pytest.raises(ProtocolError, match="own surplus beneficiary"):
-        engine.designate_surplus_beneficiary(MINER, block=active)
+        engine.designate_surplus_beneficiary(MINER)
     claim_id = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="A draft")
-    event_id = engine.designate_surplus_beneficiary(BENEFICIARY, block=active)
+    event_id = engine.designate_surplus_beneficiary(BENEFICIARY)
     assert event_id is not None
     # Repeating the current designation queues nothing.
-    assert engine.designate_surplus_beneficiary(BENEFICIARY, block=active) is None
+    assert engine.designate_surplus_beneficiary(BENEFICIARY) is None
 
     batch = await engine.commit_ready(force=True)
 
@@ -659,9 +655,9 @@ async def test_surplus_beneficiary_designation_commits_beside_claims(tmp_path: P
     # Creator receipts cover claims and submissions only.
     assert [item["event_id"] for item in engine.store.receipts()] == [claim_id]
 
-    cleared = engine.designate_surplus_beneficiary(None, block=active)
+    cleared = engine.designate_surplus_beneficiary(None)
     assert cleared is not None
     assert engine.store.latest_surplus_beneficiary() == SurplusBeneficiaryEvent(
         event_id=cleared, beneficiary_hotkey=None
     )
-    assert engine.designate_surplus_beneficiary(None, block=active) is None
+    assert engine.designate_surplus_beneficiary(None) is None

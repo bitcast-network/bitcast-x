@@ -23,7 +23,6 @@ from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     CREATOR_BINDING_ACTIVATION_BLOCK,
     MAX_ACTIVE_CLAIMS,
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     CampaignAccess,
@@ -1659,28 +1658,25 @@ def designation_batch(
     )
 
 
-def test_surplus_beneficiaries_follow_the_latest_designation_from_activation(
-    tmp_path: Path,
-) -> None:
+def test_surplus_beneficiaries_follow_the_latest_designation(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
-    early = designation_batch(MINER, OTHER_MINER, sequence=1, previous=None)
+    first = designation_batch(MINER, OTHER_MINER, sequence=1, previous=None)
     other = designation_batch(OTHER_MINER, MINER, sequence=1, previous=None)
-    later = designation_batch(MINER, OTHER_MINER, sequence=2, previous=early)
+    changed = designation_batch(MINER, None, sequence=2, previous=first)
     cleared = designation_batch(OTHER_MINER, None, sequence=2, previous=other)
-    persist_batch(store, early, block=active - 1, timestamp=NOW)
-    persist_batch(store, other, block=active, timestamp=NOW)
-    persist_batch(store, later, block=active + 1, timestamp=NOW)
-    persist_batch(store, cleared, block=active + 2, timestamp=NOW)
+    persist_batch(store, first, block=10, timestamp=NOW)
+    persist_batch(store, other, block=11, timestamp=NOW)
+    persist_batch(store, changed, block=12, timestamp=NOW)
+    persist_batch(store, cleared, block=13, timestamp=NOW)
 
-    # A designation committed before activation never takes effect.
-    assert store.surplus_beneficiaries(through_block=active - 1) == {}
-    assert store.surplus_beneficiaries(through_block=active) == {OTHER_MINER: MINER}
-    assert store.surplus_beneficiaries(through_block=active + 1) == {
-        OTHER_MINER: MINER,
+    assert store.surplus_beneficiaries(through_block=9) == {}
+    assert store.surplus_beneficiaries(through_block=10) == {MINER: OTHER_MINER}
+    assert store.surplus_beneficiaries(through_block=11) == {
         MINER: OTHER_MINER,
+        OTHER_MINER: MINER,
     }
-    assert store.surplus_beneficiaries(through_block=active + 2) == {MINER: OTHER_MINER}
+    assert store.surplus_beneficiaries(through_block=12) == {OTHER_MINER: MINER}
+    assert store.surplus_beneficiaries(through_block=13) == {}
     store.close()
 
 
@@ -1690,11 +1686,9 @@ def test_reconciliation_skips_designations_beside_campaign_events(tmp_path: Path
     batch = designation_batch(
         MINER, OTHER_MINER, sequence=1, previous=None, claim=claim_event(reveal)
     )
-    persist_batch(store, batch, block=SURPLUS_DESIGNATION_ACTIVATION_BLOCK, timestamp=NOW)
+    persist_batch(store, batch, block=10, timestamp=NOW)
 
-    events = CampaignReconciler(store, FakeX({}), FakeQualification()).verified_events(
-        SURPLUS_DESIGNATION_ACTIVATION_BLOCK
-    )
+    events = CampaignReconciler(store, FakeX({}), FakeQualification()).verified_events(10)
 
     assert list(events.by_campaign) == ["campaign"]
     assert [item.claim.claim_id for item in events.by_campaign["campaign"].claims] == [

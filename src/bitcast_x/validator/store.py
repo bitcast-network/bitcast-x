@@ -15,7 +15,6 @@ from pydantic import TypeAdapter
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     CommitmentPosition,
     CommittedBatch,
     SurplusBeneficiaryEvent,
@@ -1131,8 +1130,8 @@ class ValidatorStore:
     def surplus_beneficiaries(self, *, through_block: int) -> dict[str, str]:
         """Return each miner's surplus beneficiary in force at ``through_block``.
 
-        The latest designation committed from the activation block onward wins,
-        in chain order; one with a null beneficiary clears the miner's entry.
+        The latest designation committed at or before ``through_block`` wins, in
+        chain order; one with a null beneficiary clears the miner's entry.
         """
 
         with self._connect() as connection:
@@ -1140,11 +1139,11 @@ class ValidatorStore:
                 """
                 SELECT b.hotkey, e.value AS event_json
                 FROM verified_batches b, json_each(b.batch_json, '$.events') e
-                WHERE b.block >= ? AND b.block <= ?
+                WHERE b.block <= ?
                   AND json_extract(e.value, '$.kind') = 'surplus_beneficiary'
                 ORDER BY b.block, b.extrinsic_index, CAST(e.key AS INTEGER)
                 """,
-                (SURPLUS_DESIGNATION_ACTIVATION_BLOCK, through_block),
+                (through_block,),
             ).fetchall()
         beneficiaries: dict[str, str] = {}
         for row in rows:

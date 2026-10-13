@@ -12,7 +12,6 @@ from bitcast_x.errors import ChainOperationError, ProtocolError
 from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.store import EventStatus, MinerStore, OperationMetadata
 from bitcast_x.protocol import (
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentEnvelope,
     CommitmentPosition,
@@ -120,23 +119,15 @@ class MinerEngine:
             metadata=metadata,
         )
 
-    def designate_surplus_beneficiary(
-        self, beneficiary_hotkey: str | None, *, block: int
-    ) -> str | None:
+    def designate_surplus_beneficiary(self, beneficiary_hotkey: str | None) -> str | None:
         """Queue a surplus-beneficiary designation when it changes the latest one.
 
         ``None`` clears an earlier designation. Returns the queued event ID, or
-        None when nothing needed to change. Validators that predate the event
-        quarantine any batch carrying it, so it is refused before activation.
+        None when nothing needed to change.
         """
 
         if beneficiary_hotkey == self.miner_hotkey:
             raise ProtocolError("a miner cannot be its own surplus beneficiary")
-        if block < SURPLUS_DESIGNATION_ACTIVATION_BLOCK:
-            raise ProtocolError(
-                "surplus beneficiaries activate at block "
-                f"{SURPLUS_DESIGNATION_ACTIVATION_BLOCK}; current block is {block}"
-            )
         latest = self.store.latest_surplus_beneficiary()
         current = latest.beneficiary_hotkey if latest is not None else None
         if current == beneficiary_hotkey:

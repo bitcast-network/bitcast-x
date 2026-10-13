@@ -10,7 +10,6 @@ import pytest
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     ClaimEvent,
     CommitmentEnvelope,
     CommitmentPosition,
@@ -212,16 +211,8 @@ async def test_manifest_gap_quarantines_run_after_last_valid_batch(tmp_path: Pat
     assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
 
 
-@pytest.mark.parametrize(
-    ("block", "accepted"),
-    [
-        pytest.param(SURPLUS_DESIGNATION_ACTIVATION_BLOCK - 1, False, id="before_activation"),
-        pytest.param(SURPLUS_DESIGNATION_ACTIVATION_BLOCK, True, id="at_activation"),
-    ],
-)
-async def test_surplus_designation_is_quarantined_before_activation(
-    tmp_path: Path, block: int, accepted: bool
-) -> None:
+async def test_surplus_designation_is_accepted(tmp_path: Path) -> None:
+    block = 12
     first, _second = batches()
     designation = CommittedBatch.create(
         miner_hotkey=MINER,
@@ -238,13 +229,9 @@ async def test_surplus_designation_is_quarantined_before_activation(
 
     result = await ingestor(store, client, chain).reconcile(MinerEndpoint(MINER, "http://miner"))
 
-    assert result.quarantined is not accepted
-    if accepted:
-        assert store.history_cursor(MINER)[1:] == (2, designation.batch_hash)
-        assert store.surplus_beneficiaries(through_block=block) == {MINER: OLD_MINER}
-    else:
-        assert "before activation block" in str(result.error)
-        assert store.history_cursor(MINER)[1:] == (1, first.batch_hash)
+    assert result.quarantined is False
+    assert store.history_cursor(MINER)[1:] == (2, designation.batch_hash)
+    assert store.surplus_beneficiaries(through_block=block) == {MINER: OLD_MINER}
 
 
 async def test_latest_recommitment_cannot_hide_changed_history(tmp_path: Path) -> None:

@@ -15,10 +15,8 @@ from bitcast_x.errors import (
     ResponseTooLargeError,
 )
 from bitcast_x.protocol import (
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     BatchChainVerifier,
     CommittedBatch,
-    SurplusBeneficiaryEvent,
 )
 from bitcast_x.transport import BatchPageRequest, SignedMinerClient
 from bitcast_x.validator.store import ValidatorStore
@@ -177,7 +175,6 @@ class ValidatorIngestor:
                         endpoint.hotkey,
                         item.position,
                     )
-                    _reject_early_designation(batch, block=observation.block)
                     verifier.verify_and_advance(batch, observation.envelope)
                     self.store.persist_verified(batch, observation)
                     page_batches.append(batch)
@@ -252,23 +249,6 @@ class ValidatorIngestor:
             )
         finally:
             await client.close()
-
-
-def _reject_early_designation(batch: CommittedBatch, *, block: int) -> None:
-    """Refuse a surplus designation committed before the activation block.
-
-    Releases without surplus designations reject the event at every block, so
-    refusing it before activation keeps this release's stored history readable
-    by them and lets a validator roll back until the activation block.
-    """
-
-    if block < SURPLUS_DESIGNATION_ACTIVATION_BLOCK and any(
-        isinstance(event, SurplusBeneficiaryEvent) for event in batch.events
-    ):
-        raise ProtocolError(
-            f"surplus beneficiary designation committed at block {block}, before activation "
-            f"block {SURPLUS_DESIGNATION_ACTIVATION_BLOCK}"
-        )
 
 
 def signed_client_factory(

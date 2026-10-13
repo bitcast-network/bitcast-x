@@ -122,7 +122,7 @@ def build_miner_api(settings: Settings) -> MinerApps:
             commit_task = asyncio.create_task(commit_until(sdk.engine, settings, lambda: False))
             results_task = asyncio.create_task(results_loop())
             beneficiary_task = asyncio.create_task(
-                sync_surplus_beneficiary(sdk.engine, chain, settings.miner_surplus_beneficiary)
+                sync_surplus_beneficiary(sdk.engine, settings.miner_surplus_beneficiary)
             )
             runtime["ready"] = True
             LOGGER.info("miner API ready hotkey=%s", sdk.engine.miner_hotkey)

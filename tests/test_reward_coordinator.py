@@ -11,7 +11,6 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.pricing import PricingSnapshot
 from bitcast_x.protocol import (
-    SURPLUS_DESIGNATION_ACTIVATION_BLOCK,
     AttributionReason,
     AttributionResult,
     CampaignAccess,
@@ -155,7 +154,7 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
 
 def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
-    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
+    start = 9_300_000
     designation = CommittedBatch.create(
         miner_hotkey=MINER_B,
         sequence=1,
@@ -166,7 +165,7 @@ def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Pat
         designation,
         ChainCommitment(
             hotkey=MINER_B,
-            block=active,
+            block=start,
             extrinsic_index=1,
             timestamp=NOW,
             envelope=CommitmentEnvelope(
@@ -174,7 +173,7 @@ def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Pat
             ),
         ),
     )
-    window = {"emission_start_block": active, "emission_end_block": active + 10}
+    window = {"emission_start_block": start, "emission_end_block": start + 10}
     coordinator = reward_coordinator(store)
 
     weights, floors = coordinator.shadow_weights(
@@ -183,16 +182,16 @@ def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Pat
             record("exclusive", exclusive=MINER_B).model_copy(update=window),
         ),
         [scored("open", "1", MINER_A), scored("exclusive", "2", MINER_B, score=30.0)],
-        block=active + 5,
+        block=start + 5,
         hotkey_to_uid={MINER_A: 1, MINER_B: 2},
         uids=[0, 1, 2],
         # One day of miner emission is worth $1000; floors are $100 each.
         pricing=PricingSnapshot(
-            block=active + 5,
+            block=start + 5,
             daily_miner_alpha=1000.0,
             alpha_price_tao=0.01,
             tao_price_usd=100.0,
-            tao_price_block=active + 5,
+            tao_price_block=start + 5,
         ),
     )
 

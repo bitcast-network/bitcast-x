@@ -65,8 +65,7 @@ table and logged as `floor-first weights`. A funding ratio below 1 means floors 
 emission value and are being paid pro rata.
 
 Miners set `BITCAST_X_MINER_SURPLUS_BENEFICIARY` to give their surplus weight to another
-registered hotkey. The designation is committed with the miner's next batch once the chain reaches
-block `9,420,000`; until then the miner logs `surplus beneficiary waits for activation`.
+registered hotkey. The designation is committed with the miner's next batch.
 
 ## Runtime contract
 

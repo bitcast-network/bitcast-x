@@ -10,10 +10,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - Optional surplus beneficiary. A miner names a hotkey with
   `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (chart value `surplusBeneficiary`). The miner commits it as
-  a `surplus_beneficiary` batch event from block `9,420,000`, and validators then give that
-  hotkey the miner's surplus weight while the miner keeps its floor weight. Any registered hotkey
-  may receive it, including the burn UID. Unsetting the value commits a clearing event. A batch
-  carrying a designation committed before that block is quarantined, as 3.0.0 does at any block.
+  a `surplus_beneficiary` batch event with its next batch, and validators then give that hotkey
+  the miner's surplus weight while the miner keeps its floor weight. Any registered hotkey may
+  receive it, including the burn UID. Unsetting the value commits a clearing event.
 
 ### Breaking changes
 
@@ -73,8 +72,9 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Validator schema 6 is unchanged; 3.1.0 adds a rollback-safe `weight_allocations` table. Miner
   schema 4 is described under breaking changes.
 - Validators before 3.1.0, including 3.0.0 from `main`, quarantine a batch carrying a
-  surplus-beneficiary event, so every validator must upgrade before block `9,420,000`, when miners
-  may start emitting it. Until that block a validator can roll back to 3.0.0; after it, roll forward.
+  surplus-beneficiary event, so every validator must upgrade before a miner names a beneficiary.
+  A validator can roll back to 3.0.0 only until it has stored a designation; after that, roll
+  forward.
 - Automatic source updates following `origin/main` activate this release at merge time. A
   validator whose settings it would refuse stays on its current release and logs why every update
   interval. See the

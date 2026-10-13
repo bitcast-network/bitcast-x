@@ -48,7 +48,7 @@ Several version numbers cover different boundaries and must not be conflated:
 | Claim event | `2` | Strict claim schema and draft-commitment hashing |
 | Batch content and envelope | `2` or `3` | Version 3 identifies a post-recovery history; version 2 is historical replay |
 | Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
-| Surplus-beneficiary event | `1` | Names the hotkey that receives a miner's surplus weight; honored from block `9,420,000` |
+| Surplus-beneficiary event | `1` | Names the hotkey that receives a miner's surplus weight |
 | Campaign mining mode | `preclaim_v2` | Uses committed claims and submissions; legacy campaigns are retired |
 
 The strict wire models are in
@@ -353,9 +353,8 @@ A miner may commit a `surplus_beneficiary` event in its ordinary batch history:
 
 The batch's miner hotkey is the donor. The latest designation in chain order (block, extrinsic,
 event index) stays in force until replaced, and a null `beneficiary_hotkey` clears it. Validators
-quarantine a batch carrying a designation committed before block `9,420,000`, exactly as validators
-that predate this event quarantine one at any block, so every validator must upgrade before that
-block, and the reference miner refuses to emit it earlier.
+that predate this event quarantine a batch carrying it, so every validator must upgrade before a
+miner emits one.
 
 At weight time a donor keeps its floor weight and gives its surplus weight to the beneficiary's UID.
 The beneficiary may be any registered hotkey, including the burn UID. Each donation moves only the

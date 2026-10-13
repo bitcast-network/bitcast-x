@@ -19,7 +19,7 @@ from bitcast_x.miner.service import (
     is_permitted_validator,
     sync_surplus_beneficiary,
 )
-from bitcast_x.protocol import SURPLUS_DESIGNATION_ACTIVATION_BLOCK, SurplusBeneficiaryEvent
+from bitcast_x.protocol import SurplusBeneficiaryEvent
 from bitcast_x.transport import BATCHES_PATH
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -198,7 +198,8 @@ class DesignationEngine:
     miner_hotkey = MINER
 
     def __init__(self, latest: str | None = None) -> None:
-        self.designated: list[tuple[str | None, int]] = []
+        self.failures = 0
+        self.designated: list[str | None] = []
         self.store = SimpleNamespace(
             latest_surplus_beneficiary=lambda: (
                 SurplusBeneficiaryEvent(event_id="01" * 16, beneficiary_hotkey=latest)
@@ -207,51 +208,39 @@ class DesignationEngine:
             )
         )
 
-    def designate_surplus_beneficiary(self, beneficiary: str | None, *, block: int) -> str:
-        self.designated.append((beneficiary, block))
+    def designate_surplus_beneficiary(self, beneficiary: str | None) -> str:
+        if self.failures:
+            self.failures -= 1
+            raise OSError("database is locked")
+        self.designated.append(beneficiary)
         return "02" * 16
 
 
-class BlockChain:
-    def __init__(self, *blocks: int) -> None:
-        self.blocks = list(blocks)
-
-    async def current_block(self) -> int:
-        block = self.blocks.pop(0)
-        if block < 0:
-            raise ChainOperationError("chain unavailable")
-        return block
-
-
-async def test_configured_beneficiary_waits_for_activation_then_is_designated() -> None:
-    active = SURPLUS_DESIGNATION_ACTIVATION_BLOCK
+async def test_configured_beneficiary_is_designated_at_startup_after_a_retry() -> None:
     engine = DesignationEngine()
-    chain = BlockChain(active - 1, -1, active)
+    engine.failures = 1
 
     await sync_surplus_beneficiary(
         engine,  # type: ignore[arg-type]
-        chain,  # type: ignore[arg-type]
         BENEFICIARY,
         retry_seconds=0,
     )
 
-    assert engine.designated == [(BENEFICIARY, active)]
-    assert chain.blocks == []
+    assert engine.designated == [BENEFICIARY]
 
 
 @pytest.mark.parametrize(
     ("latest", "designated"),
-    [(None, []), (BENEFICIARY, [(None, SURPLUS_DESIGNATION_ACTIVATION_BLOCK)])],
+    [(None, []), (BENEFICIARY, [None])],
     ids=["never-designated", "clears-earlier-designation"],
 )
 async def test_unset_beneficiary_only_clears_an_earlier_designation(
-    latest: str | None, designated: list[tuple[str | None, int]]
+    latest: str | None, designated: list[str | None]
 ) -> None:
     engine = DesignationEngine(latest)
 
     await sync_surplus_beneficiary(
         engine,  # type: ignore[arg-type]
-        BlockChain(SURPLUS_DESIGNATION_ACTIVATION_BLOCK),  # type: ignore[arg-type]
         None,
         retry_seconds=0,
     )
