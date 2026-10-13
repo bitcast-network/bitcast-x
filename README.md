@@ -186,8 +186,8 @@ Bitcast X is open-source software under the [MIT License](LICENSE). Contribution
 under the same license; see [CONTRIBUTING.md](CONTRIBUTING.md) for the checks and licensing
 expectations.
 
-This checkout prepares software version `3.0.0`; see the
-[legacy retirement upgrade guide](docs/upgrade-3.0.md) before updating an existing deployment.
+This checkout prepares software version `3.1.0`; see the
+[3.x upgrade guide](docs/upgrade-3.0.md) before updating an existing deployment.
 Software release numbers are separate from the protocol
 versions described in the protocol documentation. See the
 [changelog](CHANGELOG.md), [release policy](docs/release-policy.md),

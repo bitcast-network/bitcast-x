@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from bitcast_x import __version__
 from bitcast_x.errors import ResponseTooLargeError
 from bitcast_x.protocol import CommitmentPosition
+from bitcast_x.release import source_revision
 from bitcast_x.transport import (
     BATCHES_PATH,
     LEGACY_BATCHES_PATH,
@@ -262,6 +263,7 @@ async def test_miner_readiness_waits_for_endpoint_advertisement(tmp_path: Path) 
     assert starting.status_code == 503
     assert ready.status_code == 200
     assert health.json()["version"] == __version__
+    assert health.json()["source_revision"] == source_revision()
 
 
 async def test_oversized_request_is_rejected_before_authentication(tmp_path: Path) -> None:

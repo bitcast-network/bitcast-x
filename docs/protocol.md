@@ -336,8 +336,9 @@ The **pricing snapshot** for a weight block has three inputs. The daily miner em
 `7200 x alpha_out_emission x 0.41 x` the mechanism's share of the emission split. Alpha's TAO price
 is the chain's moving average, `SubnetMovingPrice` (about an eight-hour half-life for SN93), not
 the pool's spot `tao_in / alpha_in`, so one block's trading cannot move it. Both are read from
-finalized state at that block. TAO/USD comes from CoinGecko; a failed request reuses the last quote
-for up to an hour. A snapshot is fixed once per block. When no snapshot is available, all weight is
+finalized state at that block. TAO/USD comes from CoinGecko; a failed request reuses the last quote,
+read back from the validator's stored allocations after a restart, for up to 7,200 blocks (a day).
+A snapshot is fixed once per block. When no snapshot is available, all weight is
 split in floor proportions. That still covers floors whenever they are funded, and only the
 surplus split changes for that cycle.
 
@@ -352,9 +353,9 @@ A miner may commit a `surplus_beneficiary` event in its ordinary batch history:
 
 The batch's miner hotkey is the donor. The latest designation in chain order (block, extrinsic,
 event index) stays in force until replaced, and a null `beneficiary_hotkey` clears it. Validators
-ignore designations committed before block `9,420,000`. Validators that predate this event
-quarantine any batch carrying it, so every validator must upgrade first, and the reference miner
-refuses to emit it earlier.
+quarantine a batch carrying a designation committed before block `9,420,000`, exactly as validators
+that predate this event quarantine one at any block, so every validator must upgrade before that
+block, and the reference miner refuses to emit it earlier.
 
 At weight time a donor keeps its floor weight and gives its surplus weight to the beneficiary's UID.
 The beneficiary may be any registered hotkey, including the burn UID. Each donation moves only the

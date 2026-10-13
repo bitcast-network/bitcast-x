@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from bitcast_x import auto_update
+from bitcast_x import main as main_module
 from bitcast_x.auto_update import Release, SourceUpdateManager
 from bitcast_x.config import Settings
 from bitcast_x.miner.store import MinerStore
@@ -27,19 +28,51 @@ def _logical_dump(path: Path) -> str:
         connection.close()
 
 
-def test_upgrade_check_uses_disposable_copies_without_changing_state(tmp_path: Path) -> None:
+def test_upgrade_check_uses_a_disposable_copy_and_ignores_the_miner_database(
+    tmp_path: Path,
+) -> None:
     state = tmp_path / "state"
     miner_path = state / "miner.sqlite3"
     validator_path = state / "validator.sqlite3"
     MinerStore(miner_path)
     ValidatorStore(validator_path)
+    # Only the validator updates itself, so a miner sharing its state directory
+    # on an older schema must not block the update.
+    connection = sqlite3.connect(miner_path)
+    try:
+        connection.execute("PRAGMA user_version = 3")
+    finally:
+        connection.close()
     before = {path.name: _logical_dump(path) for path in (miner_path, validator_path)}
 
     versions = auto_update.verify_automatic_upgrade(state)
 
-    assert versions.keys() == before.keys()
+    assert versions == {"validator.sqlite3": 6}
     assert {path.name: _logical_dump(path) for path in (miner_path, validator_path)} == before
     assert not list(state.glob("*upgrade*"))
+
+
+@pytest.mark.parametrize("openrouter_api_key", [None, "existing-openrouter-key"])
+async def test_update_check_refuses_a_candidate_whose_validator_would_not_start(
+    tmp_path: Path, openrouter_api_key: str | None
+) -> None:
+    ValidatorStore(tmp_path / "validator.sqlite3")
+    settings = Settings(
+        _env_file=None,
+        state_dir=tmp_path,
+        desearch_api_key="desearch",
+        openrouter_api_key=openrouter_api_key,
+    )
+    check = SimpleNamespace(command="_auto-update-check")
+
+    if openrouter_api_key is None:
+        # The supervisor then keeps the running validator instead of swapping in
+        # a release that exits at startup.
+        with pytest.raises(ValueError, match="OPENROUTER_API_KEY.*CHUTES_API_KEY are no longer"):
+            await main_module.run_command(check, settings)  # type: ignore[arg-type]
+    else:
+        result = await main_module.run_command(check, settings)  # type: ignore[arg-type]
+        assert result == {"schemas": {"validator.sqlite3": 6}}
 
 
 def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) -> None:
@@ -111,6 +144,23 @@ def test_manager_refuses_update_from_modified_checkout(
 
     with pytest.raises(RuntimeError, match="tracked changes"):
         manager.prepare(Release("a" * 40, source, Path(sys.executable)))
+
+
+def test_restarted_supervisor_resumes_the_activated_release(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    settings = Settings(state_dir=tmp_path / "state", auto_update_dir=tmp_path / "updates")
+    manager = SourceUpdateManager(source, settings)
+    root = manager.update_dir / "releases" / ("b" * 40)
+    python = root / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    # A virtualenv's python links to the base interpreter outside the release.
+    python.symlink_to(sys.executable)
+    manager.activate(Release("b" * 40, root, python))
+
+    restarted = SourceUpdateManager(source, settings)
+
+    assert restarted.current_release() == Release("b" * 40, root, python)
 
 
 @pytest.mark.parametrize("update_suffix", (".", "updates"))

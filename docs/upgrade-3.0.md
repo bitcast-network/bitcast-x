@@ -1,9 +1,10 @@
-# Upgrading to software 3.0
+# Upgrading to software 3.x
 
 Software 3.0.0 retires `legacy_connection` campaign execution and the temporary Python interfaces
-used by that engine, and replaces chat-model brief evaluation with JEV through OpenRouter. It
-restores floor-first weights, adds optional surplus beneficiaries, and includes the validator
-reliability and soft featured-pin changes in the changelog. It is a major
+used by that engine. `main` reported 3.0.0 from 2026-09-08 without a release tag. Software 3.1.0
+also replaces chat-model brief evaluation with JEV through OpenRouter, restores floor-first
+weights, adds optional surplus beneficiaries, and includes the validator reliability and soft
+featured-pin changes in the changelog. Measured from 2.2.0, the last tagged release, it is a major
 release under the [release policy](release-policy.md). The version number in this checkout prepares
 the release; it does not mean a release tag or image has
 been published. Use a reviewed, immutable release revision for deployment.
@@ -12,6 +13,28 @@ The canonical network's final legacy campaign emission window ended on 2026-09-0
 custom feeds or other networks must check their own campaign and retention windows before
 upgrading. A date from the canonical deployment does not establish that every downstream legacy
 integration has stopped using these interfaces.
+
+## Upgrading a node that runs 3.0.0 from main
+
+- **Validators:** set `BITCAST_X_OPENROUTER_API_KEY` before upgrading. With production outputs
+  enabled, 3.1.0 refuses to start without it; `BITCAST_X_LLM_PROVIDER` and
+  `BITCAST_X_CHUTES_API_KEY` are no longer read. Without the key a container validator
+  crash-loops, `start-pm2-validator.sh` refuses to start, and a plain `pm2 restart` ends `errored`.
+  An auto-updating validator keeps running 3.0.0 and logs `automatic update check failed` with the
+  missing setting every interval until the key is set.
+- **Validators:** allow outbound HTTPS to `api.coingecko.com` for the TAO/USD price.
+- **Validators:** upgrade before block `9,420,000` (about 2026-11-02). After it, 3.0.0 quarantines
+  every miner that names a surplus beneficiary. Until then you can roll back to 3.0.0; after it,
+  roll forward instead.
+- **Auto-updating validators:** update the invoking checkout once
+  (`git pull --ff-only && uv sync --frozen --all-extras`). The supervisor runs from that checkout,
+  and the 3.0.0 supervisor runs the checkout's code for up to one update interval after every
+  restart.
+- **Miners:** miners never update themselves. Run `bitcast-x backup-state` before changing the
+  image or checkout. The first 3.1.0 start upgrades the miner database to schema 4 and logs
+  `upgraded miner state schema 3 -> 4`; 3.0.0 cannot open it afterwards. To roll back, restore
+  that backup into a new state directory and, if 3.1.0 already committed a batch, run
+  `resume-history` so validators accept the miner again.
 
 ## Removed interfaces
 
@@ -49,11 +72,11 @@ batch transport and preclaim scoring/reward rules intact. `DX2`, `DX3`, `/v2/bat
 remain supported for preclaim history. `MiningProtocol.LEGACY_CONNECTION` is removed; stored
 legacy rows are left in place for audit and are never executed.
 
-Validator schema 6 is unchanged; validators add two rollback-safe tables (`weight_allocations`
-and `featured_tweet_selections`) without changing it. Miner schema 4 rebuilds the miner event table
-so it can hold surplus-beneficiary designations. It is forward-only: an older miner refuses the
-upgraded database, so roll a miner back only by restoring its pre-upgrade backup. Automatic updates
-reject this schema change, so deploy the miner upgrade manually. Preserve the complete state
+Validator schema 6 is unchanged; 3.1.0 adds one rollback-safe table, `weight_allocations`, without
+changing it. Miner schema 4 rebuilds the miner event table so it can hold surplus-beneficiary
+designations. It is forward-only: an older miner refuses the upgraded database, so roll a miner
+back only by restoring its pre-upgrade backup. Miners never update automatically; upgrade them by
+hand after taking that backup. Preserve the complete state
 directory and wallets, including committed batches, pending
 events, campaign and ecosystem-map bindings, preview state and frozen results. Follow the
 [backup and rollback procedure](operator-runbook.md#upgrade-and-rollback). `backup-state` copies
@@ -73,7 +96,8 @@ for that campaign during the 900-block evidence grace period while other campaig
 after grace, available tweets can settle without classifying missing evidence as rejected content.
 
 Preview caching now uses `preview.sqlite3`, with a restricted, read-only import of legacy diskcache
-entries. Preserve both caches in the state backup. Featured pins remain fixed without freezing an
+entries. Keep the old `preview-cache` directory until rollback is no longer needed. `backup-state`
+copies neither preview cache; previews refill them from X. Featured pins remain fixed without freezing an
 unpaid campaign's contract. Follow the runbook's rollback restriction for older releases when a
 campaign settles at zero after its pinned tweet becomes ineligible.
 
@@ -84,13 +108,14 @@ converted to weight at the block's pricing snapshot (alpha's moving-average pric
 emission from chain state, and TAO/USD from CoinGecko). The surplus left after floors is split by
 tweet-score share. This replaces the pure score-share allocation and its `weight_score_blend`
 setting. `BITCAST_X_WEIGHT_SCORE_BLEND` is removed and ignored if still set. Validators need
-outbound HTTPS to `api.coingecko.com`; without a price, a cycle's weights fall back to floor
-proportions.
+outbound HTTPS to `api.coingecko.com`. A failed request reuses the last quote for up to a day, also
+after a restart; without a price, a cycle's weights fall back to floor proportions.
 
 Miners may name a hotkey to receive their surplus weight with
 `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (or the chart's `surplusBeneficiary`). The miner commits the
-designation once the chain reaches block `9,420,000`. Every validator must run this release before
-that block, because older validators quarantine a batch carrying the designation. Unsetting the
+designation once the chain reaches block `9,420,000`. Every validator must run 3.1.0 or later before
+that block, because earlier validators quarantine a batch carrying the designation. Validators on
+3.1.0 also quarantine one committed before that block, so until then both releases agree. Unsetting the
 value later commits a clearing designation. The miner learns its earlier designation from its own
 database, so restore a lost database before unsetting the value; otherwise the earlier designation
 stays in force.
@@ -99,8 +124,10 @@ stays in force.
 
 Source auto-updates are opt-in. An operator who set `BITCAST_X_AUTO_UPDATE=true` and left
 `BITCAST_X_AUTO_UPDATE_REF=origin/main` can receive this removal when it merges. The updater checks
-database schema compatibility and candidate readiness; it does not reject a new software major
-version or wait for a release tag. A version bump alone therefore does not provide an overlap period.
+validator schema compatibility, the candidate's startup settings and candidate readiness; it does not
+reject a new software major version or wait for a release tag. A version bump alone therefore does
+not provide an overlap period. A miner database in the same state directory is not checked, because
+only the validator updates itself.
 
 Operators who still require the removed behavior should disable automatic updates before the
 retirement merge and keep their reviewed revision until ready to upgrade. Published retirement

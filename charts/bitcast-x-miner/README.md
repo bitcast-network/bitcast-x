@@ -124,7 +124,8 @@ kubectl exec deploy/miner-bitcast-x-miner -- \
 ```
 
 Then copy the backup off the volume (`kubectl cp`). Upgrade by changing `image.tag` (or
-`image.digest`) to a reviewed build.
+`image.digest`) to a reviewed build. The first 3.1.0 start upgrades the miner database to schema 4,
+which earlier images cannot open, so take the backup first.
 
 ## Values
 

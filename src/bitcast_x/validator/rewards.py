@@ -368,6 +368,7 @@ def allocation_record(
                 "daily_miner_alpha": pricing.daily_miner_alpha,
                 "alpha_price_tao": pricing.alpha_price_tao,
                 "tao_price_usd": pricing.tao_price_usd,
+                "tao_price_block": pricing.tao_price_block,
             }
             if pricing is not None
             else None

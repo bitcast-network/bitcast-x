@@ -59,7 +59,13 @@ def ensure_production_outputs_configured(settings: Settings) -> None:
         return
     missing = settings.missing_validator_settings()
     if missing:
-        raise ValueError("production validator outputs require: " + ", ".join(missing))
+        message = "production validator outputs require: " + ", ".join(missing)
+        if "BITCAST_X_OPENROUTER_API_KEY" in missing:
+            message += (
+                " (brief evaluation runs JEV through OpenRouter; "
+                "BITCAST_X_LLM_PROVIDER and BITCAST_X_CHUTES_API_KEY are no longer read)"
+            )
+        raise ValueError(message)
 
 
 def ensure_preclaim_economics_qualified(
@@ -252,7 +258,11 @@ class ValidatorService:
             max_response_bytes=settings.max_response_bytes,
         )
         stack.push_async_callback(brief_filter.close)
-        pricing = PricingService(chain, timeout=settings.request_timeout_seconds)
+        pricing = PricingService(
+            chain,
+            timeout=settings.request_timeout_seconds,
+            last_tao_quote=store.latest_tao_quote(),
+        )
         stack.push_async_callback(pricing.close)
         publisher: ShadowResultPublisher | None = None
         if settings.enable_data_publish:

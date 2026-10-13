@@ -30,10 +30,11 @@ strings are consensus-visible contracts.
   schema 4 rebuilds the miner event table to admit surplus-beneficiary events. Create a verified
   backup before upgrading and restore that backup to roll back.
 - Surplus-beneficiary event version 1 adds a third event kind to batches; a golden vector pins its
-  canonical hash. Validators older than software 3.0 quarantine a batch that carries it. Validators
-  therefore ignore designations committed before block `9,420,000`, and miners must not emit one
-  earlier, so every validator must run a release that reads it before that block. Changing that
-  block, the event fields, or how a designation takes effect is a compatibility change.
+  canonical hash. Validators before software 3.1.0 quarantine a batch that carries it at any block.
+  From 3.1.0, validators quarantine one committed before block `9,420,000` too, so before that block
+  both behave identically and a validator can still roll back. Miners must not emit one earlier, and
+  every validator must run 3.1.0 or later before that block. Changing that block, the event fields,
+  or how a designation takes effect is a compatibility change.
 - Weights are floor-first: each miner's USD floors are covered at the block's pricing snapshot
   before the surplus is split by score share. Alpha's price and the emission come from finalized
   chain state; only the TAO/USD quote differs between validators, so their vectors differ slightly

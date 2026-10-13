@@ -4,21 +4,16 @@ All notable changes to Bitcast X are recorded here. This project follows
 [Semantic Versioning](https://semver.org/); software release versions are separate from the wire,
 campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
-## [3.0.0] - Unreleased
+## [3.1.0] - Unreleased
 
 ### Added
 
-- Helm chart for running one miner on Kubernetes (`charts/bitcast-x-miner`): `run-miner` or
-  `run-miner-api`, state on a PersistentVolumeClaim, the hotkey mounted read-only from an existing
-  Secret, and the advertised `publicIP:port` kept identical end to end. Optional: `/api/v1` on
-  its own port (`minerApi.port`, needs `BITCAST_X_MINER_API_PORT` support in the image) behind a
-  ClusterIP Service and a TLS Ingress, and `extraVolumes`/`extraVolumeMounts`. CI lints and
-  renders it and asserts each refusal.
 - Optional surplus beneficiary. A miner names a hotkey with
   `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (chart value `surplusBeneficiary`). The miner commits it as
   a `surplus_beneficiary` batch event from block `9,420,000`, and validators then give that
   hotkey the miner's surplus weight while the miner keeps its floor weight. Any registered hotkey
-  may receive it, including the burn UID. Unsetting the value commits a clearing event.
+  may receive it, including the burn UID. Unsetting the value commits a clearing event. A batch
+  carrying a designation committed before that block is quarantined, as 3.0.0 does at any block.
 
 ### Breaking changes
 
@@ -26,21 +21,16 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   at the block's pricing snapshot first, so its emission is worth what it owes creators. The surplus
   left over is split by tweet-score share. When floors exceed the emission value they are paid pro
   rata. The snapshot reads alpha's moving-average price (`SubnetMovingPrice`) and the miner emission
-  from finalized chain state, and TAO/USD from CoinGecko; without a price, weights fall back to
+  from finalized chain state, and TAO/USD from CoinGecko. A failed TAO/USD request reuses the last
+  quote for up to 7,200 blocks (a day), also after a restart; without a price, weights fall back to
   floor proportions. This replaces the pure score-share allocation that `weight_score_blend=1.0`
   selected on main since 2026-09-16, which could leave a miner's emission below its floors.
   `BITCAST_X_WEIGHT_SCORE_BLEND`, `rewards.aggregate_productive_weights` and
   `RewardCoordinator(score_blend=...)` are removed; use `allocate_floor_first_weights`. Each cycle's
   split is stored in a rollback-safe `weight_allocations` table.
 - Miner schema 4 rebuilds the miner event table to admit surplus-beneficiary events. It is
-  forward-only, and automatic updates refuse it; back up the miner before upgrading.
-- Retire `legacy_connection` campaign execution, connection collection, legacy reward and referral
-  emissions, legacy pricing, and temporary treasury routing. A feed containing a retired campaign
-  aborts the entire validator cycle before campaign scoring, result publication, or weight submission.
-- Remove `legacy-state-info`, the `bitcast_x.legacy` and `bitcast_x.validator.legacy` Python modules,
-  `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
-  These incompatible operator and package changes require a software major release. See the
-  [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
+  forward-only: the first start logs `upgraded miner state schema 3 -> 4`, and 3.0.0 cannot open the
+  database afterwards, so back up the miner before upgrading.
 - Remove unused validator and protocol APIs: the block-scan store methods (`persist_block`,
   `scanned_block`, `commitment_for_sequence`, `next_commitment_sequence`) and the `start_block`
   store argument, `ValidatorStore.cursor`/`record_error` (which wrote a column nothing read),
@@ -74,19 +64,21 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   TypeSafe key is needed.
   `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY` and
   `BITCAST_X_LLM_NUM_CHECKS` are removed, along with `LlmBriefFilter`, `parse_brief_evaluation`
-  and the `bitcast_x.prompts` markdown prompt generators.
+  and the `bitcast_x.prompts` markdown prompt generators. A validator configured only for Chutes
+  must set `BITCAST_X_OPENROUTER_API_KEY`; the startup error says the Chutes settings are no longer
+  read.
 
 ### Compatibility
 
-- The retirement does not change the miner application `/api/v1` contract, canonical batch hashes,
-  `DX2`/`DX3` commitments, `/v2/batches` or `/v3/batches`, or preclaim reward calculations. Historical
-  `legacy_connection` records remain readable. Validator schema 6 is unchanged; miner schema 4 is
-  described under breaking changes.
-- Validators older than this release quarantine a batch carrying a surplus-beneficiary event, so
-  every validator must upgrade before block `9,420,000`, when miners may start emitting it.
-- Existing legacy archives are left in place. Historical settlement remains separate from validator
-  campaign emissions. Automatic source updates following `origin/main` can activate this removal
-  at merge time; they do not wait for a release tag or stop at a software major-version boundary.
+- Validator schema 6 is unchanged; 3.1.0 adds a rollback-safe `weight_allocations` table. Miner
+  schema 4 is described under breaking changes.
+- Validators before 3.1.0, including 3.0.0 from `main`, quarantine a batch carrying a
+  surplus-beneficiary event, so every validator must upgrade before block `9,420,000`, when miners
+  may start emitting it. Until that block a validator can roll back to 3.0.0; after it, roll forward.
+- Automatic source updates following `origin/main` activate this release at merge time. A
+  validator whose settings it would refuse stays on its current release and logs why every update
+  interval. See the
+  [upgrade guide](docs/upgrade-3.0.md#upgrading-a-node-that-runs-300-from-main).
 
 ### Changed
 
@@ -94,8 +86,6 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   required mentions and links. Keep model scores in the stored audit breakdown and make generic
   rejections explicit when no specific unmet requirement is known. Decisions and thresholds are
   unchanged.
-- Cache the miner qualification snapshot for 60 seconds and reuse a fetched campaign during direct
-  submission, reducing repeated upstream reads.
 - Final and preview reconciliation load the verified batch history once per pass, grouped by
   campaign, instead of reloading and re-hashing the whole history for every campaign. The
   reconciler keeps qualification answers for fixed past blocks, and for the moving preview block
@@ -128,9 +118,19 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - Remote Loki log forwarding no longer runs with the placeholder token, which could not
   authenticate: it starts once `BITCAST_X_LOKI_TOKEN` is set, using the shared URL and username
   unless they are overridden. Setting `BITCAST_X_LOKI_URL=` still disables it.
+- The miner's public `/health` reports `source_revision` beside `version`, as the validator's does,
+  so operators can tell builds that share a version number apart.
 
 ### Fixed
 
+- Automatic updates no longer swap in a release whose validator refuses to start. The candidate
+  check now also runs the startup settings check, so a validator missing a setting the candidate
+  requires keeps running instead of being stopped and restored every update interval.
+- A miner database in the validator's state directory no longer blocks validator updates. Only
+  the validator updates itself, so the candidate check now reads only the validator database.
+- A restarted auto-update supervisor resumes its activated release. It discarded the activation
+  record, because a virtualenv's python links outside the release, and ran the invoking checkout's
+  code until its next update check.
 - A claim whose draft exceeds 20,000 characters once NFKC-normalized is refused (422 from the
   miner API). Its reveal is stored normalized and re-checked on every read, so such a claim could
   be created but never read back to build a batch, after which no event from any creator committed.
@@ -188,15 +188,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 - An unreadable preview cache entry (for example after an evidence model change, or a malformed
   timestamp) is now a cache miss that is fetched again. It previously aborted the whole validator
   cycle before weights, or stopped the process.
-
 - A pinned featured tweet no longer freezes its campaign contract or holds back settlement. Campaign
   edits are adopted until economics settle; if an edit leaves the pinned tweet ineligible, that
   campaign settles without a featured bonus instead of deferring every campaign's economics and
   weight submission for the rest of the emission window. Replaces the pin-release logic and its
   `store_audit_events` table; the pinned tweet is never replaced by a different one.
-- Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
-  period only when the creator was historically eligible and the submission is committed no later
-  than the campaign's scoring-close block.
 
 ### Security
 
@@ -208,6 +204,56 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   left unchanged so a rollback keeps its preview state. Delete it once rollback is no longer needed.
   Entries no preview has written for 14 days, which belong to closed campaigns, are dropped, so the
   store stays bounded as diskcache's size limit kept the old cache.
+
+## [3.0.0] - Untagged; `main` reported it from 2026-09-08
+
+### Added
+
+- Helm chart for running one miner on Kubernetes (`charts/bitcast-x-miner`): `run-miner` or
+  `run-miner-api`, state on a PersistentVolumeClaim, the hotkey mounted read-only from an existing
+  Secret, and the advertised `publicIP:port` kept identical end to end. Optional: `/api/v1` on
+  its own port (`minerApi.port`, needs `BITCAST_X_MINER_API_PORT` support in the image) behind a
+  ClusterIP Service and a TLS Ingress, and `extraVolumes`/`extraVolumeMounts`. CI lints and
+  renders it and asserts each refusal.
+- Configurable `weight_score_blend` validator setting, allocating the mechanism-1 weight vector
+  between campaign floors and miners' deduplicated tweet-score shares. **The default is `1.0`:
+  allocation is purely on content value**, independent of carried campaign floors. Operators may
+  set a lower value to blend floors back in; creator reward floors, payouts, and the burn fallback
+  are untouched.
+
+### Breaking changes
+
+- Retire `legacy_connection` campaign execution, connection collection, legacy reward and referral
+  emissions, legacy pricing, and temporary treasury routing. A feed containing a retired campaign
+  aborts the entire validator cycle before campaign scoring, result publication, or weight submission.
+- Remove `legacy-state-info`, the `bitcast_x.legacy` and `bitcast_x.validator.legacy` Python modules,
+  `BITCAST_X_LEGACY_*` settings, provider search/reply methods, and legacy scorer extension arguments.
+  These incompatible operator and package changes require a software major release. See the
+  [upgrade guide](docs/upgrade-3.0.md) for the affected interfaces and migration steps.
+
+### Compatibility
+
+- The retirement does not change the miner application `/api/v1` contract, canonical batch hashes,
+  `DX2`/`DX3` commitments, `/v2/batches` or `/v3/batches`, or preclaim reward calculations. Historical
+  `legacy_connection` records remain readable. Miner schema 3 and validator schema 6 are unchanged.
+- Existing legacy archives are left in place. Historical settlement remains separate from validator
+  campaign emissions. Automatic source updates following `origin/main` can activate this removal
+  at merge time; they do not wait for a release tag or stop at a software major-version boundary.
+
+### Changed
+
+- Cache the miner qualification snapshot for 60 seconds and reuse a fetched campaign during direct
+  submission, reducing repeated upstream reads.
+
+### Fixed
+
+- Release featured-tweet selections that an adopted campaign edit excludes — for example a moved
+  scoring window that no longer contains the pinned tweet — instead of deferring the campaign's
+  final economics (and weight submission) for the rest of the emission window. The decision is
+  recorded in a new validator store audit table.
+- Exclusive direct campaigns accept already-published tweets during the evaluation-day grace
+  period only when the creator was historically eligible and the submission is committed no later
+  than the campaign's scoring-close block.
 
 ## [2.2.0] - 2026-08-31
 

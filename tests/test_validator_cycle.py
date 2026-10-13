@@ -197,7 +197,11 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
     pricing = SimpleNamespace(
         snapshot=AsyncMock(
             return_value=PricingSnapshot(
-                block=BLOCK, daily_miner_alpha=2893.0, alpha_price_tao=0.02, tao_price_usd=300.0
+                block=BLOCK,
+                daily_miner_alpha=2893.0,
+                alpha_price_tao=0.02,
+                tao_price_usd=300.0,
+                tao_price_block=BLOCK,
             )
         ),
         close=AsyncMock(),
@@ -261,6 +265,21 @@ async def test_cycle_preserves_preclaim_outputs_and_rejects_invalid_feeds(
             "daily_miner_alpha": 2893.0,
             "alpha_price_tao": 0.02,
             "tao_price_usd": 300.0,
+            "tao_price_block": BLOCK,
         }
+        assert ValidatorStore(tmp_path / "validator.sqlite3").latest_tao_quote() == (300.0, BLOCK)
         # The frozen floors are far below the $17,358 emission value.
         assert allocation["funding_ratio"] == (1.0 if frozen_rewards else None)
+
+
+def test_latest_tao_quote_skips_unpriced_cycles_and_reads_older_records(tmp_path: Path) -> None:
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    assert store.latest_tao_quote() is None
+
+    # A record written before the fetch block was stored used a quote from its own block.
+    store.persist_weight_allocation(10, {"pricing": {"tao_price_usd": 300.0}})
+    assert store.latest_tao_quote() == (300.0, 10)
+    store.persist_weight_allocation(11, {"pricing": {"tao_price_usd": 310.0, "tao_price_block": 8}})
+    store.persist_weight_allocation(12, {"pricing": None})
+
+    assert store.latest_tao_quote() == (310.0, 8)

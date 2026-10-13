@@ -188,7 +188,11 @@ def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Pat
         uids=[0, 1, 2],
         # One day of miner emission is worth $1000; floors are $100 each.
         pricing=PricingSnapshot(
-            block=active + 5, daily_miner_alpha=1000.0, alpha_price_tao=0.01, tao_price_usd=100.0
+            block=active + 5,
+            daily_miner_alpha=1000.0,
+            alpha_price_tao=0.01,
+            tao_price_usd=100.0,
+            tao_price_block=active + 5,
         ),
     )
 

@@ -18,7 +18,6 @@ from shutil import which
 import httpx
 
 from bitcast_x.config import Settings
-from bitcast_x.miner.store import MinerStore
 from bitcast_x.sqlite import backup_database
 from bitcast_x.validator.store import ValidatorStore
 
@@ -46,29 +45,28 @@ def find_source_root(start: Path | None = None) -> Path | None:
 
 
 def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
-    """Exercise candidate migrations and reject versioned schema changes."""
+    """Exercise the candidate's validator migration and reject a versioned schema change.
+
+    Only the validator updates itself, so a miner database sharing the state
+    directory is left out: its schema never blocks a validator update.
+    """
 
     versions: dict[str, int] = {}
+    name = "validator.sqlite3"
+    source = state_dir / name
+    if not source.exists():
+        return versions
     with tempfile.TemporaryDirectory(prefix="bitcast-x-upgrade-check-") as raw_temp:
-        temporary = Path(raw_temp)
-        for name, factory in (
-            ("miner.sqlite3", lambda path: MinerStore(path)),
-            ("validator.sqlite3", ValidatorStore),
-        ):
-            source = state_dir / name
-            if not source.exists():
-                continue
-            before = _schema_version(source)
-            copied = temporary / name
-            backup_database(source, copied)
-            factory(copied).close()
-            after = _schema_version(copied)
-            if after != before:
-                raise RuntimeError(
-                    f"automatic update requires a manual schema upgrade for {name}: "
-                    f"{before} -> {after}"
-                )
-            versions[name] = before
+        before = _schema_version(source)
+        copied = Path(raw_temp) / name
+        backup_database(source, copied)
+        ValidatorStore(copied).close()
+        after = _schema_version(copied)
+    if after != before:
+        raise RuntimeError(
+            f"automatic update requires a manual schema upgrade for {name}: {before} -> {after}"
+        )
+    versions[name] = before
     return versions
 
 
@@ -104,10 +102,13 @@ class SourceUpdateManager:
         if active_path.exists():
             try:
                 payload = json.loads(active_path.read_text(encoding="utf-8"))
+                python = Path(payload["python"])
                 release = Release(
                     commit=str(payload["commit"]),
                     root=Path(payload["root"]).resolve(),
-                    python=Path(payload["python"]).resolve(),
+                    # A virtualenv's python links to the base interpreter outside the
+                    # release, so only its directory is resolved.
+                    python=python.parent.resolve() / python.name,
                 )
                 releases_dir = (self.update_dir / "releases").resolve()
                 if (

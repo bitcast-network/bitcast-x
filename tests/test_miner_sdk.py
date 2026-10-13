@@ -597,10 +597,12 @@ async def test_prepared_batches_keep_their_pinned_bytes(tmp_path: Path) -> None:
 
 
 async def test_miner_schema_four_rebuild_keeps_committed_claims_and_references(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     path = tmp_path / "miner.sqlite3"
     sdk = build_sdk(path, FakeSubmitter())
+    # A new database is created at the current schema without a warning.
+    assert "upgraded miner state schema" not in caplog.text
     claim_id = sdk.create_claim(campaign_id="campaign", creator_x_id="123", draft="A draft")
     await sdk.engine.commit_ready(force=True)
     sdk.engine.store.close()
@@ -613,6 +615,7 @@ async def test_miner_schema_four_rebuild_keeps_committed_claims_and_references(
 
     reopened = MinerStore(path)
 
+    assert "upgraded miner state schema 3 -> 4" in caplog.text
     assert reopened.status(claim_id) is EventStatus.SAFE_TO_POST
     assert reopened.active_claim_ids("campaign", "123") == [claim_id]
     connection = sqlite3.connect(path)

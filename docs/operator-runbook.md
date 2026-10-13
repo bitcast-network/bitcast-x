@@ -56,9 +56,10 @@ the validator logs `scoring tweet with incomplete engagement evidence`.
 Weights cover each miner's USD floors before splitting the surplus by score share (see the
 [protocol](protocol.md#floor-first-weights)). Each cycle reads alpha's moving-average price and the
 miner emission at the finalized block and requests TAO/USD from `api.coingecko.com`, so validators
-need outbound HTTPS to it. A failed request reuses the last quote for up to an hour. After that the
-cycle logs `pricing unavailable; weights follow floor proportions` and splits all weight by floors
-until a price returns. Each block's split (pricing inputs, emission value, total floors, funding
+need outbound HTTPS to it. A failed request reuses the last quote for up to 7,200 blocks (a day),
+including across a restart, because the quote is read back from `weight_allocations`. After that
+the cycle logs `pricing unavailable; weights follow floor proportions` and splits all weight by
+floors until a price returns. Each block's split (pricing inputs, emission value, total floors, funding
 ratio, and per-UID floor, surplus and donated weight) is stored in the `weight_allocations`
 table and logged as `floor-first weights`. A funding ratio below 1 means floors exceed the
 emission value and are being paid pro rata.
@@ -137,10 +138,19 @@ the active environment, `BITCAST_X_STATE_DIR`, imported legacy files or campaign
 tracked checkout is left running and is not updated. Containers remain immutable and do not
 self-update by default.
 
-Automatic updates reject any candidate that changes an existing miner or validator database schema
-version. A reviewed, rollback-compatible additive table may retain the existing version; candidate
-checks exercise that extension on a disposable database copy before activation. Deploy forward-only
-schema releases manually using the backup procedure below. Prepared code and dependency environments
+Only `run-validator` updates itself; miners are always upgraded by hand. Automatic updates reject any
+candidate that changes the existing validator database schema version, or whose validator would
+refuse the current settings at startup (for example a missing `BITCAST_X_OPENROUTER_API_KEY`). The
+running validator is left untouched, and the reason is logged with `automatic update check failed`
+every interval until it is fixed. A miner database sharing the state directory is not checked. A
+reviewed, rollback-compatible additive table may retain the existing version; candidate checks
+exercise that extension on a disposable database copy before activation. Deploy forward-only schema
+releases manually using the backup procedure below.
+
+The supervisor itself runs from the invoking checkout, which updates never change. Before 3.1.0 a
+restarted supervisor ignored its activation record and ran the checkout's code until its next update
+check, up to one interval later. Update the checkout once to 3.1.0 or later
+(`git pull --ff-only && uv sync --frozen --all-extras`) so a restart resumes the activated release. Prepared code and dependency environments
 live only beneath `BITCAST_X_AUTO_UPDATE_DIR`; never point that directory at the state directory.
 Operate direct installs beneath systemd, PM2 or another process supervisor so a fatal validator
 error is restarted even when no update is in progress.
@@ -221,6 +231,18 @@ bitcast-x shadow-report
 bitcast-x backup-state --output /backups/bitcast-x/2026-08-05T120000Z
 ```
 
+In a container, write the backup inside the state volume, which container UID 10001 owns (a fresh
+bind mount such as `/backups` is root-owned, and the command fails with `PermissionError`), then
+copy it off the volume:
+
+```bash
+docker exec <container> bitcast-x backup-state \
+  --output /var/lib/bitcast-x/backups/2026-08-05T120000Z
+```
+
+`backup-state` copies `miner.sqlite3` and `validator.sqlite3`. It does not copy the validator's
+preview cache (`preview.sqlite3`), which previews refill from X.
+
 Verify every database reports `integrity: ok`, copy the backup directory off the node, and retain
 its `manifest.json`. To restore, stop the node, move the current state directory aside (do not
 overwrite it), copy the backed-up `.sqlite3` files into a new empty state directory, preserve
@@ -266,7 +288,9 @@ new batches exist creates another new history; it never alters either older hist
 
 For application rollback, redeploy the recorded image digest. If the newer release applied a schema
 that the older binary cannot read, stop the node and restore the pre-upgrade backup into a new state
-directory; never run two writers against one SQLite volume.
+directory; never run two writers against one SQLite volume. A restored miner whose newer release
+already committed a batch is behind its on-chain history, and validators quarantine it until it
+runs `resume-history` (see the recovery section above).
 
 Rolling back from this release to the 3.0 releases that hard-pinned featured tweets (#119-#140) is
 safe except in one case: an active campaign whose pinned featured tweet was disqualified by an edit

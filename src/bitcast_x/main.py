@@ -20,7 +20,7 @@ from bitcast_x.miner.service import ReferenceMiner, build_sdk, load_wallet
 from bitcast_x.miner.store import MinerStore
 from bitcast_x.miner.web import run_miner_api
 from bitcast_x.state import backup_state, inspect_state, shadow_report
-from bitcast_x.validator.service import ValidatorService
+from bitcast_x.validator.service import ValidatorService, ensure_production_outputs_configured
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,6 +84,9 @@ async def run_command(arguments: argparse.Namespace, settings: Settings) -> dict
     if arguments.command == "backup-state":
         return backup_state(settings.state_dir, Path(arguments.output))
     if arguments.command == "_auto-update-check":
+        # The running supervisor stops the live validator only after this check
+        # passes, so a candidate that would refuse to start never replaces it.
+        ensure_production_outputs_configured(settings)
         return {"schemas": verify_automatic_upgrade(settings.state_dir)}
     if arguments.command == "resume-history":
         hotkey = str(load_wallet(settings).hotkey.ss58_address)

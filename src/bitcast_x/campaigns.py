@@ -33,7 +33,7 @@ LOGGER = logging.getLogger(__name__)
 
 # Settlement waits this many blocks (3 hours) past a campaign's settlement block for
 # evidence a provider could not return, so a temporary outage cannot make validators
-# freeze different results. Weight submission pauses while a campaign waits.
+# freeze different results. A waiting campaign is left out of weights; the others keep emitting.
 EVIDENCE_GRACE_BLOCKS = 900
 
 

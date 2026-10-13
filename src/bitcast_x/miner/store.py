@@ -1,6 +1,7 @@
 """Crash-safe SQLite state for the reference miner and reusable SDK."""
 
 import json
+import logging
 import secrets
 import sqlite3
 import threading
@@ -27,6 +28,7 @@ from bitcast_x.protocol import (
 )
 from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
 
+LOGGER = logging.getLogger(__name__)
 _EVENT_ADAPTER: TypeAdapter[ProtocolEvent] = TypeAdapter(ProtocolEvent)
 
 
@@ -137,6 +139,7 @@ class MinerStore:
                 # Recover an otherwise-current store whose version pragma was
                 # cleared without destructively replaying the table rebuild.
                 connection.execute("PRAGMA user_version = 3")
+            existing = int(connection.execute("PRAGMA user_version").fetchone()[0])
             # Rebuilding a table that others reference requires foreign keys off
             # (they cannot change inside the migration transaction); the check
             # below then proves every reference survived.
@@ -273,6 +276,15 @@ class MinerStore:
             )
             if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
                 raise ProtocolError("miner state has a broken reference after migration")
+            upgraded = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if 0 < existing < upgraded:
+                LOGGER.warning(
+                    "upgraded miner state schema %s -> %s at %s; earlier releases cannot open it, "
+                    "so roll back only by restoring a backup taken before the upgrade",
+                    existing,
+                    upgraded,
+                    self.path,
+                )
 
     def latest_surplus_beneficiary(self) -> SurplusBeneficiaryEvent | None:
         """Return this miner's most recently queued surplus-beneficiary designation."""

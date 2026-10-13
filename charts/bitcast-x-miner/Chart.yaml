@@ -4,8 +4,8 @@ description: >-
   Runs one Bitcast X miner (`bitcast-x run-miner`, or `run-miner-api` for a platform) with its
   state on a PersistentVolumeClaim and its hotkey from an existing Secret.
 type: application
-version: 0.1.0
-appVersion: "3.0.0"
+version: 0.2.0
+appVersion: "3.1.0"
 home: https://github.com/bitcast-network/bitcast-x
 sources:
   - https://github.com/bitcast-network/bitcast-x
