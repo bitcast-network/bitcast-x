@@ -1,6 +1,7 @@
-"""Finalized seven-day campaign floor and unlimited residual-emission scaling."""
+"""Finalized seven-day campaign floors and floor-first emission weights."""
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import cast
 
@@ -12,6 +13,9 @@ from bitcast_x.protocol import AttributionReason
 
 REWARD_SMOOTHING_EXPONENT = 0.65
 EMISSIONS_PERIOD_DAYS = 7
+PERFORMANCE_BONUS_PER_METRIC = 0.05
+FEATURED_MULTIPLIER = 1.05
+FEATURED_TOP_N = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +60,7 @@ class RewardCampaign:
 
 @dataclass(frozen=True, slots=True)
 class TweetReward:
-    """Frozen per-tweet daily floor before residual scaling."""
+    """Frozen per-tweet daily USD floor."""
 
     campaign_id: str
     tweet_id: str
@@ -102,29 +106,15 @@ class FeaturedTweetCandidate:
 def estimate_payouts(
     daily_budget: float,
     tweets: tuple[RewardTweet, ...],
-    smoothing_exponent: float = REWARD_SMOOTHING_EXPONENT,
 ) -> list[float]:
     """Mirror v2's pre-dedup proportional power-law split."""
 
-    smoothed = [max(tweet.score, 0.0) ** smoothing_exponent for tweet in tweets]
+    smoothed = [max(tweet.score, 0.0) ** REWARD_SMOOTHING_EXPONENT for tweet in tweets]
     total = sum(smoothed)
     if total <= 0:
         return [0.0] * len(tweets)
     # Parentheses preserve v2's float64 operation order exactly.
     return [daily_budget * (value / total) for value in smoothed]
-
-
-def assign_tweets(
-    campaigns: list[RewardCampaign],
-    *,
-    committed_tweet_ids: set[str] | None = None,
-) -> dict[str, set[str]]:
-    """Preserve v2 greedy max-payout assignment, caps, and deterministic tie-breaks."""
-
-    return assign_tweets_with_reasons(
-        campaigns,
-        committed_tweet_ids=committed_tweet_ids,
-    ).assigned
 
 
 def assign_tweets_with_reasons(
@@ -224,66 +214,35 @@ def calculate_tweet_floors(
     return output
 
 
-def apply_v2_bonuses(
-    campaign: RewardCampaign,
-    assigned_tweet_ids: set[str],
-    *,
-    max_bonus_per_metric: float = 0.05,
-    featured_multiplier: float = 1.05,
-    featured_top_n: int = 5,
-) -> RewardCampaign:
-    """Apply v2 performance then featured bonuses to the final assigned subset."""
+def featured_selection_pool(views_by_tweet: Mapping[str, int]) -> tuple[str, ...]:
+    """Return the most-viewed tweet IDs eligible for the featured draw, in rank order."""
 
-    performance_adjusted = apply_v2_performance_bonus(
-        campaign,
-        assigned_tweet_ids,
-        max_bonus_per_metric=max_bonus_per_metric,
-    )
-    selection = select_v2_featured_tweet(
-        performance_adjusted,
-        assigned_tweet_ids,
-        featured_top_n=featured_top_n,
-    )
-    if selection is None:
-        return performance_adjusted
-    return apply_v2_featured_bonus(
-        performance_adjusted,
-        assigned_tweet_ids,
-        selection.tweet_id,
-        featured_multiplier=featured_multiplier,
-    )
+    ranked = sorted(views_by_tweet, key=lambda tweet_id: (-views_by_tweet[tweet_id], tweet_id))
+    return tuple(ranked[:FEATURED_TOP_N])
 
 
 def select_v2_featured_tweet(
     campaign: RewardCampaign,
     assigned_tweet_ids: set[str],
-    *,
-    featured_top_n: int = 5,
 ) -> FeaturedTweetCandidate | None:
     """Select one tweet deterministically from the most-viewed assigned tweets."""
 
-    if featured_top_n < 1:
-        raise ValueError("featured_top_n must be positive")
-    selected = [tweet for tweet in campaign.tweets if tweet.tweet_id in assigned_tweet_ids]
-    if not selected:
-        return None
-    ranked = sorted(
-        selected,
-        key=lambda item: (-item.views_count, item.tweet_id),
-    )[:featured_top_n]
-    identifiers = sorted(item.tweet_id for item in ranked)
-    featured = ranked[hashlib.sha256(",".join(identifiers).encode()).digest()[0] % len(ranked)]
-    return FeaturedTweetCandidate(
-        tweet_id=featured.tweet_id,
-        selection_pool=tuple(item.tweet_id for item in ranked),
+    pool = featured_selection_pool(
+        {
+            tweet.tweet_id: tweet.views_count
+            for tweet in campaign.tweets
+            if tweet.tweet_id in assigned_tweet_ids
+        }
     )
+    if not pool:
+        return None
+    digest = hashlib.sha256(",".join(sorted(pool)).encode()).digest()
+    return FeaturedTweetCandidate(tweet_id=pool[digest[0] % len(pool)], selection_pool=pool)
 
 
 def apply_v2_performance_bonus(
     campaign: RewardCampaign,
     assigned_tweet_ids: set[str],
-    *,
-    max_bonus_per_metric: float = 0.05,
 ) -> RewardCampaign:
     """Apply v2's four relative performance bonuses to an assigned subset."""
 
@@ -299,7 +258,7 @@ def apply_v2_performance_bonus(
         breakdown: dict[str, float] = {}
         for name in names:
             maximum = maxima[name]
-            bonus = metric[name] / maximum * max_bonus_per_metric if maximum > 0 else 0.0
+            bonus = metric[name] / maximum * PERFORMANCE_BONUS_PER_METRIC if maximum > 0 else 0.0
             breakdown[name] = round(bonus * 100, 2)
             total_bonus += bonus
         adjusted[tweet.tweet_id] = replace(
@@ -308,11 +267,8 @@ def apply_v2_performance_bonus(
             performance_bonus_pct=round(total_bonus * 100, 2),
             performance_bonus_breakdown=breakdown,
         )
-    return RewardCampaign(
-        campaign_id=campaign.campaign_id,
-        reward_pool_usd=campaign.reward_pool_usd,
-        max_tweets_per_creator=campaign.max_tweets_per_creator,
-        tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets),
+    return replace(
+        campaign, tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets)
     )
 
 
@@ -320,8 +276,6 @@ def apply_v2_featured_bonus(
     campaign: RewardCampaign,
     assigned_tweet_ids: set[str],
     featured_tweet_id: str,
-    *,
-    featured_multiplier: float = 1.05,
 ) -> RewardCampaign:
     """Apply v2's featured bonus using an already selected, pinned tweet ID."""
 
@@ -339,15 +293,12 @@ def apply_v2_featured_bonus(
         receives_bonus = tweet.author_username.casefold() in bonus_accounts
         adjusted[tweet.tweet_id] = replace(
             tweet,
-            score=tweet.score * featured_multiplier if receives_bonus else tweet.score,
+            score=tweet.score * FEATURED_MULTIPLIER if receives_bonus else tweet.score,
             featured_tweet_bonus=receives_bonus,
             featured_tweet_id=featured_tweet_id,
         )
-    return RewardCampaign(
-        campaign_id=campaign.campaign_id,
-        reward_pool_usd=campaign.reward_pool_usd,
-        max_tweets_per_creator=campaign.max_tweets_per_creator,
-        tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets),
+    return replace(
+        campaign, tweets=tuple(adjusted.get(tweet.tweet_id, tweet) for tweet in campaign.tweets)
     )
 
 
@@ -368,26 +319,46 @@ def _performance_metrics(tweet: RewardTweet) -> dict[str, float]:
     }
 
 
-def aggregate_productive_weights(
+@dataclass(frozen=True, slots=True)
+class WeightAllocation:
+    """Floor-first mechanism-1 weights by UID position, with their audit breakdown.
+
+    ``weights`` is ``floor_weights + surplus_weights`` normalized to sum to 1.
+    ``surplus_weights`` already includes donations: ``donated_weights`` is the
+    surplus weight each UID gave to its beneficiary. ``funding_ratio`` and
+    ``emission_value_usd`` are None when no pricing snapshot was available.
+    """
+
+    weights: NDArray[np.float64]
+    floor_weights: NDArray[np.float64]
+    surplus_weights: NDArray[np.float64]
+    donated_weights: NDArray[np.float64]
+    total_floors_usd: float
+    emission_value_usd: float | None
+    funding_ratio: float | None
+
+
+def allocate_floor_first_weights(
     tweet_rewards: list[TweetReward],
     hotkey_to_uid: dict[str, int],
     uids: list[int],
     *,
-    score_blend: float = 0.0,
-) -> NDArray[np.float64]:
-    """Allocate emissions across productive miners by floor and score shares.
+    emission_value_usd: float | None,
+    surplus_beneficiaries: Mapping[str, str] | None = None,
+) -> WeightAllocation:
+    """Cover every miner's USD floors first, then split the surplus by score share.
 
-    Weights are the convex blend of the floor-proportional vector and the
-    deduplicated tweet-score vector: ``1 - score_blend`` weight on floors plus
-    ``score_blend`` weight on unique per-tweet scores. ``0.0`` (the default)
-    preserves exact floor-proportional allocation; ``1.0`` allocates purely on
-    content value, independent of the campaign budget each miner carries. When
-    no positive scores exist the floor vector stands alone, so blended modes
-    never burn productive miners over missing score signal.
+    A miner's floor weight is its daily floors divided by the emission value,
+    so its emission is worth its floors. The surplus weight left over is split
+    by each miner's share of unique tweet scores. When floors exceed the
+    emission value (a shortfall) they are paid pro rata and there is no
+    surplus. Without an emission value, all weight is split in floor
+    proportions, which still covers floors whenever they are funded.
+
+    A miner with a registered surplus beneficiary gives its surplus weight to
+    that hotkey. Donations move only the donor's own surplus, computed before
+    any donation, so chains and cycles never pass weight on twice.
     """
-
-    if not 0.0 <= score_blend <= 1.0:
-        raise ValueError("score_blend must be within [0, 1]")
 
     uid_to_index = {uid: index for index, uid in enumerate(uids)}
     floors = np.zeros(len(uids), dtype=np.float64)
@@ -405,20 +376,62 @@ def aggregate_productive_weights(
         if index is not None:
             floors[index] += reward.daily_usd_floor
             scores[index] += max(reward.score, 0.0)
-    floor_shares = _normalized_shares(floors)
+    total_floors = float(floors.sum())
+    zeros = np.zeros(len(uids), dtype=np.float64)
+    if emission_value_usd is not None and emission_value_usd <= 0:
+        raise ValueError("emission_value_usd must be positive")
+    if total_floors <= 0:
+        burn = _burn(uids)
+        return WeightAllocation(
+            weights=burn,
+            floor_weights=zeros,
+            surplus_weights=zeros,
+            donated_weights=zeros,
+            total_floors_usd=0.0,
+            emission_value_usd=emission_value_usd,
+            funding_ratio=None,
+        )
+    if emission_value_usd is None or emission_value_usd <= total_floors:
+        floor_shares = cast(NDArray[np.float64], floors / total_floors)
+        return WeightAllocation(
+            weights=floor_shares,
+            floor_weights=floor_shares,
+            surplus_weights=zeros,
+            donated_weights=zeros,
+            total_floors_usd=total_floors,
+            emission_value_usd=emission_value_usd,
+            funding_ratio=(
+                emission_value_usd / total_floors if emission_value_usd is not None else None
+            ),
+        )
+    floor_weights = cast(NDArray[np.float64], floors / emission_value_usd)
     score_shares = _normalized_shares(scores)
-    if floor_shares is None and score_shares is None:
-        return _burn(uids)
-    if score_blend <= 0.0 or score_shares is None:
-        if floor_shares is not None:
-            return floor_shares
-        return _burn(uids)
-    floor_component = floor_shares if floor_shares is not None else np.zeros_like(score_shares)
-    blended = (1.0 - score_blend) * floor_component + score_blend * score_shares
-    blended_total = blended.sum()
-    if blended_total <= 0:
-        return _burn(uids)
-    return cast(NDArray[np.float64], blended / blended_total)
+    if score_shares is None:
+        score_shares = cast(NDArray[np.float64], floors / total_floors)
+    surplus = (1.0 - total_floors / emission_value_usd) * score_shares
+    donated = np.zeros(len(uids), dtype=np.float64)
+    received = np.zeros(len(uids), dtype=np.float64)
+    for donor_hotkey, beneficiary_hotkey in sorted((surplus_beneficiaries or {}).items()):
+        donor_uid = hotkey_to_uid.get(donor_hotkey)
+        beneficiary_uid = hotkey_to_uid.get(beneficiary_hotkey)
+        donor = uid_to_index.get(donor_uid) if donor_uid is not None else None
+        beneficiary = uid_to_index.get(beneficiary_uid) if beneficiary_uid is not None else None
+        # An unregistered beneficiary leaves the surplus with its donor.
+        if donor is None or beneficiary is None or donor == beneficiary:
+            continue
+        donated[donor] += surplus[donor]
+        received[beneficiary] += surplus[donor]
+    surplus_weights = surplus - donated + received
+    combined = floor_weights + surplus_weights
+    return WeightAllocation(
+        weights=cast(NDArray[np.float64], combined / combined.sum()),
+        floor_weights=floor_weights,
+        surplus_weights=surplus_weights,
+        donated_weights=donated,
+        total_floors_usd=total_floors,
+        emission_value_usd=emission_value_usd,
+        funding_ratio=1.0,
+    )
 
 
 def _normalized_shares(values: NDArray[np.float64]) -> NDArray[np.float64] | None:
@@ -434,17 +447,3 @@ def _burn(uids: list[int]) -> NDArray[np.float64]:
     """Preserve the availability/no-content fallback: only UID 0 receives weight."""
 
     return np.array([1.0 if uid == 0 else 0.0 for uid in uids], dtype=np.float64)
-
-
-def calculate_rewards(
-    campaigns: list[RewardCampaign],
-    hotkey_to_uid: dict[str, int],
-    uids: list[int],
-    *,
-    committed_tweet_ids: set[str] | None = None,
-) -> tuple[NDArray[np.float64], list[TweetReward]]:
-    """Run assignment, floor calculation, and approved unlimited multiplier."""
-
-    assignments = assign_tweets(campaigns, committed_tweet_ids=committed_tweet_ids)
-    floors = calculate_tweet_floors(campaigns, assignments)
-    return aggregate_productive_weights(floors, hotkey_to_uid, uids), floors

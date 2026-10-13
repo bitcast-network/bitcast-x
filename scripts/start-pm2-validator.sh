@@ -26,17 +26,7 @@ import sys
 from bitcast_x.config import Settings
 
 settings = Settings()
-missing: list[str] = []
-if settings.campaign_feed_url is None:
-    missing.append("BITCAST_X_CAMPAIGN_FEED_URL")
-if not settings.desearch_api_key:
-    missing.append("BITCAST_X_DESEARCH_API_KEY")
-if not settings.llm_api_key:
-    missing.append(
-        "BITCAST_X_CHUTES_API_KEY"
-        if settings.llm_provider == "chutes"
-        else "BITCAST_X_OPENROUTER_API_KEY"
-    )
+missing = settings.missing_validator_settings()
 
 hotkey_path = settings.wallet_path / settings.wallet_name / "hotkeys" / settings.wallet_hotkey
 if not hotkey_path.is_file():

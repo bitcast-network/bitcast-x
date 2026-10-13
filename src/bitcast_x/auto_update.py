@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import tomllib
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,12 +19,13 @@ from shutil import which
 import httpx
 
 from bitcast_x.config import Settings
-from bitcast_x.miner.store import MinerStore
 from bitcast_x.sqlite import backup_database
 from bitcast_x.validator.store import ValidatorStore
 
 LOGGER = logging.getLogger(__name__)
 _ACTIVE_FILE = "active.json"
+# The first release whose supervisor resumes its activated release after a restart.
+_RESTART_SAFE_SUPERVISOR = (3, 1, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,36 +47,51 @@ def find_source_root(start: Path | None = None) -> Path | None:
     return None
 
 
-def auto_update_enabled(settings: Settings) -> bool:
-    """Return whether the operator explicitly enabled source updates."""
+def outdated_supervisor_checkout(start: Path | None = None) -> Path | None:
+    """Return the invoking checkout when its supervisor predates restart-safe updates.
 
-    return settings.auto_update
+    An activated release runs from a worktree of the checkout that started the
+    supervisor, and updates never change that checkout. Before 3.1.0 a restarted
+    supervisor ran the checkout's own code instead of the activated release.
+    """
+
+    root = find_source_root(start)
+    if root is None or not (root / ".git").is_file():
+        return None
+    try:
+        # A linked worktree's .git file names <checkout>/.git/worktrees/<name>.
+        pointer = (root / ".git").read_text(encoding="utf-8").strip()
+        checkout = Path(pointer.removeprefix("gitdir:").strip()).parents[2]
+        project = tomllib.loads((checkout / "pyproject.toml").read_text(encoding="utf-8"))
+        version = tuple(int(part) for part in str(project["project"]["version"]).split(".")[:3])
+    except (IndexError, KeyError, OSError, ValueError):
+        return None
+    return checkout if version < _RESTART_SAFE_SUPERVISOR else None
 
 
 def verify_automatic_upgrade(state_dir: Path) -> dict[str, int]:
-    """Exercise candidate migrations and reject versioned schema changes."""
+    """Exercise the candidate's validator migration and reject a versioned schema change.
+
+    Only the validator updates itself, so a miner database sharing the state
+    directory is left out: its schema never blocks a validator update.
+    """
 
     versions: dict[str, int] = {}
+    name = "validator.sqlite3"
+    source = state_dir / name
+    if not source.exists():
+        return versions
     with tempfile.TemporaryDirectory(prefix="bitcast-x-upgrade-check-") as raw_temp:
-        temporary = Path(raw_temp)
-        for name, factory in (
-            ("miner.sqlite3", lambda path: MinerStore(path)),
-            ("validator.sqlite3", lambda path: ValidatorStore(path, start_block=0)),
-        ):
-            source = state_dir / name
-            if not source.exists():
-                continue
-            before = _schema_version(source)
-            copied = temporary / name
-            backup_database(source, copied)
-            factory(copied)
-            after = _schema_version(copied)
-            if after != before:
-                raise RuntimeError(
-                    f"automatic update requires a manual schema upgrade for {name}: "
-                    f"{before} -> {after}"
-                )
-            versions[name] = before
+        before = _schema_version(source)
+        copied = Path(raw_temp) / name
+        backup_database(source, copied)
+        ValidatorStore(copied).close()
+        after = _schema_version(copied)
+    if after != before:
+        raise RuntimeError(
+            f"automatic update requires a manual schema upgrade for {name}: {before} -> {after}"
+        )
+    versions[name] = before
     return versions
 
 
@@ -110,10 +127,13 @@ class SourceUpdateManager:
         if active_path.exists():
             try:
                 payload = json.loads(active_path.read_text(encoding="utf-8"))
+                python = Path(payload["python"])
                 release = Release(
                     commit=str(payload["commit"]),
                     root=Path(payload["root"]).resolve(),
-                    python=Path(payload["python"]).resolve(),
+                    # A virtualenv's python links to the base interpreter outside the
+                    # release, so only its directory is resolved.
+                    python=python.parent.resolve() / python.name,
                 )
                 releases_dir = (self.update_dir / "releases").resolve()
                 if (

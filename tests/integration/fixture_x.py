@@ -20,7 +20,9 @@ class FixtureXProvider:
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         return self._tweets[tweet_id]
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         return self._engagements[tweet_id]
 
     async def close(self) -> None:

@@ -210,8 +210,7 @@ class ValidatorIngestor:
                     return result
             raise ProtocolError("miner pagination exceeded the per-run page limit")
         except (ProtocolError, ValidationError) as exc:
-            self.store.record_error(endpoint.hotkey, str(exc))
-            cursor, _hash = self.store.cursor(endpoint.hotkey)
+            _history_id, cursor, _hash = self.store.history_cursor(endpoint.hotkey)
             LOGGER.warning(
                 "miner reconciliation quarantined hotkey=%s endpoint=%s cursor=%s "
                 "batches_verified=%s error=%s",
@@ -230,8 +229,7 @@ class ValidatorIngestor:
                 error=str(exc),
             )
         except (ChainOperationError, httpx.HTTPError, OSError, ResponseTooLargeError) as exc:
-            self.store.record_error(endpoint.hotkey, f"unavailable: {exc}")
-            cursor, _hash = self.store.cursor(endpoint.hotkey)
+            _history_id, cursor, _hash = self.store.history_cursor(endpoint.hotkey)
             LOGGER.warning(
                 "miner reconciliation unavailable hotkey=%s endpoint=%s cursor=%s "
                 "batches_verified=%s error=%s",

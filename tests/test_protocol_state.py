@@ -1,6 +1,8 @@
 """Tests for deterministic batch-chain and claim FIFO reconstruction."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 
@@ -8,10 +10,7 @@ from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     BatchChainVerifier,
     ClaimEvent,
-    ClaimLedger,
-    ClaimRecord,
     CommitmentEnvelope,
-    CommitmentPosition,
     CommittedBatch,
 )
 
@@ -87,43 +86,108 @@ def test_batch_chain_does_not_advance_on_gap() -> None:
     assert verifier.last_batch_hash is None
 
 
-def test_sixth_claim_evicts_oldest_and_winner_is_consumed() -> None:
-    ledger = ClaimLedger()
-    for number in range(1, 7):
-        evicted = ledger.add(
-            ClaimRecord(
-                claim=claim(number),
-                position=CommitmentPosition(block=100 + number, extrinsic_index=0),
-                event_index=0,
-            )
-        )
-
-    assert evicted == f"{1:032x}"
-    assert [record.claim.claim_id for record in ledger.active("campaign", "123")] == [
-        f"{number:032x}" for number in range(2, 7)
-    ]
-    assert ledger.status(f"{1:032x}") == "evicted"
-
-    ledger.consume(f"{4:032x}")
-
-    assert ledger.status(f"{4:032x}") == "consumed"
-    assert len(ledger.active("campaign", "123")) == 4
+HISTORY = "04" * 32
 
 
-def test_claim_id_reuse_with_different_position_fails() -> None:
-    ledger = ClaimLedger()
-    first = ClaimRecord(
-        claim=claim(1),
-        position=CommitmentPosition(block=1, extrinsic_index=0),
-        event_index=0,
+def envelope_for(batch: CommittedBatch) -> CommitmentEnvelope:
+    return CommitmentEnvelope(
+        sequence=batch.sequence,
+        event_count=len(batch.events),
+        batch_hash=bytes.fromhex(batch.batch_hash),
+        history_id=bytes.fromhex(batch.history_id) if batch.history_id is not None else None,
     )
-    ledger.add(first)
 
-    with pytest.raises(ProtocolError, match="reused"):
-        ledger.add(
-            ClaimRecord(
-                claim=first.claim,
-                position=CommitmentPosition(block=2, extrinsic_index=0),
-                event_index=0,
-            )
-        )
+
+@pytest.mark.parametrize(
+    ("batch_changes", "envelope_changes", "message"),
+    [
+        pytest.param(
+            {"miner_hotkey": "5F" + "x" * 46},
+            {},
+            "batch belongs to a different miner hotkey",
+            id="wrong-miner-hotkey",
+        ),
+        pytest.param(
+            {"history_id": "05" * 32},
+            {},
+            "batch belongs to a different miner history",
+            id="wrong-batch-history",
+        ),
+        pytest.param(
+            {"history_id": None},
+            {},
+            "batch belongs to a different miner history",
+            id="legacy-batch-in-history",
+        ),
+        pytest.param(
+            {},
+            {"history_id": bytes.fromhex("05" * 32)},
+            "on-chain envelope belongs to a different miner history",
+            id="wrong-envelope-history",
+        ),
+        pytest.param(
+            {"sequence": 3},
+            {"sequence": 2},
+            "expected batch sequence 2",
+            id="batch-sequence-gap",
+        ),
+        pytest.param(
+            {},
+            {"sequence": 3},
+            "expected batch sequence 2",
+            id="envelope-sequence-gap",
+        ),
+        pytest.param(
+            {"previous_batch_hash": "ff" * 32},
+            {},
+            "batch previous hash does not match verified history",
+            id="previous-hash-mismatch",
+        ),
+        pytest.param(
+            {},
+            {"event_count": 2},
+            "commitment event count does not match complete batch",
+            id="event-count-mismatch",
+        ),
+        pytest.param(
+            {},
+            {"batch_hash": bytes(32)},
+            "on-chain hash does not match complete batch",
+            id="batch-hash-mismatch",
+        ),
+    ],
+)
+def test_batch_chain_rejects_any_mismatched_next_commitment_without_advancing(
+    batch_changes: dict[str, Any],
+    envelope_changes: dict[str, Any],
+    message: str,
+) -> None:
+    first = CommittedBatch.create(
+        miner_hotkey=MINER,
+        history_id=HISTORY,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(claim(1),),
+    )
+    verifier = BatchChainVerifier(MINER)
+    verifier.start_history(HISTORY)
+    verifier.verify_and_advance(first, envelope_for(first))
+    batch = CommittedBatch.create(
+        **{
+            "miner_hotkey": MINER,
+            "history_id": HISTORY,
+            "sequence": 2,
+            "previous_batch_hash": first.batch_hash,
+            "events": (claim(2),),
+            **batch_changes,
+        }
+    )
+
+    with pytest.raises(ProtocolError, match=f"^{message}$"):
+        verifier.verify_and_advance(batch, replace(envelope_for(batch), **envelope_changes))
+
+    assert (verifier.history_id, verifier.last_sequence, verifier.last_batch_hash) == (
+        HISTORY,
+        1,
+        first.batch_hash,
+    )

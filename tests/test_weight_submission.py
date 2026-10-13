@@ -59,109 +59,101 @@ def _qualification_schedule(*thresholds: tuple[int, str]) -> QualificationSchedu
     )
 
 
-def test_enabled_production_outputs_require_reconciliation_providers() -> None:
-    with pytest.raises(
-        ValueError,
-        match="BITCAST_X_DESEARCH_API_KEY, BITCAST_X_CHUTES_API_KEY",
-    ):
-        ensure_production_outputs_configured(Settings(_env_file=None))
+@pytest.mark.parametrize(
+    ("updates", "missing"),
+    [
+        pytest.param(
+            {},
+            "BITCAST_X_DESEARCH_API_KEY, BITCAST_X_OPENROUTER_API_KEY",
+            id="enabled_outputs_require_reconciliation_providers",
+        ),
+        pytest.param(
+            {"enable_data_publish": False, "enable_weight_submission": False},
+            None,
+            id="disabled_outputs_allow_ingestion_only_diagnostic_run",
+        ),
+        pytest.param(
+            {"desearch_api_key": "desearch", "openrouter_api_key": "openrouter"},
+            None,
+            id="complete_provider_configuration",
+        ),
+    ],
+)
+def test_production_outputs_require_reconciliation_providers(
+    updates: dict[str, object],
+    missing: str | None,
+) -> None:
+    settings = Settings(_env_file=None).model_copy(update=updates)
+
+    if missing is None:
+        ensure_production_outputs_configured(settings)
+    else:
+        with pytest.raises(ValueError, match=missing):
+            ensure_production_outputs_configured(settings)
 
 
-def test_disabled_outputs_allow_an_ingestion_only_diagnostic_run() -> None:
-    settings = Settings(_env_file=None).model_copy(
-        update={"enable_data_publish": False, "enable_weight_submission": False}
+def test_production_outputs_accept_existing_openrouter_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BITCAST_X_DESEARCH_API_KEY", "desearch")
+    monkeypatch.setenv("BITCAST_X_OPENROUTER_API_KEY", "existing-openrouter-key")
+    monkeypatch.setenv("BITCAST_X_LLM_PROVIDER", "openrouter")
+
+    ensure_production_outputs_configured(Settings(_env_file=None))
+
+
+ZERO = _qualification_schedule((0, "0"))
+ZERO_FROM_200 = _qualification_schedule((0, "100"), (200, "0"))
+SELF_STAKE_ONLY = QualificationSchedule(
+    configurations=(
+        QualificationConfig(
+            owner_hotkey=OWNER,
+            minimum_conviction_alpha=Decimal("0"),
+            minimum_self_stake_alpha=Decimal("15000"),
+            effective_block=0,
+        ),
     )
-
-    ensure_production_outputs_configured(settings)
-
-
-def test_production_outputs_accept_complete_provider_configuration() -> None:
-    settings = Settings(_env_file=None).model_copy(
-        update={"desearch_api_key": "desearch", "chutes_api_key": "chutes"}
-    )
-
-    ensure_production_outputs_configured(settings)
+)
 
 
 @pytest.mark.parametrize(
-    ("data_publish_enabled", "weight_submission_enabled"),
-    [(True, False), (False, True), (True, True)],
+    ("schedule", "block", "preclaim", "publish", "weights", "fails_closed"),
+    [
+        pytest.param(ZERO, 100, True, True, False, True, id="zero_with_publication"),
+        pytest.param(ZERO, 100, True, False, True, True, id="zero_with_weights"),
+        pytest.param(ZERO, 100, True, True, True, True, id="zero_with_both_outputs"),
+        pytest.param(ZERO, 100, True, False, False, False, id="zero_for_shadow_cycle"),
+        pytest.param(ZERO, 100, False, True, True, False, id="zero_without_preclaim"),
+        pytest.param(SELF_STAKE_ONLY, 100, True, True, True, False, id="self_stake_threshold"),
+        pytest.param(ZERO_FROM_200, 199, True, False, True, False, id="nonzero_before_change"),
+        # The threshold version effective at the finalized block decides.
+        pytest.param(ZERO_FROM_200, 200, True, False, True, True, id="zero_effective_at_block"),
+    ],
 )
-def test_preclaim_economics_fail_closed_when_effective_threshold_is_zero(
-    data_publish_enabled: bool,
-    weight_submission_enabled: bool,
+def test_preclaim_economics_fail_closed_without_an_effective_threshold(
+    schedule: QualificationSchedule,
+    block: int,
+    preclaim: bool,
+    publish: bool,
+    weights: bool,
+    fails_closed: bool,
 ) -> None:
-    with pytest.raises(ProtocolError, match="non-zero qualification threshold"):
-        ensure_preclaim_economics_qualified(
-            _qualification_schedule((0, "0")),
-            block=100,
-            preclaim_active=True,
-            data_publish_enabled=data_publish_enabled,
-            weight_submission_enabled=weight_submission_enabled,
-        )
-
-
-def test_zero_threshold_remains_available_for_shadow_and_empty_cycles() -> None:
-    schedule = _qualification_schedule((0, "0"))
-
-    ensure_preclaim_economics_qualified(
-        schedule,
-        block=100,
-        preclaim_active=True,
-        data_publish_enabled=False,
-        weight_submission_enabled=False,
-    )
-    ensure_preclaim_economics_qualified(
-        schedule,
-        block=100,
-        preclaim_active=False,
-        data_publish_enabled=True,
-        weight_submission_enabled=True,
-    )
-
-
-def test_positive_self_stake_threshold_satisfies_preclaim_guard() -> None:
-    schedule = QualificationSchedule(
-        configurations=(
-            QualificationConfig(
-                owner_hotkey=OWNER,
-                minimum_conviction_alpha=Decimal("0"),
-                minimum_self_stake_alpha=Decimal("15000"),
-                effective_block=0,
-            ),
-        )
-    )
-
-    ensure_preclaim_economics_qualified(
-        schedule,
-        block=100,
-        preclaim_active=True,
-        data_publish_enabled=True,
-        weight_submission_enabled=True,
-    )
-
-
-def test_preclaim_guard_uses_threshold_version_effective_at_finalized_block() -> None:
-    schedule = _qualification_schedule((0, "100"), (200, "0"))
-
-    ensure_preclaim_economics_qualified(
-        schedule,
-        block=199,
-        preclaim_active=True,
-        data_publish_enabled=False,
-        weight_submission_enabled=True,
-    )
-    with pytest.raises(ProtocolError, match="non-zero qualification threshold"):
+    def check() -> None:
         ensure_preclaim_economics_qualified(
             schedule,
-            block=200,
-            preclaim_active=True,
-            data_publish_enabled=False,
-            weight_submission_enabled=True,
+            block=block,
+            preclaim_active=preclaim,
+            data_publish_enabled=publish,
+            weight_submission_enabled=weights,
         )
 
+    if fails_closed:
+        with pytest.raises(ProtocolError, match="non-zero qualification threshold"):
+            check()
+    else:
+        check()
 
-@pytest.mark.asyncio
+
 async def test_submits_exact_vector_once_chain_cadence_is_due() -> None:
     chain = Chain(last_update=100)
     wallet = _wallet()
@@ -173,7 +165,6 @@ async def test_submits_exact_vector_once_chain_cadence_is_due() -> None:
     assert chain.submissions == [(wallet, weights, 3)]
 
 
-@pytest.mark.asyncio
 async def test_skips_until_chain_cadence_is_strictly_due() -> None:
     chain = Chain(last_update=100)
     submitted = await submit_weights_if_due(  # type: ignore[arg-type]
@@ -183,7 +174,6 @@ async def test_skips_until_chain_cadence_is_strictly_due() -> None:
     assert chain.submissions == []
 
 
-@pytest.mark.asyncio
 async def test_enabled_submission_fails_closed_for_unregistered_validator() -> None:
     with pytest.raises(ChainOperationError, match="not registered"):
         await submit_weights_if_due(  # type: ignore[arg-type]

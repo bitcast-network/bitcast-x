@@ -28,6 +28,8 @@ handles unpaid historical referral records independently of subnet campaign emis
 Keep `validator.sqlite3`, miner history, campaign caches, preview state, and wallets across
 upgrades. Protocol-v2 signed commitments and `/v2/batches` compatibility remain necessary to
 verify already committed preclaim history; they are separate from retired legacy campaigns.
+Preview state is kept in `preview.sqlite3`. A `preview-cache` directory left by an earlier
+release is imported on first start and can be deleted once rollback is no longer needed.
 
 ### Desearch activity budget
 
@@ -40,11 +42,30 @@ per minute, and unchanged preview payloads are not republished. Preview rows inc
 performance-bonus percentages and breakdowns for the currently selected campaign tweets, but their
 USD targets remain zero. At the first healthy preview on or after one day before `closes_at`, the
 validator durably pins and publishes the deterministic featured tweet. Failed ingestion retries the
-identical payload after one minute. A temporary loss of the selected tweet's evidence preserves the
-last good preview and retries on later cycles rather than publishing a destructive replacement. The
-first post-close scoring pass still fetches fresh evidence before assigning tweets and freezing
-rewards, then reuses the pinned feature. If its
-required evidence is still unavailable, final economics and weight submission wait until recovery.
+identical payload after one minute. The pin never changes to a different tweet. Settlement fetches
+fresh evidence before assigning tweets and freezing rewards, then applies the featured bonus to the
+pinned tweet if it still qualifies; otherwise that campaign settles without a featured bonus. A pin
+never delays settlement. If a provider cannot return a tweet's evidence, settlement waits up to 900
+blocks (about three hours) for it and weights leave that campaign out meanwhile. After that the
+campaign settles without tweets whose post still cannot be fetched; a fetched tweet whose
+engagement lookup is still failing settles on its baseline and the engagers that were found, and
+the validator logs `scoring tweet with incomplete engagement evidence`.
+
+### Floor-first weights and pricing
+
+Weights cover each miner's USD floors before splitting the surplus by score share (see the
+[protocol](protocol.md#floor-first-weights)). Each cycle reads alpha's moving-average price and the
+miner emission at the finalized block and requests TAO/USD from `api.coingecko.com`, so validators
+need outbound HTTPS to it. A failed request reuses the last quote for up to 7,200 blocks (a day),
+including across a restart, because the quote is read back from `weight_allocations`. After that
+the cycle logs `pricing unavailable; weights follow floor proportions` and splits all weight by
+floors until a price returns. Each block's split (pricing inputs, emission value, total floors, funding
+ratio, and per-UID floor, surplus and donated weight) is stored in the `weight_allocations`
+table and logged as `floor-first weights`. A funding ratio below 1 means floors exceed the
+emission value and are being paid pro rata.
+
+Miners set `BITCAST_X_MINER_SURPLUS_BENEFICIARY` to give their surplus weight to another
+registered hotkey. The designation is committed with the miner's next batch.
 
 ## Runtime contract
 
@@ -80,7 +101,7 @@ validators use the rule active at each claim, submission and scoring-close block
 
 Use `config/miner.env.example` or `config/validator.env.example` for a minimal role-specific
 installation. The root `.env.example` remains the exhaustive reference. Optional remote logging
-settings are in `config/remote-logging.env.example`; validator evidence/LLM credentials are in
+settings are in `config/remote-logging.env.example`; validator evidence/OpenRouter credentials are in
 `config/providers.env.example`.
 
 ```bash
@@ -116,10 +137,22 @@ the active environment, `BITCAST_X_STATE_DIR`, imported legacy files or campaign
 tracked checkout is left running and is not updated. Containers remain immutable and do not
 self-update by default.
 
-Automatic updates reject any candidate that changes an existing miner or validator database schema
-version. A reviewed, rollback-compatible additive table may retain the existing version; candidate
-checks exercise that extension on a disposable database copy before activation. Deploy forward-only
-schema releases manually using the backup procedure below. Prepared code and dependency environments
+Only `run-validator` updates itself; miners are always upgraded by hand. Automatic updates reject any
+candidate that changes the existing validator database schema version, or whose validator would
+refuse the current settings at startup (for example a missing `BITCAST_X_OPENROUTER_API_KEY`). The
+running validator is left untouched, and the reason is logged with `automatic update check failed`
+every interval until it is fixed. A miner database sharing the state directory is not checked. A
+reviewed, rollback-compatible additive table may retain the existing version; candidate checks
+exercise that extension on a disposable database copy before activation. Deploy forward-only schema
+releases manually using the backup procedure below.
+
+The supervisor itself runs from the invoking checkout, which updates never change. Before 3.1.0 a
+restarted supervisor ignored its activation record and ran the checkout's code until its next update
+check, and if that older code could not start, the supervisor exited with it. Update the checkout
+once to 3.1.0 or later (`git pull --ff-only && uv sync --frozen --all-extras`) so a restart resumes
+the activated release; until then a validator logs `auto-update checkout ... runs a supervisor older
+than 3.1.0` at startup. A miner that runs from the same checkout moves to the new code at its next
+restart, so back it up first. Prepared code and dependency environments
 live only beneath `BITCAST_X_AUTO_UPDATE_DIR`; never point that directory at the state directory.
 Operate direct installs beneath systemd, PM2 or another process supervisor so a fatal validator
 error is restarted even when no update is in progress.
@@ -137,7 +170,8 @@ npm install --global pm2@latest
 On first use, the setup script installs locked production dependencies and creates `.env` from the
 validator and provider templates with mode `0600`. It substitutes usable wallet, state, and update
 paths beneath the current home directory and never overwrites an existing `.env`. Edit that file to
-select the existing wallet name/hotkey and add the Desearch and selected LLM key, then launch:
+select the existing wallet name/hotkey and add the Desearch and OpenRouter keys, then launch.
+JEV brief evaluation uses the existing `BITCAST_X_OPENROUTER_API_KEY`; no TypeSafe key is needed:
 
 ```bash
 ./scripts/start-pm2-validator.sh
@@ -182,7 +216,9 @@ miner can use the checked `bitcast-x-miner` role in `ecosystem.config.cjs` with 
 template; the helper scripts intentionally remain validator-only.
 
 Miner liveness is `GET :8095/health`; readiness is `GET :8095/ready` and becomes 200 only after
-the endpoint advertisement finalizes. Validator liveness is `GET :8096/health`; readiness is
+the endpoint advertisement finalizes. A restart inside the chain's serving rate limit (50 blocks on
+SN93) cannot re-advertise; the miner then starts only if the chain already advertises this exact
+endpoint, and otherwise exits so its supervisor retries. Validator liveness is `GET :8096/health`; readiness is
 `GET :8096/ready` and becomes 200 after one complete finalized reconciliation cycle. Metrics are
 at `GET :8096/metrics` and contain only fixed-name process counters and the latest finalized block.
 
@@ -196,6 +232,18 @@ bitcast-x state-info
 bitcast-x shadow-report
 bitcast-x backup-state --output /backups/bitcast-x/2026-08-05T120000Z
 ```
+
+In a container, write the backup inside the state volume, which container UID 10001 owns (a fresh
+bind mount such as `/backups` is root-owned, and the command fails with `PermissionError`), then
+copy it off the volume:
+
+```bash
+docker exec <container> bitcast-x backup-state \
+  --output /var/lib/bitcast-x/backups/2026-08-05T120000Z
+```
+
+`backup-state` copies `miner.sqlite3` and `validator.sqlite3`. It does not copy the validator's
+preview cache (`preview.sqlite3`), which previews refill from X.
 
 Verify every database reports `integrity: ok`, copy the backup directory off the node, and retain
 its `manifest.json`. To restore, stop the node, move the current state directory aside (do not
@@ -242,7 +290,16 @@ new batches exist creates another new history; it never alters either older hist
 
 For application rollback, redeploy the recorded image digest. If the newer release applied a schema
 that the older binary cannot read, stop the node and restore the pre-upgrade backup into a new state
-directory; never run two writers against one SQLite volume.
+directory; never run two writers against one SQLite volume. A restored miner whose newer release
+already committed a batch is behind its on-chain history, and validators quarantine it until it
+runs `resume-history` (see the recovery section above). Run that command with the older release,
+because a newer binary would migrate the restored database again.
+
+Rolling back from this release to the 3.0 releases that hard-pinned featured tweets (#119-#140) is
+safe except in one case: an active campaign whose pinned featured tweet was disqualified by an edit
+adopted after close and that has no other eligible tweet, so its rewards settled at zero. Those
+releases wait for that pin's featured evidence and withhold weights for every campaign until the
+campaign's emission ends. If such a campaign is active, roll forward instead.
 
 ## Incident rules
 

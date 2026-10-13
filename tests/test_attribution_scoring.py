@@ -1,10 +1,13 @@
 """Tests for time-pinned v2 engagement scoring after attribution."""
 
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import httpx
 import pytest
 
-from bitcast_x.brief_filter import BriefEvaluation
+from bitcast_x.brief_filter import BriefEvaluation, JevBriefFilter
 from bitcast_x.campaigns import (
     CampaignFeed,
     CampaignRecord,
@@ -14,7 +17,9 @@ from bitcast_x.campaigns import (
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
+from bitcast_x.validator.rewards import RewardCoordinator
 from bitcast_x.validator.scoring import AttributionScorer
+from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -25,6 +30,7 @@ class FakeX:
     def __init__(self) -> None:
         self.tweet_fetches = 0
         self.engagement_fetches = 0
+        self.quote_counts: dict[str, int | None] = {}
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
         self.tweet_fetches += 1
@@ -39,8 +45,11 @@ class FakeX:
             provider_available=True,
         )
 
-    async def fetch_engagements(self, _tweet_id: str) -> EngagementFetch:
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         self.engagement_fetches += 1
+        self.quote_counts[tweet_id] = quote_count
         return EngagementFetch(
             engagements={"alice": "retweet", "bob": "retweet", "carol": "quote"},
             provider_available=True,
@@ -66,11 +75,6 @@ class ParticipantX(FakeX):
         )
 
 
-class UnavailableTweetX(FakeX):
-    async def fetch_tweet_by_id(self, _tweet_id: str) -> TweetFetch:
-        return TweetFetch(tweet=None, provider_available=False)
-
-
 class PassingBriefFilter:
     async def evaluate(self, _campaign: CampaignRecord, _tweet: Tweet) -> BriefEvaluation:
         return BriefEvaluation(
@@ -80,11 +84,20 @@ class PassingBriefFilter:
         )
 
 
-class SelectivelyUnavailableEngagementX(FakeX):
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
+class PartialEngagementX(FakeX):
+    """Answers the retweeters lookup for 998 but not its quote search; 997 is gone."""
+
+    async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch:
+        if tweet_id == "997":
+            return TweetFetch(tweet=None, provider_available=False)
+        return await super().fetch_tweet_by_id(tweet_id)
+
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
         if tweet_id == "998":
-            return EngagementFetch(engagements={}, provider_available=False)
-        return await super().fetch_engagements(tweet_id)
+            return EngagementFetch(engagements={"bob": "retweet"}, provider_available=False)
+        return await super().fetch_engagements(tweet_id, quote_count=quote_count)
 
 
 class SelectivelyUnavailableBriefFilter(PassingBriefFilter):
@@ -92,6 +105,16 @@ class SelectivelyUnavailableBriefFilter(PassingBriefFilter):
         if tweet.tweet_id == "998":
             raise ReconciliationUnavailableError("provider unavailable")
         return await super().evaluate(campaign, tweet)
+
+
+def accepted(tweet_id: str, campaign_id: str = "campaign") -> AttributionResult:
+    return AttributionResult(
+        tweet_id=tweet_id,
+        campaign_id=campaign_id,
+        accepted=True,
+        reason=AttributionReason.ACCEPTED,
+        miner_hotkey=MINER,
+    )
 
 
 def feed() -> CampaignFeed:
@@ -106,7 +129,7 @@ def feed() -> CampaignFeed:
                     mining_protocol=MiningProtocol.PRECLAIM_V2,
                     scoring_close_block=20,
                 ),
-                title="Campaign",
+                display="Campaign",
                 brief="Brief",
                 pools=("unrelated", "eco"),
                 opens_at=NOW,
@@ -141,40 +164,21 @@ def feed() -> CampaignFeed:
     )
 
 
-@pytest.mark.asyncio
 async def test_uses_max_tweet_time_and_current_influence_and_excludes_self() -> None:
-    attribution = AttributionResult(
-        tweet_id="999",
-        campaign_id="campaign",
-        accepted=True,
-        reason=AttributionReason.ACCEPTED,
-        miner_hotkey=MINER,
-    )
-
-    result = (await AttributionScorer(FakeX()).score(feed(), [attribution]))[0]
+    result = (await AttributionScorer(FakeX()).score(feed(), [accepted("999")]))[0]
 
     assert result.author_influence == 999.0
     assert result.score == 2003.75
     assert [detail.username for detail in result.details] == ["bob", "carol"]
 
 
-@pytest.mark.asyncio
 async def test_same_tweet_across_campaigns_uses_one_frozen_provider_observation() -> None:
     snapshot = feed()
     second = snapshot.campaigns[0].model_copy(
         update={"access": snapshot.campaigns[0].access.model_copy(update={"campaign_id": "second"})}
     )
     snapshot = snapshot.model_copy(update={"campaigns": (*snapshot.campaigns, second)})
-    attributions = [
-        AttributionResult(
-            tweet_id="999",
-            campaign_id=campaign_id,
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for campaign_id in ("campaign", "second")
-    ]
+    attributions = [accepted("999"), accepted("999", campaign_id="second")]
     provider = FakeX()
 
     results = await AttributionScorer(provider).score(snapshot, attributions)
@@ -184,21 +188,11 @@ async def test_same_tweet_across_campaigns_uses_one_frozen_provider_observation(
     assert provider.engagement_fetches == 1
 
 
-@pytest.mark.asyncio
 async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     snapshot = feed()
     old_map = snapshot.ecosystem_maps[0].model_copy(update={"eligible_creator_x_ids": ("1", "2")})
     snapshot = snapshot.model_copy(update={"ecosystem_maps": (old_map, snapshot.ecosystem_maps[1])})
-    attributions = [
-        AttributionResult(
-            tweet_id=tweet_id,
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for tweet_id in ("999", "998")
-    ]
+    attributions = [accepted("999"), accepted("998")]
 
     results = await AttributionScorer(
         ParticipantX(),
@@ -211,21 +205,11 @@ async def test_passing_campaign_participants_cannot_boost_one_another() -> None:
     assert [detail.username for detail in alice.details] == ["carol"]
 
 
-@pytest.mark.asyncio
-async def test_preview_scoring_defers_only_tweet_with_unavailable_engagements() -> None:
-    attributions = [
-        AttributionResult(
-            tweet_id=tweet_id,
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for tweet_id in ("998", "999")
-    ]
-    scorer = AttributionScorer(SelectivelyUnavailableEngagementX())
+async def test_preview_scoring_defers_only_the_tweet_with_unavailable_brief_check() -> None:
+    attributions = [accepted("998"), accepted("999")]
+    scorer = AttributionScorer(FakeX(), brief_filter=SelectivelyUnavailableBriefFilter())
 
-    with pytest.raises(ReconciliationUnavailableError, match="scoring evidence unavailable"):
+    with pytest.raises(ReconciliationUnavailableError, match="provider unavailable"):
         await scorer.score(feed(), attributions)
 
     results = await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
@@ -233,23 +217,135 @@ async def test_preview_scoring_defers_only_tweet_with_unavailable_engagements() 
     assert [item.attribution.tweet_id for item in results] == ["999"]
 
 
-@pytest.mark.asyncio
-async def test_preview_scoring_defers_only_tweet_with_unavailable_brief_check() -> None:
-    attributions = [
-        AttributionResult(
-            tweet_id=tweet_id,
-            campaign_id="campaign",
-            accepted=True,
-            reason=AttributionReason.ACCEPTED,
-            miner_hotkey=MINER,
-        )
-        for tweet_id in ("998", "999")
-    ]
-    scorer = AttributionScorer(
-        FakeX(),
-        brief_filter=SelectivelyUnavailableBriefFilter(),
+async def test_incomplete_engagement_waits_then_scores_the_confirmed_tweet() -> None:
+    attributions = [accepted("997"), accepted("998"), accepted("999")]
+    scorer = AttributionScorer(PartialEngagementX())
+
+    # Within the settlement grace period, incomplete evidence keeps the campaign waiting.
+    with pytest.raises(ReconciliationUnavailableError, match="scoring evidence unavailable"):
+        await scorer.score(feed(), attributions)
+
+    results = {
+        item.attribution.tweet_id: item
+        for item in await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
+    }
+
+    # Only the tweet that cannot be fetched is left out; a missing quote search
+    # costs 998 its quote engagers, not its baseline or its retweets.
+    assert sorted(results) == ["998", "999"]
+    partial = results["998"]
+    assert partial.baseline_score == results["999"].baseline_score
+    assert [detail.username for detail in partial.details] == ["bob"]
+    assert partial.score == pytest.approx(
+        partial.baseline_score + partial.details[0].weighted_contribution
+    )
+    assert partial.baseline_score < partial.score < results["999"].score
+
+
+async def test_engagement_lookup_receives_the_fetched_posts_quote_count() -> None:
+    provider = PartialEngagementX()
+
+    await AttributionScorer(provider).score(
+        feed(), [accepted("997"), accepted("999")], defer_unavailable_tweets=True
     )
 
-    results = await scorer.score(feed(), attributions, defer_unavailable_tweets=True)
+    # 999's post reports no quotes; 997's post could not be fetched, so its count is unknown.
+    assert provider.quote_counts == {"997": None, "999": 0}
 
-    assert [item.attribution.tweet_id for item in results] == ["999"]
+
+async def test_jev_outage_grace_recovery_and_frozen_rewards_survive_restart(tmp_path: Path) -> None:
+    snapshot = feed()
+    campaign = snapshot.campaigns[0].model_copy(
+        update={"prompt_version": 6, "emission_start_block": 30, "emission_end_block": 2000}
+    )
+    ready = campaign.model_copy(
+        update={
+            "access": campaign.access.model_copy(update={"campaign_id": "ready"}),
+            "brief": "Ready campaign",
+        }
+    )
+    snapshot = snapshot.model_copy(update={"campaigns": (campaign, ready)})
+    attributions = [accepted("999"), accepted("998", campaign_id="ready")]
+    path = tmp_path / "validator.sqlite3"
+    store = ValidatorStore(path)
+    for record, attribution in zip(snapshot.campaigns, attributions, strict=True):
+        store.persist_reconciliation(
+            snapshot_id=snapshot.snapshot_id,
+            campaign_id=record.access.campaign_id,
+            campaign_json=record.model_dump_json(),
+            results=[attribution],
+        )
+    pin = store.pin_featured_tweet_selection(
+        campaign_id="campaign",
+        campaign_json=campaign.model_dump_json(),
+        tweet_id="999",
+        selection_pool=("999",),
+        selected_block=19,
+        selected_at=NOW,
+    )
+    unavailable = True
+    requests: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.content)
+        if unavailable and json.loads(request.content)["state"]["campaign_brief"] == campaign.brief:
+            return httpx.Response(503)
+        return httpx.Response(
+            200,
+            json={
+                "model": "typesafe/jev-1.13-20260917",
+                "answers": {
+                    "verdict": {"type": "choice", "probabilities": {"ACCEPT": 0.9, "REJECT": 0.1}},
+                    "identity": {
+                        "type": "choice",
+                        "probabilities": {"MATCH": 0.99, "MISMATCH": 0.01, "UNESTABLISHED": 0.0},
+                    },
+                },
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        evaluator = JevBriefFilter(api_key="existing-key", cache=store, client=client, attempts=1)
+        coordinator = RewardCoordinator(store, AttributionScorer(FakeX(), brief_filter=evaluator))
+        for block in (30, 930):
+            scores = await coordinator.freeze_scores(snapshot, attributions, block=block)
+            assert [item.attribution.campaign_id for item in scores] == ["ready"]
+            weights, rewards = coordinator.shadow_weights(
+                snapshot, scores, block=block, hotkey_to_uid={MINER: 1}, uids=[0, 1]
+            )
+            assert weights == {0: 0.0, 1: 1.0}
+            assert [item.campaign_id for item in rewards] == ["ready"]
+            assert not store.campaign_finalized("campaign")
+            assert coordinator.pending_reward_campaign_ids(snapshot, block=block) == (
+                ("campaign",) if block == 30 else ()
+            )
+        unavailable = False
+        scores = await coordinator.freeze_scores(snapshot, attributions, block=931)
+        weights, rewards = coordinator.shadow_weights(
+            snapshot, scores, block=931, hotkey_to_uid={MINER: 1}, uids=[0, 1]
+        )
+        assert len(rewards) == 2
+        assert store.campaign_finalized("campaign")
+        assert store.featured_tweet_selection("campaign") == pin
+        assert next(item for item in rewards if item.campaign_id == "campaign").featured_tweet_bonus
+        request_count = len(requests)
+        assert request_count == 4
+        store.close()
+
+        # Reopened state must reuse both the JEV verdict and frozen positive economics.
+        unavailable = True
+        store = ValidatorStore(path)
+        evaluator = JevBriefFilter(api_key="existing-key", cache=store, client=client, attempts=1)
+        assert (await evaluator.evaluate(campaign, scores[0].tweet)).meets_brief
+        restarted = RewardCoordinator(store, AttributionScorer(FakeX(), brief_filter=evaluator))
+        replay = await restarted.freeze_scores(snapshot, attributions, block=932)
+        assert replay == scores
+        replay_weights, replay_rewards = restarted.shadow_weights(
+            snapshot, replay, block=932, hotkey_to_uid={MINER: 1}, uids=[0, 1]
+        )
+        assert replay_weights == weights
+        assert {item.campaign_id: item for item in replay_rewards} == {
+            item.campaign_id: item for item in rewards
+        }
+        assert len(requests) == request_count
+        store.close()

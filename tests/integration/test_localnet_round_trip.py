@@ -1,8 +1,6 @@
 """Opt-in conformance test against a real Bittensor v11 localnet."""
 
 import asyncio
-import hashlib
-import json
 import os
 import socket
 from datetime import timedelta
@@ -28,9 +26,14 @@ from bitcast_x.miner import (
     MinerSdk,
     MinerStore,
 )
-from bitcast_x.protocol import CampaignAccess, CommitmentEnvelope, MiningProtocol
+from bitcast_x.protocol import (
+    CampaignAccess,
+    CommitmentEnvelope,
+    CommittedBatch,
+    MiningProtocol,
+    SubmissionEvent,
+)
 from bitcast_x.qualification import (
-    HistoricalQualificationChecker,
     QualificationConfig,
     QualificationReader,
 )
@@ -58,12 +61,6 @@ DRAFT = (
     "I spent a week testing the wallet. Fast confirmations help, but the recovery flow "
     "is what won me over. #Launch"
 )
-
-
-def canonical_json(value: Any) -> bytes:
-    """Encode the test batch deterministically for the round-trip assertion."""
-
-    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 def create_wallet(path: Path, name: str) -> bt.Wallet:
@@ -126,21 +123,27 @@ async def set_localnet_weights_after_rate_limit(
     raise AssertionError("localnet weight rate limit did not clear within 45 seconds")
 
 
-@pytest.mark.asyncio
 async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) -> None:
     miner = create_wallet(tmp_path, "miner")
     validator = create_wallet(tmp_path, "validator")
     netuid = 1
     port = unused_tcp_port()
     host_ip = socket.gethostbyname(socket.gethostname())
-    batch = {
-        "version": 2,
-        "miner_hotkey": miner.hotkey.ss58_address,
-        "sequence": 1,
-        "previous_batch_hash": None,
-        "events": [{"kind": "submission", "tweet_id": "1"}],
-    }
-    batch_hash = hashlib.sha256(canonical_json(batch)).digest()
+    batch = CommittedBatch.create(
+        miner_hotkey=miner.hotkey.ss58_address,
+        sequence=1,
+        previous_batch_hash=None,
+        events=(
+            SubmissionEvent(
+                submission_id="01" * 16,
+                campaign_id=CAMPAIGN_ID,
+                tweet_id="1",
+                claim_id=None,
+                miner_hotkey=miner.hotkey.ss58_address,
+                creator_x_id=CREATOR_X_ID,
+            ),
+        ),
+    )
 
     async def authorize(hotkey: str) -> bool:
         return hotkey == validator.hotkey.ss58_address
@@ -148,7 +151,12 @@ async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) ->
     async def provide(_request: BatchPageRequest, _caller: str) -> BatchPageResponse:
         return BatchPageResponse(
             miner_hotkey=miner.hotkey.ss58_address,
-            batches=[PositionedBatch(batch=batch, position=finalized.position)],
+            batches=[
+                PositionedBatch(
+                    batch=batch.model_dump(mode="json"),
+                    position=finalized.position,
+                )
+            ],
             next_sequence=1,
             has_more=False,
         )
@@ -184,7 +192,11 @@ async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) ->
             assert conviction_rao == 0
             assert self_stake_rao == 0
             await chain.advertise_endpoint(miner, ip=host_ip, port=port)
-            envelope = CommitmentEnvelope(sequence=1, event_count=1, batch_hash=batch_hash)
+            envelope = CommitmentEnvelope(
+                sequence=batch.sequence,
+                event_count=len(batch.events),
+                batch_hash=bytes.fromhex(batch.batch_hash),
+            )
             submitter = BittensorCommitmentSubmitter(chain, miner)
             budget = await submitter.capacity(envelope)
             finalized = await submitter.submit(envelope)
@@ -221,13 +233,14 @@ async def test_real_v11_commitment_and_signed_http_round_trip(tmp_path: Path) ->
             finally:
                 await miner_client.close()
 
-        assert hashlib.sha256(canonical_json(page.batches[0].batch)).digest() == envelope.batch_hash
+        served = CommittedBatch.model_validate(page.batches[0].batch)
+        assert served == batch
+        assert bytes.fromhex(served.batch_hash) == envelope.batch_hash
     finally:
         server.should_exit = True
         await server_task
 
 
-@pytest.mark.asyncio
 async def test_real_creator_journey_survives_restart_and_reaches_attribution(
     tmp_path: Path,
 ) -> None:
@@ -300,7 +313,6 @@ async def test_real_creator_journey_survives_restart_and_reaches_attribution(
 
         validator_store = ValidatorStore(
             tmp_path / "validator.sqlite3",
-            start_block=page.batches[0].position.block,
         )
         ingestion = await ValidatorIngestor(
             chain,
@@ -359,15 +371,13 @@ async def test_real_creator_journey_survives_restart_and_reaches_attribution(
                 )
             },
         )
-        qualification = HistoricalQualificationChecker(
-            QualificationReader(
-                chain,
-                QualificationConfig(
-                    owner_hotkey=validator_wallet.hotkey.ss58_address,
-                    minimum_conviction_alpha=Decimal("0"),
-                    effective_block=0,
-                ),
-            )
+        qualification = QualificationReader(
+            chain,
+            QualificationConfig(
+                owner_hotkey=validator_wallet.hotkey.ss58_address,
+                minimum_conviction_alpha=Decimal("0"),
+                effective_block=0,
+            ),
         )
         attributions = await CampaignReconciler(
             validator_store,

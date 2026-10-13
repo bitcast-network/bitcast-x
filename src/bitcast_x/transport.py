@@ -12,8 +12,10 @@ from bittensor.http_auth import AuthError, Caller, InMemoryNonceStore
 from fastapi import FastAPI, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from bitcast_x.errors import AuthenticationError, ResponseTooLargeError
+from bitcast_x.errors import AuthenticationError
+from bitcast_x.http import read_bounded
 from bitcast_x.protocol import CommitmentPosition
+from bitcast_x.release import source_revision
 
 BATCHES_PATH = "/v3/batches"
 LEGACY_BATCHES_PATH = "/v2/batches"
@@ -173,11 +175,19 @@ def create_miner_app(
     )
     rate_limiter = HotkeyRateLimiter(limit=requests_per_minute)
 
+    # Read once: this endpoint is public, and detecting a checkout's revision runs git.
+    revision = source_revision()
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         from bitcast_x import __version__
 
-        return {"status": "ok", "protocol_version": "3", "version": __version__}
+        return {
+            "status": "ok",
+            "protocol_version": "3",
+            "version": __version__,
+            "source_revision": revision,
+        }
 
     @app.get("/ready")
     async def ready(response: Response) -> dict[str, str]:
@@ -298,11 +308,5 @@ class SignedMinerClient:
             "POST", BATCHES_PATH, headers=headers, content=body
         ) as response:
             response.raise_for_status()
-            chunks: list[bytes] = []
-            size = 0
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > self._max_response_bytes:
-                    raise ResponseTooLargeError("miner response exceeds configured byte limit")
-                chunks.append(chunk)
-        return BatchPageResponse.model_validate_json(b"".join(chunks))
+            payload = await read_bounded(response, self._max_response_bytes, source="miner")
+        return BatchPageResponse.model_validate_json(payload)

@@ -74,7 +74,9 @@ helm install miner charts/bitcast-x-miner \
   --set wallet.expectedHotkey=<hotkey ss58>
 ```
 
-The pod turns Ready only after the endpoint advertisement is finalized on chain (`GET /ready`).
+The pod turns Ready only after the endpoint advertisement is finalized on chain (`GET /ready`). A
+restart inside the chain's serving rate limit reuses the advertisement only when it already points
+at this pod's endpoint; otherwise the container exits and is restarted.
 Liveness is `GET /health`: an idle miner, or one whose chain RPC is briefly unreachable, is not
 restarted. Validators retry unavailable miners, which heal on a later poll.
 
@@ -122,7 +124,8 @@ kubectl exec deploy/miner-bitcast-x-miner -- \
 ```
 
 Then copy the backup off the volume (`kubectl cp`). Upgrade by changing `image.tag` (or
-`image.digest`) to a reviewed build.
+`image.digest`) to a reviewed build. The first 3.1.0 start upgrades the miner database to schema 4,
+which earlier images cannot open, so take the backup first.
 
 ## Values
 
@@ -139,6 +142,7 @@ Then copy the backup off the volume (`kubectl cp`). Upgrade by changing `image.t
 | `wallet.hotkeyKey` / `coldkeypubKey` | `hotkey` / — | keys in that Secret |
 | `wallet.name` / `hotkey` | `default` / `default` | names the miner resolves |
 | `wallet.expectedHotkey` | — | strongly recommended |
+| `surplusBeneficiary` | — | SS58 hotkey that receives this miner's surplus weight |
 | `minerApi.existingSecret` / `tokenKey` | — / `token` | `run-miner-api` only |
 | `minerApi.port` | — | `run-miner-api` only; separate API listener |
 | `minerApi.ingress.enabled` / `host` / `className` / `annotations` / `tlsSecretName` | `false` / — / `traefik` / `{}` / `<release>-api-tls` | needs `minerApi.port` |

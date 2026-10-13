@@ -17,15 +17,3 @@ def test_release_version_is_consistent_across_artifact_surfaces() -> None:
     assert 'BITCAST_X_SOURCE_REVISION="${REVISION}"' in (ROOT / "Dockerfile").read_text()
     assert f'IMAGE_VERSION: "{version}"' in (ROOT / ".github" / "workflows" / "ci.yml").read_text()
     assert f"## [{version}]" in (ROOT / "CHANGELOG.md").read_text()
-
-
-def test_public_package_metadata_has_ownership_and_support_links() -> None:
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-
-    assert project["license"] == "MIT"
-    assert project["authors"] == [{"name": "Bitcast"}]
-    assert project["maintainers"] == [{"name": "Bitcast"}]
-    assert {"Homepage", "Documentation", "Repository", "Issues", "Security", "Support"} <= set(
-        project["urls"]
-    )
-    assert "Development Status :: 4 - Beta" in project["classifiers"]

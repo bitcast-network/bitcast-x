@@ -1,12 +1,13 @@
 """Crash-safe SQLite state for the reference miner and reusable SDK."""
 
 import json
+import logging
 import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -14,17 +15,29 @@ from pathlib import Path
 from pydantic import TypeAdapter
 
 from bitcast_x.errors import ProtocolError
+from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.protocol import (
+    MAX_ACTIVE_CLAIMS,
     ClaimEvent,
     CommitmentPosition,
     CommittedBatch,
     DraftReveal,
     ProtocolEvent,
     SubmissionEvent,
+    SurplusBeneficiaryEvent,
 )
-from bitcast_x.sqlite import apply_migrations
+from bitcast_x.sqlite import apply_migrations, hold_open, session, transaction
 
+LOGGER = logging.getLogger(__name__)
 _EVENT_ADAPTER: TypeAdapter[ProtocolEvent] = TypeAdapter(ProtocolEvent)
+
+
+def _event_id(event: ProtocolEvent) -> str:
+    if isinstance(event, ClaimEvent):
+        return event.claim_id
+    if isinstance(event, SubmissionEvent):
+        return event.submission_id
+    return event.event_id
 
 
 class EventStatus(StrEnum):
@@ -38,6 +51,8 @@ class EventStatus(StrEnum):
     VERIFICATION_PENDING = "verification_pending"
     ATTRIBUTED = "attributed"
     REJECTED = "rejected"
+    # A finalized surplus-beneficiary designation; it has no platform lifecycle.
+    COMMITTED = "committed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +67,42 @@ class OperationMetadata:
     external_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BatchDraft:
+    """Next-batch header and the private reveals its queued events need."""
+
+    history_id: str
+    sequence: int
+    previous_batch_hash: str | None
+    reveals: Mapping[str, DraftReveal]
+
+    def build(self, miner_hotkey: str, events: tuple[ProtocolEvent, ...]) -> CommittedBatch:
+        """Build the exact next batch for these events without I/O."""
+
+        # Several submissions may cite one claim (validators let at most one
+        # consume it), but a batch may reveal each claim only once.
+        reveals: dict[str, DraftReveal] = {}
+        for event in events:
+            if (
+                not isinstance(event, SubmissionEvent)
+                or event.claim_id is None
+                or event.claim_id in reveals
+            ):
+                continue
+            reveal = self.reveals.get(event.claim_id)
+            if reveal is None:
+                raise ProtocolError("submission references a claim without a local reveal")
+            reveals[event.claim_id] = reveal
+        return CommittedBatch.create(
+            miner_hotkey=miner_hotkey,
+            sequence=self.sequence,
+            previous_batch_hash=self.previous_batch_hash,
+            events=events,
+            reveals=tuple(reveals.values()),
+            history_id=self.history_id or None,
+        )
+
+
 class MinerStore:
     """Transactional miner queue, batch history, and creator-operation status."""
 
@@ -60,29 +111,18 @@ class MinerStore:
         self.path = path
         self._lock = threading.RLock()
         self._initialize()
+        self._release = hold_open(self, path)
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = FULL")
-        return connection
+    def close(self) -> None:
+        """Release the connection held open for this store's lifetime."""
 
-    @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        with self._lock:
-            connection = self._connect()
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.commit()
-            except BaseException:
-                if connection.in_transaction:
-                    connection.rollback()
-                raise
-            finally:
-                connection.close()
+        self._release()
+
+    def _connect(self) -> AbstractContextManager[sqlite3.Connection]:
+        return session(self.path)
+
+    def _transaction(self) -> AbstractContextManager[sqlite3.Connection]:
+        return transaction(self.path, self._lock)
 
     def _initialize(self) -> None:
         with self._lock, self._connect() as connection:
@@ -99,6 +139,11 @@ class MinerStore:
                 # Recover an otherwise-current store whose version pragma was
                 # cleared without destructively replaying the table rebuild.
                 connection.execute("PRAGMA user_version = 3")
+            existing = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            # Rebuilding a table that others reference requires foreign keys off
+            # (they cannot change inside the migration transaction); the check
+            # below then proves every reference survived.
+            connection.execute("PRAGMA foreign_keys = OFF")
             apply_migrations(
                 connection,
                 (
@@ -201,47 +246,59 @@ class MinerStore:
                     cutoff_ns INTEGER NOT NULL
                 );
                     """,
+                    # SQLite cannot widen a CHECK constraint in place, so the
+                    # events table is rebuilt to admit surplus-beneficiary events.
+                    """
+                CREATE TABLE events_v4 (
+                    event_id TEXT PRIMARY KEY,
+                    kind TEXT NOT NULL
+                        CHECK (kind IN ('claim', 'submission', 'surplus_beneficiary')),
+                    payload_json TEXT NOT NULL,
+                    private_reveal_json TEXT,
+                    status TEXT NOT NULL,
+                    created_ns INTEGER NOT NULL,
+                    batch_sequence INTEGER,
+                    rejection_reason TEXT,
+                    batch_history_id TEXT NOT NULL DEFAULT ''
+                );
+                INSERT INTO events_v4(
+                    event_id, kind, payload_json, private_reveal_json, status,
+                    created_ns, batch_sequence, rejection_reason, batch_history_id
+                )
+                SELECT event_id, kind, payload_json, private_reveal_json, status,
+                       created_ns, batch_sequence, rejection_reason, batch_history_id
+                FROM events;
+                DROP TABLE events;
+                ALTER TABLE events_v4 RENAME TO events;
+                CREATE INDEX idx_events_queue ON events(batch_sequence, created_ns, event_id);
+                    """,
                 ),
             )
+            if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ProtocolError("miner state has a broken reference after migration")
+            upgraded = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if 0 < existing < upgraded:
+                LOGGER.warning(
+                    "upgraded miner state schema %s -> %s at %s; earlier releases cannot open it, "
+                    "so roll back only by restoring a backup taken before the upgrade",
+                    existing,
+                    upgraded,
+                    self.path,
+                )
 
-    def current_history_id(self) -> str | None:
-        """Return the active history ID, or ``None`` for the legacy chain."""
+    def latest_surplus_beneficiary(self) -> SurplusBeneficiaryEvent | None:
+        """Return this miner's most recently queued surplus-beneficiary designation."""
 
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT history_id FROM history_state WHERE singleton = 1"
+                """
+                SELECT payload_json FROM events
+                WHERE kind = 'surplus_beneficiary'
+                ORDER BY created_ns DESC, rowid DESC
+                LIMIT 1
+                """
             ).fetchone()
-        return str(row["history_id"]) if row is not None else None
-
-    def history_has_batches(self, history_id: str) -> bool:
-        """Return whether a history ID has already anchored any local batch."""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM batches WHERE history_id = ? LIMIT 1", (history_id,)
-            ).fetchone()
-        return row is not None
-
-    def start_history(self, history_id: str) -> str:
-        """Atomically abandon pending work and activate an unused history ID."""
-
-        try:
-            valid = len(bytes.fromhex(history_id)) == 32
-        except ValueError:
-            valid = False
-        if not valid:
-            raise ProtocolError("history_id must be a 32-byte hexadecimal value")
-
-        with self._transaction() as connection:
-            if (
-                connection.execute(
-                    "SELECT 1 FROM batches WHERE history_id = ? LIMIT 1", (history_id,)
-                ).fetchone()
-                is not None
-            ):
-                raise ProtocolError("history_id was already used by this miner")
-            self._activate_history(connection, history_id)
-        return history_id
+        return SurplusBeneficiaryEvent.model_validate_json(row["payload_json"]) if row else None
 
     def resume_history(self) -> str:
         """Return an unused current history or atomically rotate to a random one."""
@@ -302,25 +359,27 @@ class MinerStore:
         self,
         event: ProtocolEvent,
         *,
+        max_pending_events: int,
+        max_pending_bytes: int,
         reveal: DraftReveal | None = None,
         metadata: OperationMetadata | None = None,
-        max_pending_events: int = 10_000,
-        max_pending_bytes: int = 50_000_000,
     ) -> str:
-        """Persist an event and application idempotency record atomically."""
+        """Persist an event and application idempotency record atomically.
 
-        if max_pending_events <= 0 or max_pending_bytes <= 0:
-            raise ValueError("pending queue limits must be positive")
+        The pending-queue bounds come from the engine's validated ``BatchPolicy``.
+        """
 
-        event_id = event.claim_id if isinstance(event, ClaimEvent) else event.submission_id
+        event_id = _event_id(event)
         status = (
-            EventStatus.WAITING_FOR_COMMITMENT
-            if isinstance(event, ClaimEvent)
-            else EventStatus.TWEET_RECEIVED
+            EventStatus.TWEET_RECEIVED
+            if isinstance(event, SubmissionEvent)
+            else EventStatus.WAITING_FOR_COMMITMENT
         )
         payload = event.model_dump_json()
         reveal_json = reveal.model_dump_json() if reveal is not None else None
         if metadata is not None:
+            if isinstance(event, SurplusBeneficiaryEvent):
+                raise ProtocolError("a surplus-beneficiary designation has no creator operation")
             event_creator_x_id = event.creator_x_id
             if event_creator_x_id is None or event_creator_x_id != metadata.creator_x_id:
                 raise ProtocolError("operation creator_x_id must match the committed event")
@@ -335,7 +394,10 @@ class MinerStore:
                 ).fetchone()
                 if idempotent is not None:
                     if idempotent["request_fingerprint"] != metadata.request_fingerprint:
-                        raise ProtocolError("idempotency key was reused with different input")
+                        raise OperationError(
+                            ErrorCode.IDEMPOTENCY_CONFLICT,
+                            "idempotency key was reused with different input",
+                        )
                     return str(idempotent["event_id"])
             existing = connection.execute(
                 "SELECT payload_json, private_reveal_json FROM events WHERE event_id = ?",
@@ -369,7 +431,9 @@ class MinerStore:
                 int(pending["event_count"]) >= max_pending_events
                 or int(pending["byte_count"]) + event_bytes > max_pending_bytes
             ):
-                raise ProtocolError("miner pending queue capacity is exhausted")
+                raise OperationError(
+                    ErrorCode.QUEUE_CAPACITY_EXHAUSTED, "miner pending queue capacity is exhausted"
+                )
             connection.execute(
                 """
                 INSERT INTO events(
@@ -421,14 +485,14 @@ class MinerStore:
     def receipt(self, event_id: str) -> dict[str, object] | None:
         """Return one application-safe local receipt with its chain position."""
 
-        receipts = self.receipts(event_id=event_id)
+        receipts = self.receipts(event_ids=(event_id,))
         return receipts[0] if receipts else None
 
     def receipts(
         self,
         *,
         kind: str | None = None,
-        event_id: str | None = None,
+        event_ids: tuple[str, ...] = (),
         campaign_id: str | None = None,
         creator_x_id: str | None = None,
         external_id: str | None = None,
@@ -436,6 +500,7 @@ class MinerStore:
     ) -> list[dict[str, object]]:
         """List durable receipts using indexed application correlation filters."""
 
+        event_json = json.dumps(event_ids, separators=(",", ":"))
         ecosystem_json = json.dumps(ecosystem_ids, separators=(",", ":"))
         query = """
             SELECT e.event_id, e.kind, e.payload_json, e.status, e.created_ns,
@@ -450,8 +515,9 @@ class MinerStore:
               ON b.history_id = e.batch_history_id
              AND b.sequence = e.batch_sequence
             LEFT JOIN operation_metadata m ON m.event_id = e.event_id
-            WHERE (? IS NULL OR e.kind = ?)
-              AND (? IS NULL OR e.event_id = ?)
+            WHERE e.kind IN ('claim', 'submission')
+              AND (? IS NULL OR e.kind = ?)
+              AND (? = '[]' OR e.event_id IN (SELECT value FROM json_each(?)))
               AND (? IS NULL OR m.creator_x_id = ?)
               AND (? IS NULL OR m.external_id = ?)
               AND (
@@ -466,8 +532,8 @@ class MinerStore:
         parameters = (
             kind,
             kind,
-            event_id,
-            event_id,
+            event_json,
+            event_json,
             creator_x_id,
             creator_x_id,
             external_id,
@@ -478,18 +544,24 @@ class MinerStore:
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
         receipts: list[dict[str, object]] = []
+        # Each batch is parsed once per call: (history_id, event positions) by batch key.
+        batches: dict[tuple[str, int], tuple[str | None, dict[str, int]]] = {}
         for row in rows:
             event = _EVENT_ADAPTER.validate_json(row["payload_json"])
+            if isinstance(event, SurplusBeneficiaryEvent):
+                continue
             if campaign_id is not None and event.campaign_id != campaign_id:
                 continue
+            history_id = None
             event_index = None
             if row["batch_json"] is not None:
-                batch = CommittedBatch.model_validate_json(row["batch_json"])
-                ids = [
-                    item.claim_id if isinstance(item, ClaimEvent) else item.submission_id
-                    for item in batch.events
-                ]
-                event_index = ids.index(str(row["event_id"]))
+                key = (str(row["batch_history_id"]), int(row["batch_sequence"]))
+                if key not in batches:
+                    batch = CommittedBatch.model_validate_json(row["batch_json"])
+                    positions = {_event_id(item): index for index, item in enumerate(batch.events)}
+                    batches[key] = (batch.history_id, positions)
+                history_id, positions = batches[key]
+                event_index = positions[str(row["event_id"])]
             payload = event.model_dump(mode="json")
             receipts.append(
                 {
@@ -508,7 +580,7 @@ class MinerStore:
                     "commitment": {
                         "status": ("finalized" if row["batch_state"] == "finalized" else "queued"),
                         "batch_sequence": row["batch_sequence"],
-                        "history_id": batch.history_id if row["batch_json"] else None,
+                        "history_id": history_id,
                         "batch_hash": (
                             f"sha256-{row['batch_hash']}" if row["batch_hash"] else None
                         ),
@@ -552,25 +624,19 @@ class MinerStore:
             )
         return result
 
-    def submission_id(
-        self,
-        *,
-        campaign_id: str,
-        tweet_id: str,
-        claim_id: str | None,
-        creator_x_id: str,
-    ) -> str | None:
-        """Return the oldest durable submission for an idempotency identity."""
+    def submission_ids(self, status: EventStatus) -> list[str]:
+        """Return the IDs of durable submissions currently in one status."""
 
-        for submission in reversed(self.submissions()):
-            if (
-                submission["campaign_id"] == campaign_id
-                and submission["tweet_id"] == tweet_id
-                and submission["claim_id"] == claim_id
-                and submission["creator_x_id"] == creator_x_id
-            ):
-                return str(submission["submission_id"])
-        return None
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT event_id FROM events
+                WHERE kind = 'submission' AND status = ?
+                ORDER BY created_ns DESC, event_id
+                """,
+                (status.value,),
+            ).fetchall()
+        return [str(row["event_id"]) for row in rows]
 
     def record_submission_result(self, submission_id: str, status: EventStatus) -> None:
         """Persist an authenticated remote attribution result idempotently."""
@@ -640,34 +706,18 @@ class MinerStore:
 
         if not events:
             raise ProtocolError("cannot prepare an empty batch")
-        event_ids = [
-            event.claim_id if isinstance(event, ClaimEvent) else event.submission_id
-            for event in events
-        ]
+        event_ids = [_event_id(event) for event in events]
         with self._transaction() as connection:
             pending = connection.execute(
                 "SELECT batch_json FROM batches WHERE state = 'prepared'"
             ).fetchone()
             if pending is not None:
                 return CommittedBatch.model_validate_json(pending["batch_json"])
-            history = connection.execute(
-                "SELECT history_id FROM history_state WHERE singleton = 1"
-            ).fetchone()
-            history_id = str(history["history_id"]) if history is not None else ""
-            last = connection.execute(
-                """
-                SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' AND history_id = ?
-                ORDER BY sequence DESC LIMIT 1
-                """,
-                (history_id,),
-            ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else 1
-            previous_hash = str(last["batch_hash"]) if last else None
+            # Event IDs are primary keys, so one unbatched row per requested ID
+            # proves every requested event exists exactly once.
             rows = connection.execute(
                 """
-                SELECT event_id, payload_json, private_reveal_json, batch_sequence
-                FROM events
+                SELECT batch_sequence FROM events
                 WHERE event_id IN (SELECT value FROM json_each(?))
                 """,
                 (json.dumps(event_ids, separators=(",", ":")),),
@@ -676,16 +726,8 @@ class MinerStore:
                 row["batch_sequence"] is not None for row in rows
             ):
                 raise ProtocolError("batch events must all be uniquely queued")
-            by_id = {str(row["event_id"]): row for row in rows}
-            reveals = self._reveals_for(connection, events)
-            batch = CommittedBatch.create(
-                miner_hotkey=miner_hotkey,
-                sequence=sequence,
-                previous_batch_hash=previous_hash,
-                events=events,
-                reveals=tuple(reveals),
-                history_id=history_id or None,
-            )
+            draft = self._draft(connection, events)
+            batch = draft.build(miner_hotkey, events)
             connection.execute(
                 """
                 INSERT INTO batches(
@@ -693,80 +735,64 @@ class MinerStore:
                 ) VALUES (?, ?, ?, ?, 'prepared', ?)
                 """,
                 (
-                    history_id,
-                    sequence,
+                    draft.history_id,
+                    draft.sequence,
                     batch.model_dump_json(),
                     batch.batch_hash,
                     time.time_ns(),
                 ),
             )
-            for event_id in event_ids:
-                if event_id not in by_id:
-                    raise ProtocolError("event disappeared while preparing batch")
-                connection.execute(
-                    """
-                    UPDATE events SET batch_history_id = ?, batch_sequence = ?
-                    WHERE event_id = ?
-                    """,
-                    (history_id, sequence, event_id),
-                )
+            connection.executemany(
+                """
+                UPDATE events SET batch_history_id = ?, batch_sequence = ?
+                WHERE event_id = ?
+                """,
+                [(draft.history_id, draft.sequence, event_id) for event_id in event_ids],
+            )
         return batch
 
-    def preview_batch(self, miner_hotkey: str, events: tuple[ProtocolEvent, ...]) -> CommittedBatch:
-        """Build the exact next batch without mutating queue state."""
+    def batch_draft(self, events: tuple[ProtocolEvent, ...]) -> BatchDraft:
+        """Load, in one read, what building the next batch from these events needs."""
 
-        if not events:
-            raise ProtocolError("cannot preview an empty batch")
         with self._transaction() as connection:
-            pending = connection.execute(
-                "SELECT 1 FROM batches WHERE state = 'prepared'"
-            ).fetchone()
-            if pending is not None:
-                raise ProtocolError("cannot preview while a prepared batch exists")
-            history = connection.execute(
-                "SELECT history_id FROM history_state WHERE singleton = 1"
-            ).fetchone()
-            history_id = str(history["history_id"]) if history is not None else ""
-            last = connection.execute(
-                """
-                SELECT sequence, batch_hash FROM batches
-                WHERE state = 'finalized' AND history_id = ?
-                ORDER BY sequence DESC LIMIT 1
-                """,
-                (history_id,),
-            ).fetchone()
-            sequence = int(last["sequence"]) + 1 if last else 1
-            previous_hash = str(last["batch_hash"]) if last else None
-            reveals = self._reveals_for(connection, events)
-        return CommittedBatch.create(
-            miner_hotkey=miner_hotkey,
-            sequence=sequence,
-            previous_batch_hash=previous_hash,
-            events=events,
-            reveals=tuple(reveals),
-            history_id=history_id or None,
-        )
+            return self._draft(connection, events)
 
     @staticmethod
-    def _reveals_for(
-        connection: sqlite3.Connection,
-        events: tuple[ProtocolEvent, ...],
-    ) -> list[DraftReveal]:
-        reveals: list[DraftReveal] = []
-        for event in events:
-            if not isinstance(event, SubmissionEvent) or event.claim_id is None:
-                continue
-            claim_row = connection.execute(
-                """
-                SELECT private_reveal_json FROM events
-                WHERE event_id = ? AND kind = 'claim'
-                """,
-                (event.claim_id,),
-            ).fetchone()
-            if claim_row is None or claim_row["private_reveal_json"] is None:
-                raise ProtocolError("submission references a claim without a local reveal")
-            reveals.append(DraftReveal.model_validate_json(claim_row["private_reveal_json"]))
-        return reveals
+    def _draft(connection: sqlite3.Connection, events: tuple[ProtocolEvent, ...]) -> BatchDraft:
+        history = connection.execute(
+            "SELECT history_id FROM history_state WHERE singleton = 1"
+        ).fetchone()
+        history_id = str(history["history_id"]) if history is not None else ""
+        last = connection.execute(
+            """
+            SELECT sequence, batch_hash FROM batches
+            WHERE state = 'finalized' AND history_id = ?
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            (history_id,),
+        ).fetchone()
+        claim_ids = [
+            event.claim_id
+            for event in events
+            if isinstance(event, SubmissionEvent) and event.claim_id is not None
+        ]
+        reveal_rows = connection.execute(
+            """
+            SELECT event_id, private_reveal_json FROM events
+            WHERE kind = 'claim' AND private_reveal_json IS NOT NULL
+              AND event_id IN (SELECT value FROM json_each(?))
+            """,
+            (json.dumps(claim_ids, separators=(",", ":")),),
+        ).fetchall()
+        return BatchDraft(
+            history_id=history_id,
+            sequence=int(last["sequence"]) + 1 if last else 1,
+            previous_batch_hash=str(last["batch_hash"]) if last else None,
+            reveals={
+                str(row["event_id"]): DraftReveal.model_validate_json(row["private_reveal_json"])
+                for row in reveal_rows
+            },
+        )
 
     def mark_finalized(self, batch: CommittedBatch, position: CommitmentPosition) -> None:
         """Atomically finalize a batch and advance every platform event status."""
@@ -808,12 +834,14 @@ class MinerStore:
                 UPDATE events
                 SET status = CASE kind
                     WHEN 'claim' THEN ?
+                    WHEN 'surplus_beneficiary' THEN ?
                     ELSE ?
                 END
                 WHERE batch_history_id = ? AND batch_sequence = ?
                 """,
                 (
                     EventStatus.SAFE_TO_POST.value,
+                    EventStatus.COMMITTED.value,
                     EventStatus.VERIFICATION_PENDING.value,
                     history_id,
                     batch.sequence,
@@ -831,6 +859,8 @@ class MinerStore:
             )
             committed_batch = CommittedBatch.model_validate_json(batch_row["batch_json"])
             for event_index, event in enumerate(committed_batch.events):
+                if isinstance(event, SurplusBeneficiaryEvent):
+                    continue
                 if isinstance(event, SubmissionEvent):
                     if event.claim_id is not None:
                         connection.execute(
@@ -874,7 +904,7 @@ class MinerStore:
                     """,
                     (event.campaign_id, event.creator_x_id),
                 ).fetchall()
-                for evicted in active[:-5]:
+                for evicted in active[:-MAX_ACTIVE_CLAIMS]:
                     claim_id = str(evicted["claim_id"])
                     connection.execute(
                         "DELETE FROM active_claims WHERE claim_id = ?",
@@ -954,6 +984,3 @@ class MinerStore:
             ],
             has_more,
         )
-
-    def close(self) -> None:
-        """Compatibility hook; connections are intentionally short-lived."""

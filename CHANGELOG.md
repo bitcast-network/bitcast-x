@@ -4,7 +4,205 @@ All notable changes to Bitcast X are recorded here. This project follows
 [Semantic Versioning](https://semver.org/); software release versions are separate from the wire,
 campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
-## [3.0.0] - Unreleased
+## [3.1.0] - Unreleased
+
+### Added
+
+- Optional surplus beneficiary. A miner names a hotkey with
+  `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (chart value `surplusBeneficiary`). The miner commits it as
+  a `surplus_beneficiary` batch event with its next batch, and validators then give that hotkey
+  the miner's surplus weight while the miner keeps its floor weight. Any registered hotkey may
+  receive it, including the burn UID. Unsetting the value commits a clearing event.
+
+### Breaking changes
+
+- Mechanism-1 weights are floor-first again. Each miner's daily USD floors are converted to weight
+  at the block's pricing snapshot first, so its emission is worth what it owes creators. The surplus
+  left over is split by tweet-score share. When floors exceed the emission value they are paid pro
+  rata. The snapshot reads alpha's moving-average price (`SubnetMovingPrice`) and the miner emission
+  from finalized chain state, and TAO/USD from CoinGecko. A failed TAO/USD request reuses the last
+  quote for up to 7,200 blocks (a day), also after a restart; without a price, weights fall back to
+  floor proportions. This replaces the pure score-share allocation that `weight_score_blend=1.0`
+  selected on main since 2026-09-16, which could leave a miner's emission below its floors.
+  `BITCAST_X_WEIGHT_SCORE_BLEND`, `rewards.aggregate_productive_weights` and
+  `RewardCoordinator(score_blend=...)` are removed; use `allocate_floor_first_weights`. Each cycle's
+  split is stored in a rollback-safe `weight_allocations` table.
+- Miner schema 4 rebuilds the miner event table to admit surplus-beneficiary events. It is
+  forward-only: the first start logs `upgraded miner state schema 3 -> 4`, and 3.0.0 cannot open the
+  database afterwards, so back up the miner before upgrading.
+- Remove unused validator and protocol APIs: the block-scan store methods (`persist_block`,
+  `scanned_block`, `commitment_for_sequence`, `next_commitment_sequence`) and the `start_block`
+  store argument, `ValidatorStore.cursor`/`record_error` (which wrote a column nothing read),
+  `ClaimLedger`/`ClaimRecord`, the test-only reward wrappers (`assign_tweets`, `apply_v2_bonuses`,
+  `calculate_rewards`), `HistoricalQualificationChecker` (use `QualificationReader.eligible`),
+  `auto_update_enabled`, `AttributionScorer.score(cached_evidence=...)`, the publisher's unused
+  `miner_uid` argument, ignored `snapshot_id` store arguments, the `title`/`ecosystem_id` campaign
+  field aliases and `CampaignFeed.protocol_version`. `ShadowResultPublisher` now requires its
+  `preview_store`. Startup no longer re-runs a contract backfill that every schema-6 database has
+  already applied.
+- Remove the remaining legacy compatibility code: `MiningProtocol.LEGACY_CONNECTION` and its
+  retirement guard, the v3 manifest fallback, v2 full-feed parsing, `CampaignFeedClient.cached()`,
+  and the unused `max_referral_amount` map field. Clients read only the v4 manifest; the retired v3
+  URL is redirected to it. Feed and map caches written by earlier releases stay usable, an
+  unreadable or retired feed fails the validator cycle instead of stopping the process, and a stored
+  legacy contract is quarantined rather than failing every cycle.
+- Reshape miner store and engine internals: `MinerStore.preview_batch` becomes `batch_draft`,
+  `receipts(event_id=...)` becomes `receipts(event_ids=(...))`, `MinerStore.enqueue` requires its
+  queue bounds (`MinerEngine.enqueue` supplies them from the batch policy), `resume_history` moves
+  from `MinerEngine` to `MinerStore`, and `current_history_id`, `history_has_batches`,
+  `start_history` and `submission_id` are removed. `MinerSdk`,
+  `MinerControlService` (including its `CampaignSource` fallback), `config.QUALIFICATION_OWNER_HOTKEY`
+  and the miner HTTP API are unchanged.
+- Replace chat-model brief evaluation with JEV through OpenRouter. One JEV request per tweet scores the
+  campaign's prompt-version rules (v1, v2, v5, v6) as separate yes/no gates beside a final verdict
+  and a product-identity check; required tags and links are checked in code, and the tweet passes
+  only when every check passes. Each version's request is pinned by a golden digest. Verdicts share
+  the durable evaluation cache, and provider failure defers settlement during the evidence grace
+  period rather than rejecting content. Validators retain their existing
+  `BITCAST_X_OPENROUTER_API_KEY`, which is required when production outputs are enabled; no separate
+  TypeSafe key is needed.
+  `BITCAST_X_LLM_PROVIDER`, `BITCAST_X_CHUTES_API_KEY` and
+  `BITCAST_X_LLM_NUM_CHECKS` are removed, along with `LlmBriefFilter`, `parse_brief_evaluation`
+  and the `bitcast_x.prompts` markdown prompt generators. A validator configured only for Chutes
+  must set `BITCAST_X_OPENROUTER_API_KEY`, and should also set `BITCAST_X_LLM_PROVIDER=openrouter`,
+  which 3.0.0 still reads, while a rollback is possible.
+
+### Compatibility
+
+- Validator schema 6 is unchanged; 3.1.0 adds a rollback-safe `weight_allocations` table. Miner
+  schema 4 is described under breaking changes.
+- Validators before 3.1.0, including 3.0.0 from `main`, quarantine a batch carrying a
+  surplus-beneficiary event, so every validator must upgrade before a miner names a beneficiary.
+  A validator can roll back to 3.0.0 only until it has stored a designation; after that, roll
+  forward.
+- Automatic source updates following `origin/main` activate this release at merge time. A
+  validator whose settings it would refuse stays on its current release and logs why every update
+  interval. See the
+  [upgrade guide](docs/upgrade-3.0.md#upgrading-a-node-that-runs-300-from-main).
+
+### Changed
+
+- Publish JEV brief-check reasons in plain language for creator dashboards, including missing
+  required mentions and links. Keep model scores in the stored audit breakdown and make generic
+  rejections explicit when no specific unmet requirement is known. Decisions and thresholds are
+  unchanged.
+- Final and preview reconciliation load the verified batch history once per pass, grouped by
+  campaign, instead of reloading and re-hashing the whole history for every campaign. The
+  reconciler keeps qualification answers for fixed past blocks, and for the moving preview block
+  only the latest block's, so long-running previews no longer grow it per cycle.
+- Engagement scoring looks up relationship edges in a sparse map built once per campaign pool,
+  instead of allocating a dense N×N matrix for every tweet (about 376 MB per tweet on the live
+  indie_hacker map). Scores are bit-identical; scoring 400 tweets on that map drops from 7.8 s to
+  0.4 s and peak memory from 523 MB to 143 MB.
+- Reward tuning values (performance bonus per metric, featured multiplier, featured pool size) are
+  module constants instead of repeated keyword defaults. When no featured tweet was pinned, the
+  published `selection_pool` now uses the same view-rank order as a pinned selection (it was
+  previously sorted by tweet ID); the selected tweet is unchanged.
+- Oversized campaign-feed, miner and LLM responses all raise `ResponseTooLargeError` from one bounded
+  reader. An oversized campaign feed previously raised a bare `ValueError`.
+- Validator settings logic lives in `config.py`: one `missing_validator_settings()` rule used by
+  the startup check, the economics on/off decision and the PM2 launcher (the copies disagreed on
+  empty strings). All three require the existing OpenRouter key for JEV. The env templates no
+  longer pin the tweet-length limit or the weight cadence and version key; existing `.env` files
+  that set them keep their values, so remove those lines to follow release defaults.
+- Miner claims fetch the central campaign once per request.
+- Miner submission no longer decodes every stored submission, and result polling skips the central
+  API when nothing is pending. Batch selection uses one store read and a binary search instead of
+  one write transaction per candidate; batch bytes are unchanged. Receipt listings parse each batch
+  once and read referenced claims in one query.
+- Miner API error codes are typed instead of derived from message text; codes, statuses and
+  messages are unchanged. `run-miner` and `run-miner-api` share one validator-permit check,
+  protocol app and commitment loop. The miner store uses the shared SQLite helpers.
+- `config/miner.env.example` states the enforced 64-character minimum for
+  `BITCAST_X_MINER_API_TOKEN`.
+- Remote Loki log forwarding no longer runs with the placeholder token, which could not
+  authenticate: it starts once `BITCAST_X_LOKI_TOKEN` is set, using the shared URL and username
+  unless they are overridden. Setting `BITCAST_X_LOKI_URL=` still disables it.
+- The miner's public `/health` reports `source_revision` beside `version`, as the validator's does,
+  so operators can tell builds that share a version number apart.
+
+### Fixed
+
+- Automatic updates no longer swap in a release whose validator refuses to start. The candidate
+  check now also runs the startup settings check, so a validator missing a setting the candidate
+  requires keeps running instead of being stopped and restored every update interval.
+- A miner database in the validator's state directory no longer blocks validator updates. Only
+  the validator updates itself, so the candidate check now reads only the validator database.
+- A restarted auto-update supervisor resumes its activated release. It discarded the activation
+  record, because a virtualenv's python links outside the release, and ran the invoking checkout's
+  code until its next update check. Because the supervisor runs from that checkout, the fix applies
+  once the checkout itself is updated; until then the validator logs a warning at startup.
+- A claim whose draft exceeds 20,000 characters once NFKC-normalized is refused (422 from the
+  miner API). Its reveal is stored normalized and re-checked on every read, so such a claim could
+  be created but never read back to build a batch, after which no event from any creator committed.
+- Campaign feed caches left by earlier releases stay usable. A torn or retired-format
+  `campaign-feed.json` is now downloaded again instead of failing every cycle until an operator
+  deleted it, and the map-binding bootstrap reads map references from any manifest version.
+  Cached ecosystem maps that still carry the retired consumer-only `max_referral_amount` default
+  are reused rather than all downloaded again on upgrade.
+- Settlement no longer freezes a campaign without a tweet whose evidence a provider briefly could
+  not return. Validators whose fetch failed froze different rewards, and for a pinned tweet no
+  featured bonus, from validators whose fetch succeeded, for the campaign's whole emission window.
+  Settlement now waits up to 900 blocks (three hours) for missing evidence, leaving that campaign
+  out of weights meanwhile, then settles without what is still missing. A failed tweet lookup is
+  retried after an hour rather than six, so the wait can still recover it.
+- Validators submit weights before publishing final results. A campaign whose final payload could
+  not be built, such as one whose rewarded miner had deregistered, stopped weight submission for
+  every campaign until its emission ended.
+- Settlement no longer drops a tweet because its engagement lookup failed. From 2026-10-09
+  Desearch's quote search timed out for nearly every tweet (see the next entry), and once the
+  900-block grace period ended every affected tweet was settled out of its campaign (15 of `125_exploit`'s 16 accepted tweets), although the tweet
+  and author were confirmed and the baseline they fix is about 95% of a typical score. After the
+  grace period, and in previews, such a tweet is now scored from its baseline and the engagers that
+  were fetched. Tweets whose post cannot be fetched are still left out.
+- Validators no longer search for quotes of a post whose own quote count is zero. Since 2026-10-09
+  Desearch has held a search with no matches for about 30 seconds before answering, longer than the
+  15-second request timeout, so the quote search for every unquoted post, nearly every campaign
+  tweet, failed and left its engagement unavailable. Scoring now reads the post first and skips
+  the search when the post reports no quotes, which yields the same engagers a completed empty
+  search would. Previews still search for a featured tweet's quotes, because its engagement
+  refreshes hourly while its cached post can be a day old.
+- Validators submit weights before refreshing open-campaign previews. Previews refetch X evidence
+  for every open campaign, and while Desearch's quote search was timing out a preview pass took
+  over two hours, so weights waited for it and, because the cadence check reads the cycle's start
+  block, were submitted only every other cycle.
+- Final result payloads now sign the form ingestion verifies. Payloads rewarding UIDs of different
+  digit counts (for example 9 and 10) failed signature verification with 401 and were resent every
+  cycle without being accepted.
+- Both miner modes apply one endpoint-advertisement rule. The chain rate-limits serve calls (50
+  blocks on SN93), so a restart soon after the last advertisement cannot re-advertise: `run-miner`
+  used to exit and crash-loop until the limit passed, while `run-miner-api` logged the failure and
+  reported ready even when the chain advertised a different endpoint or none, leaving the miner
+  unreachable. A rejected advertisement is now accepted only when the chain already advertises
+  this exact endpoint; otherwise startup fails and the supervisor retries.
+- Retrying a miner submission with the same `Idempotency-Key` but a changed `external_id` now
+  returns `409 idempotency_conflict`, as documented and as claims already did. It previously
+  returned the existing submission and silently ignored the new input.
+- A miner that queued two submissions citing the same claim before its next batch committed could
+  no longer commit anything: the batch revealed that claim twice, which every batch validation
+  rejects. A batch now reveals each claim once; validators already let at most one of the
+  submissions consume the claim. An affected miner recovers on its next commit attempt.
+- An unreadable preview cache entry (for example after an evidence model change, or a malformed
+  timestamp) is now a cache miss that is fetched again. It previously aborted the whole validator
+  cycle before weights, or stopped the process.
+- A pinned featured tweet no longer freezes its campaign contract or holds back settlement. Campaign
+  edits are adopted until economics settle; if an edit leaves the pinned tweet ineligible, that
+  campaign settles without a featured bonus instead of deferring every campaign's economics and
+  weight submission for the rest of the emission window. Replaces the pin-release logic and its
+  `store_audit_events` table; the pinned tweet is never replaced by a different one.
+
+### Security
+
+- Removed the `diskcache` dependency, which has an unpatched unsafe-pickle advisory
+  (CVE-2025-69872). Validator preview state now lives in a JSON table in `preview.sqlite3` instead
+  of the `preview-cache` directory. On first start the validator imports the existing entries off
+  its event loop, loading only plain values so no stored code can run; an interrupted import runs
+  again on the next start, and an unusable old cache never blocks startup. The old directory is
+  left unchanged so a rollback keeps its preview state. Delete it once rollback is no longer needed.
+  Entries no preview has written for 14 days, which belong to closed campaigns, are dropped, so the
+  store stays bounded as diskcache's size limit kept the old cache.
+
+## [3.0.0] - Untagged; `main` reported it from 2026-09-08
 
 ### Added
 

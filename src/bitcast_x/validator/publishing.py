@@ -12,9 +12,10 @@ from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import AttributionReason, AttributionResult
 from bitcast_x.publishing import BRIEF_TWEETS_PAYLOAD_TYPE, DataPublisher
-from bitcast_x.rewards import RewardDecision, TweetReward
+from bitcast_x.rewards import RewardDecision, TweetReward, featured_selection_pool
 from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.rewards import (
+    active_emission_campaigns,
     featured_tweet_selection_due,
     preview_featured_candidate,
     preview_performance_rewards,
@@ -36,11 +37,11 @@ class ShadowResultPublisher:
         publisher: DataPublisher,
         *,
         endpoint: str,
-        preview_store: PreviewStore | None = None,
+        preview_store: PreviewStore,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
-        self._preview_store = preview_store or PreviewStore(store.path.parent / "preview-cache")
+        self._preview_store = preview_store
         self._publisher = publisher
         self._endpoint = endpoint
         self._now = now or (lambda: datetime.now(UTC))
@@ -65,17 +66,13 @@ class ShadowResultPublisher:
             return False
         now = self._now()
         campaign_id = campaign.access.campaign_id
-        campaign_json = campaign.model_dump_json()
-        featured_selection = self.store.featured_tweet_selection(
-            campaign_id,
-            campaign_json,
-        )
+        featured_selection = self.store.featured_tweet_selection(campaign_id)
         if featured_selection is None and featured_tweet_selection_due(campaign, now=now):
             candidate = preview_featured_candidate(campaign, scored)
             if candidate is not None:
                 featured_selection = self.store.pin_featured_tweet_selection(
                     campaign_id=campaign_id,
-                    campaign_json=campaign_json,
+                    campaign_json=campaign.model_dump_json(),
                     tweet_id=candidate.tweet_id,
                     selection_pool=candidate.selection_pool,
                     selected_block=block,
@@ -88,22 +85,6 @@ class ShadowResultPublisher:
                     block,
                     ",".join(featured_selection.selection_pool),
                 )
-        eligible_tweet_ids = {
-            item.attribution.tweet_id
-            for item in scored
-            if item.attribution.campaign_id == campaign_id
-            and item.attribution.miner_hotkey is not None
-            and item.meets_brief
-        }
-        if featured_selection is not None and featured_selection.tweet_id not in eligible_tweet_ids:
-            LOGGER.warning(
-                "preview publication deferred; pinned featured evidence is unavailable "
-                "campaign=%s tweet=%s block=%s",
-                campaign_id,
-                featured_selection.tweet_id,
-                block,
-            )
-            return False
         preview_rewards = preview_performance_rewards(
             campaign,
             scored,
@@ -166,7 +147,7 @@ class ShadowResultPublisher:
         *,
         block: int,
         hotkey_to_uid: dict[str, int],
-        completed_campaign_ids: Collection[str] | None = None,
+        completed_campaign_ids: Collection[str],
     ) -> int:
         """Publish active final results and replaceable zero-value status updates."""
 
@@ -177,15 +158,12 @@ class ShadowResultPublisher:
         for reward in rewards:
             rewards_by_campaign[reward.campaign_id].append(reward)
         published = 0
-        records = {item.access.campaign_id: item for item in self.store.reconciled_campaigns()}
-        records.update({item.access.campaign_id: item for item in feed.campaigns})
-        for campaign in sorted(records.values(), key=lambda item: item.access.campaign_id):
-            start = campaign.emission_start_block
-            end = campaign.emission_end_block
+        for campaign in sorted(
+            active_emission_campaigns(self.store, feed, block),
+            key=lambda item: item.access.campaign_id,
+        ):
             campaign_id = campaign.access.campaign_id
-            if start is None or end is None or not start <= block <= end:
-                continue
-            if self.store.publication_succeeded(feed.snapshot_id, campaign_id):
+            if self.store.publication_succeeded(campaign_id):
                 continue
             campaign_rewards = rewards_by_campaign.get(campaign_id, [])
             frozen_economics = self.store.campaign_rewards(
@@ -193,11 +171,7 @@ class ShadowResultPublisher:
                 campaign.model_dump_json(),
             )
             if frozen_economics is None:
-                completed = (
-                    campaign_id in completed_campaign_ids
-                    if completed_campaign_ids is not None
-                    else self.store.campaign_reconciled(campaign_id)
-                )
+                completed = campaign_id in completed_campaign_ids
                 attributions = (
                     self.store.reconciliation(
                         feed.snapshot_id,
@@ -226,7 +200,7 @@ class ShadowResultPublisher:
             frozen_rewards, reward_decisions = frozen_economics
             if campaign_rewards != frozen_rewards:
                 raise ProtocolError(f"campaign {campaign_id} rewards changed before publication")
-            stored_scores = self.store.scored_reconciliation(feed.snapshot_id, campaign_id) or []
+            stored_scores = self.store.scored_reconciliation(campaign_id) or []
             for item in stored_scores:
                 scored_by_key.setdefault(
                     (item.attribution.campaign_id, item.attribution.tweet_id), item
@@ -247,10 +221,7 @@ class ShadowResultPublisher:
                 hotkey_to_uid,
                 attributions=attributions,
                 reward_decisions=reward_decisions,
-                featured_selection=self.store.featured_tweet_selection(
-                    campaign_id,
-                    campaign.model_dump_json(),
-                ),
+                featured_selection=self.store.featured_tweet_selection(campaign_id),
             )
             run_id = f"v3:{feed.snapshot_id}:{campaign_id}"
             success = await self._publisher.publish(
@@ -501,20 +472,7 @@ def _featured_selection(
     *,
     featured_selection: FeaturedTweetSelection | None = None,
 ) -> dict[str, object] | None:
-    reward_feature_ids = {
-        item.featured_tweet_id for item in rewards if item.featured_tweet_id is not None
-    }
-    if (
-        featured_selection is not None
-        and reward_feature_ids
-        and reward_feature_ids != {featured_selection.tweet_id}
-    ):
-        raise ProtocolError(f"featured tweet metadata changed for campaign {campaign_id}")
-    featured_id = (
-        featured_selection.tweet_id
-        if featured_selection is not None
-        else next((item.featured_tweet_id for item in rewards if item.featured_tweet_id), None)
-    )
+    featured_id = next((item.featured_tweet_id for item in rewards if item.featured_tweet_id), None)
     if featured_id is None:
         return None
     try:
@@ -523,16 +481,21 @@ def _featured_selection(
         raise ProtocolError(
             f"featured tweet {featured_id} has no publishable scoring evidence"
         ) from exc
-    if featured_selection is not None:
+    if featured_selection is not None and featured_selection.tweet_id == featured_id:
         selected_at = featured_selection.selected_at
         selection_pool = list(featured_selection.selection_pool)
     else:
-        ranked = sorted(
-            (scored_by_key[(campaign_id, item.tweet_id)] for item in rewards),
-            key=lambda item: (-item.tweet.views_count, item.tweet.tweet_id),
-        )[:5]
-        selected_at = max(item.tweet.created_at for item in ranked)
-        selection_pool = sorted(item.tweet.tweet_id for item in ranked)
+        selection_pool = list(
+            featured_selection_pool(
+                {
+                    item.tweet_id: scored_by_key[(campaign_id, item.tweet_id)].tweet.views_count
+                    for item in rewards
+                }
+            )
+        )
+        selected_at = max(
+            scored_by_key[(campaign_id, tweet_id)].tweet.created_at for tweet_id in selection_pool
+        )
     return {
         "brief_id": campaign_id,
         "tweet_id": featured_id,

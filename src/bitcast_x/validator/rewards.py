@@ -1,18 +1,23 @@
 """Freeze accepted scores and derive shadow emission weights."""
 
 import logging
-from collections.abc import Callable, Collection
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
+
+import numpy as np
+from numpy.typing import NDArray
 
 from bitcast_x.campaigns import CampaignFeed, CampaignRecord
 from bitcast_x.errors import ReconciliationUnavailableError
-from bitcast_x.protocol import AttributionResult, MiningProtocol
+from bitcast_x.pricing import PricingSnapshot
+from bitcast_x.protocol import AttributionResult
 from bitcast_x.rewards import (
     FeaturedTweetCandidate,
     RewardCampaign,
     RewardTweet,
     TweetReward,
-    aggregate_productive_weights,
+    WeightAllocation,
+    allocate_floor_first_weights,
     apply_v2_featured_bonus,
     apply_v2_performance_bonus,
     assign_tweets_with_reasons,
@@ -21,7 +26,7 @@ from bitcast_x.rewards import (
     select_v2_featured_tweet,
 )
 from bitcast_x.validator.scoring import AttributionScorer, ScoredAttribution
-from bitcast_x.validator.store import FeaturedTweetSelection, ValidatorStore
+from bitcast_x.validator.store import ValidatorStore
 
 LOGGER = logging.getLogger(__name__)
 
@@ -103,23 +108,41 @@ def preview_performance_rewards(
     ]
 
 
-class RewardCoordinator:
-    """Bridge frozen attribution into seven-day productive miner weights."""
+def active_emission_campaigns(
+    store: ValidatorStore, feed: CampaignFeed, block: int
+) -> list[CampaignRecord]:
+    """Return campaigns whose emission window contains ``block``.
 
-    def __init__(
-        self,
-        store: ValidatorStore,
-        scorer: AttributionScorer,
-        *,
-        score_blend: float = 0.0,
-        now: Callable[[], datetime] | None = None,
-    ) -> None:
+    Frozen campaigns come first (by ID), overlaid by the feed's records in feed
+    order. That order fixes the float summation order of the weight vector, so
+    callers that need another order sort the result themselves.
+    """
+
+    records = {item.access.campaign_id: item for item in store.reconciled_campaigns()}
+    records.update({item.access.campaign_id: item for item in feed.campaigns})
+    return [
+        campaign
+        for campaign in records.values()
+        if campaign.emission_start_block is not None
+        and campaign.emission_end_block is not None
+        and campaign.emission_start_block <= block <= campaign.emission_end_block
+    ]
+
+
+class RewardCoordinator:
+    """Bridge frozen attribution into seven-day floor-first miner weights."""
+
+    def __init__(self, store: ValidatorStore, scorer: AttributionScorer) -> None:
         self.store = store
         self._scorer = scorer
-        self._score_blend = score_blend
-        self._now = now or (lambda: datetime.now(UTC))
         self._completed_campaign_ids: frozenset[str] | None = None
-        self._featured_evidence_pending_campaign_ids: frozenset[str] = frozenset()
+        self._last_allocation: WeightAllocation | None = None
+
+    @property
+    def last_allocation(self) -> WeightAllocation | None:
+        """Return the floor/surplus breakdown behind the latest weight vector."""
+
+        return self._last_allocation
 
     @property
     def completed_campaign_ids(self) -> frozenset[str]:
@@ -127,24 +150,12 @@ class RewardCoordinator:
 
         return self._completed_campaign_ids or frozenset()
 
-    async def preview_scores(
-        self,
-        feed: CampaignFeed,
-        attributions: list[AttributionResult],
-    ) -> list[ScoredAttribution]:
-        """Score mutable, pre-close results without freezing validator state."""
-
-        return await self._scorer.score(
-            feed,
-            attributions,
-            defer_unavailable_tweets=True,
-        )
-
     async def freeze_scores(
         self,
         feed: CampaignFeed,
         attributions: list[AttributionResult],
         *,
+        block: int,
         reconciled_campaign_ids: Collection[str] | None = None,
     ) -> list[ScoredAttribution]:
         """Fetch mutable engagement evidence once per campaign snapshot, then reuse it."""
@@ -153,11 +164,9 @@ class RewardCoordinator:
         completed_campaign_ids: set[str] = set()
         self._completed_campaign_ids = frozenset()
         for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
             campaign_id = campaign.access.campaign_id
             existing = (
-                self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                self.store.scored_reconciliation(campaign_id)
                 if self.store.campaign_finalized(campaign_id)
                 else None
             )
@@ -177,7 +186,7 @@ class RewardCoordinator:
                 scored = await self._scorer.score(
                     feed,
                     campaign_results,
-                    defer_unavailable_tweets=True,
+                    defer_unavailable_tweets=campaign.evidence_grace_ended(block),
                 )
             except ReconciliationUnavailableError as exc:
                 LOGGER.warning(
@@ -186,92 +195,11 @@ class RewardCoordinator:
                     exc,
                 )
                 continue
-            self.store.persist_scores(feed.snapshot_id, campaign_id, scored)
+            self.store.persist_scores(campaign_id, scored)
             output.extend(scored)
             completed_campaign_ids.add(campaign_id)
         self._completed_campaign_ids = frozenset(completed_campaign_ids)
         return output
-
-    def release_ineligible_featured_selections(self, feed: CampaignFeed) -> None:
-        """Release featured pins that the active contract excludes retroactively.
-
-        The featured identity is pinned from live campaign data inside the
-        final day before scoring closes, so a lawful pin is always created at
-        or before the contract's ``closes_at``. If an operator edit moves the
-        scoring window backwards after the pin exists, the pin's creation
-        time ends up after the edited close: proof that the pin was created
-        under a contract that has since been replaced. Reconciliation then
-        rejects the pinned tweet on every later cycle, and the fail-closed
-        settlement gate would defer the campaign's economics — and with them
-        all weight submissions — for the rest of the emission window.
-
-        This releases such pins so settlement proceeds without a featured
-        bonus, or a replacement is selected from the tweets that qualify
-        under the contract now in force. The decision is recorded in the
-        store audit log. Pins whose tweet is merely missing from the current
-        scored set (for example during a transient evidence outage) keep the
-        conservative deferral.
-        """
-
-        checked: set[str] = set()
-        for campaign in sorted(feed.campaigns, key=lambda item: item.access.campaign_id):
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
-            campaign_id = campaign.access.campaign_id
-            if campaign_id in checked:
-                continue
-            checked.add(campaign_id)
-            if self.store.campaign_finalized(campaign_id):
-                # Positive economics already froze: settlement no longer reads
-                # the pin, and the stored selection stays for audit/replay.
-                continue
-            campaign_json = campaign.model_dump_json()
-            selection = self.store.featured_tweet_selection(campaign_id, campaign_json)
-            if selection is None:
-                continue
-            tweet = self.store.persisted_scored_tweet(campaign_id, selection.tweet_id)
-            outside_window = (
-                tweet is not None
-                and not campaign.opens_at <= tweet.created_at <= campaign.closes_at
-            )
-            pin_outside_lead_window = not (
-                campaign.opens_at <= selection.selected_at <= campaign.closes_at
-            )
-            if not outside_window and not pin_outside_lead_window:
-                continue
-            released = self.store.release_featured_tweet_selection(
-                campaign_id=campaign_id,
-                campaign_json=campaign_json,
-                tweet_id=selection.tweet_id,
-                released_at=self._now(),
-            )
-            if released:
-                if tweet is not None:
-                    LOGGER.warning(
-                        (
-                            "released featured tweet selection outside the campaign "
-                            "scoring window campaign=%s tweet=%s published=%s "
-                            "window=%s..%s"
-                        ),
-                        campaign_id,
-                        selection.tweet_id,
-                        tweet.created_at.isoformat(),
-                        campaign.opens_at.isoformat(),
-                        campaign.closes_at.isoformat(),
-                    )
-                else:
-                    LOGGER.warning(
-                        (
-                            "released featured tweet selection inconsistent with the "
-                            "campaign scoring window campaign=%s tweet=%s "
-                            "selected_at=%s window=%s..%s"
-                        ),
-                        campaign_id,
-                        selection.tweet_id,
-                        selection.selected_at.isoformat(),
-                        campaign.opens_at.isoformat(),
-                        campaign.closes_at.isoformat(),
-                    )
 
     def shadow_weights(
         self,
@@ -282,28 +210,20 @@ class RewardCoordinator:
         hotkey_to_uid: dict[str, int],
         uids: list[int],
         persist: bool = True,
+        pricing: PricingSnapshot | None = None,
     ) -> tuple[dict[int, float], list[TweetReward]]:
-        """Calculate and audit the current vector without an on-chain write."""
+        """Calculate and audit the current vector without an on-chain write.
 
-        self._featured_evidence_pending_campaign_ids = frozenset()
+        ``pricing`` converts USD floors into weight. Without it every miner is
+        weighted in floor proportions and no surplus is donated.
+        """
+
         by_campaign: dict[str, list[ScoredAttribution]] = {}
         for item in scored:
             by_campaign.setdefault(item.attribution.campaign_id, []).append(item)
-        records = {item.access.campaign_id: item for item in self.store.reconciled_campaigns()}
-        records.update({item.access.campaign_id: item for item in feed.campaigns})
-        active_records: list[CampaignRecord] = []
-        for campaign in records.values():
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
-            start = campaign.emission_start_block
-            end = campaign.emission_end_block
-            if start is None or end is None or not start <= block <= end:
-                continue
-            active_records.append(campaign)
-
         frozen_floors: list[TweetReward] = []
         pending: list[tuple[CampaignRecord, RewardCampaign]] = []
-        for campaign in active_records:
+        for campaign in active_emission_campaigns(self.store, feed, block):
             campaign_id = campaign.access.campaign_id
             campaign_json = campaign.model_dump_json()
             frozen = self.store.campaign_rewards(campaign_id, campaign_json)
@@ -312,17 +232,12 @@ class RewardCoordinator:
                 continue
             if campaign_id not in by_campaign:
                 stored_scores = (
-                    self.store.scored_reconciliation(feed.snapshot_id, campaign_id)
+                    self.store.scored_reconciliation(campaign_id)
                     if self.store.campaign_finalized(campaign_id)
                     else None
                 )
                 if stored_scores is None:
-                    completed = (
-                        campaign_id in self._completed_campaign_ids
-                        if self._completed_campaign_ids is not None
-                        else self.store.campaign_reconciled(campaign_id)
-                    )
-                    if not completed:
+                    if not self._completed(campaign_id):
                         continue
                     stored_scores = []
                 by_campaign[campaign_id] = stored_scores
@@ -343,64 +258,17 @@ class RewardCoordinator:
                 )
             )
         pending_campaigns = [item[1] for item in pending]
-        missing_featured_evidence: set[str] = set()
-        selections: dict[str, FeaturedTweetSelection | None] = {}
-        for campaign, reward_campaign in pending:
-            campaign_id = campaign.access.campaign_id
-            selection = self.store.featured_tweet_selection(
-                campaign_id,
-                campaign.model_dump_json(),
-            )
-            selections[campaign_id] = selection
-            if selection is not None and selection.tweet_id not in {
-                item.tweet_id for item in reward_campaign.tweets
-            }:
-                missing_featured_evidence.add(campaign_id)
-        if missing_featured_evidence:
-            self._featured_evidence_pending_campaign_ids = frozenset(missing_featured_evidence)
-            LOGGER.warning(
-                "final reward assignment deferred; pinned featured evidence is "
-                "unavailable campaigns=%s",
-                ",".join(sorted(missing_featured_evidence)),
-            )
-            vector = aggregate_productive_weights(
-                frozen_floors,
-                hotkey_to_uid,
-                uids,
-                score_blend=self._score_blend,
-            )
-            weights = {uid: float(vector[index]) for index, uid in enumerate(uids)}
-            if persist:
-                self.store.persist_shadow_weights(block, feed.snapshot_id, weights)
-            return weights, frozen_floors
-
         outcome = assign_tweets_with_reasons(
             pending_campaigns,
             committed_tweet_ids=self.store.rewarded_tweet_ids(),
         )
         bonus_campaigns: list[RewardCampaign] = []
-        for campaign, reward_campaign in pending:
-            campaign_id = reward_campaign.campaign_id
-            assigned = outcome.assigned[campaign_id]
+        for reward_campaign in pending_campaigns:
+            assigned = outcome.assigned[reward_campaign.campaign_id]
             adjusted = apply_v2_performance_bonus(reward_campaign, assigned)
-            selection = selections[campaign_id]
-            if selection is None:
-                candidate = select_v2_featured_tweet(reward_campaign, assigned)
-                if candidate is not None:
-                    selection = self.store.pin_featured_tweet_selection(
-                        campaign_id=campaign_id,
-                        campaign_json=campaign.model_dump_json(),
-                        tweet_id=candidate.tweet_id,
-                        selection_pool=candidate.selection_pool,
-                        selected_block=block,
-                        selected_at=self._now(),
-                    )
-            if selection is not None:
-                adjusted = apply_v2_featured_bonus(
-                    adjusted,
-                    assigned,
-                    selection.tweet_id,
-                )
+            featured_tweet_id = self._featured_tweet_id(reward_campaign, assigned)
+            if featured_tweet_id is not None:
+                adjusted = apply_v2_featured_bonus(adjusted, assigned, featured_tweet_id)
             bonus_campaigns.append(adjusted)
         new_floors = calculate_tweet_floors(bonus_campaigns, outcome.assigned)
         decisions = reward_decisions(bonus_campaigns, outcome, new_floors)
@@ -414,13 +282,47 @@ class RewardCoordinator:
                 decisions=[item for item in decisions if item.campaign_id == campaign_id],
             )
         floors = frozen_floors + new_floors
-        vector = aggregate_productive_weights(
-            floors, hotkey_to_uid, uids, score_blend=self._score_blend
+        allocation = allocate_floor_first_weights(
+            floors,
+            hotkey_to_uid,
+            uids,
+            emission_value_usd=pricing.emission_value_usd if pricing is not None else None,
+            surplus_beneficiaries=self.store.surplus_beneficiaries(through_block=block),
         )
-        weights = {uid: float(vector[index]) for index, uid in enumerate(uids)}
+        self._last_allocation = allocation
+        _log_allocation(allocation, block=block, priced=pricing is not None)
+        weights = {uid: float(allocation.weights[index]) for index, uid in enumerate(uids)}
         if persist:
             self.store.persist_shadow_weights(block, feed.snapshot_id, weights)
         return weights, floors
+
+    def _featured_tweet_id(
+        self,
+        campaign: RewardCampaign,
+        assigned_tweet_ids: set[str],
+    ) -> str | None:
+        """Return the featured tweet to reward at settlement.
+
+        The tweet pinned before close is honored while it remains an eligible
+        tweet of the campaign. A pin that no longer qualifies (for example after
+        a campaign edit) is dropped rather than replaced, so the announced
+        feature never changes to a different tweet. Without a pin, the
+        selection is made from final data.
+        """
+
+        selection = self.store.featured_tweet_selection(campaign.campaign_id)
+        if selection is None:
+            candidate = select_v2_featured_tweet(campaign, assigned_tweet_ids)
+            return candidate.tweet_id if candidate is not None else None
+        if any(tweet.tweet_id == selection.tweet_id for tweet in campaign.tweets):
+            return selection.tweet_id
+        LOGGER.warning(
+            "pinned featured tweet is not an eligible tweet at settlement; "
+            "settling without featured bonus campaign=%s tweet=%s",
+            campaign.campaign_id,
+            selection.tweet_id,
+        )
+        return None
 
     def pending_reward_campaign_ids(
         self,
@@ -430,27 +332,76 @@ class RewardCoordinator:
     ) -> tuple[str, ...]:
         """Return active campaigns whose final economics are not frozen yet."""
 
-        records = {item.access.campaign_id: item for item in self.store.reconciled_campaigns()}
-        records.update({item.access.campaign_id: item for item in feed.campaigns})
-        pending: list[str] = []
-        for campaign in records.values():
-            if campaign.access.mining_protocol is not MiningProtocol.PRECLAIM_V2:
-                continue
-            start = campaign.emission_start_block
-            end = campaign.emission_end_block
-            if start is None or end is None or not start <= block <= end:
-                continue
-            campaign_id = campaign.access.campaign_id
-            frozen = self.store.campaign_rewards(campaign_id, campaign.model_dump_json())
-            completed = (
-                campaign_id in self._completed_campaign_ids
-                if self._completed_campaign_ids is not None
-                else self.store.campaign_reconciled(campaign_id)
+        return tuple(
+            sorted(
+                campaign.access.campaign_id
+                for campaign in active_emission_campaigns(self.store, feed, block)
+                if not self._completed(campaign.access.campaign_id)
+                and self.store.campaign_rewards(
+                    campaign.access.campaign_id, campaign.model_dump_json()
+                )
+                is None
             )
-            featured_evidence_pending = campaign_id in self._featured_evidence_pending_campaign_ids
-            if frozen is None and (not completed or featured_evidence_pending):
-                pending.append(campaign.access.campaign_id)
-        return tuple(sorted(pending))
+        )
+
+    def _completed(self, campaign_id: str) -> bool:
+        """Return whether the campaign was scored in this cycle (or, before any, stored)."""
+
+        if self._completed_campaign_ids is None:
+            return self.store.campaign_reconciled(campaign_id)
+        return campaign_id in self._completed_campaign_ids
+
+
+def allocation_record(
+    allocation: WeightAllocation,
+    uids: list[int],
+    pricing: PricingSnapshot | None,
+) -> dict[str, object]:
+    """Return a JSON-ready audit record of one block's floor-first allocation."""
+
+    def by_uid(values: NDArray[np.float64]) -> dict[str, float]:
+        return {str(uid): float(value) for uid, value in zip(uids, values, strict=True) if value}
+
+    return {
+        "pricing": (
+            {
+                "daily_miner_alpha": pricing.daily_miner_alpha,
+                "alpha_price_tao": pricing.alpha_price_tao,
+                "tao_price_usd": pricing.tao_price_usd,
+                "tao_price_block": pricing.tao_price_block,
+            }
+            if pricing is not None
+            else None
+        ),
+        "emission_value_usd": allocation.emission_value_usd,
+        "total_floors_usd": allocation.total_floors_usd,
+        "funding_ratio": allocation.funding_ratio,
+        "floor_weights": by_uid(allocation.floor_weights),
+        "surplus_weights": by_uid(allocation.surplus_weights),
+        "donated_weights": by_uid(allocation.donated_weights),
+    }
+
+
+def _log_allocation(allocation: WeightAllocation, *, block: int, priced: bool) -> None:
+    if allocation.total_floors_usd <= 0:
+        return
+    if not priced:
+        LOGGER.warning(
+            "pricing unavailable; weights follow floor proportions block=%s total_floors_usd=%.2f",
+            block,
+            allocation.total_floors_usd,
+        )
+        return
+    LOGGER.info(
+        "floor-first weights block=%s emission_value_usd=%.2f total_floors_usd=%.2f "
+        "funding_ratio=%.4f surplus_weight=%.6f donated_weight=%.6f",
+        block,
+        allocation.emission_value_usd or 0.0,
+        allocation.total_floors_usd,
+        allocation.funding_ratio or 0.0,
+        float(allocation.surplus_weights.sum()),
+        float(allocation.donated_weights.sum()),
+    )
 
 
 def _reward_tweet(

@@ -10,10 +10,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _RETRYABLE = {408, 429, 500, 502, 503, 504}
 
-# Desearch currently answers 500 (a retryable status) for tweets that no longer
+# Desearch currently answers a retryable 5xx status for tweets that no longer
 # exist on X. Remember exhausted failures for a TTL so dead IDs cost one probe
-# per TTL window instead of full retry storms on every encounter.
-_NEGATIVE_TTL_SECONDS = 6 * 3600
+# per TTL window instead of full retry storms on every encounter. The TTL is well
+# inside settlement's evidence grace period, so settlement asks again while it waits.
+_NEGATIVE_TTL_SECONDS = 3600
 _NEGATIVE_CACHE_MAX = 4096
 
 
@@ -62,7 +63,10 @@ class TweetFetch(BaseModel):
 
 
 class EngagementFetch(BaseModel):
-    """Normalized max-one-contribution engagement map for v2 scoring."""
+    """Normalized max-one-contribution engagement map for v2 scoring.
+
+    When ``provider_available`` is false the map holds only what could be fetched.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -75,7 +79,9 @@ class XProvider(Protocol):
 
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch: ...
 
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch: ...
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch: ...
 
     async def close(self) -> None: ...
 
@@ -107,10 +113,10 @@ class DesearchProvider:
         # tweet_id -> monotonic expiry of the negative verdict.
         self._negative: dict[str, float] = {}
 
-    @staticmethod
-    def _prune_negative(cache: dict[str, float], now: float) -> None:
-        """Drop expired entries and keep the cache bounded."""
+    def _prune_negative(self, now: float) -> None:
+        """Drop expired negative verdicts and keep the cache bounded."""
 
+        cache = self._negative
         for tweet_id in [key for key, expiry in cache.items() if expiry <= now]:
             del cache[tweet_id]
         while len(cache) > _NEGATIVE_CACHE_MAX:
@@ -127,60 +133,53 @@ class DesearchProvider:
 
         unavailable = TweetFetch(tweet=None, provider_available=False)
         now = time.monotonic()
-        self._prune_negative(self._negative, now)
-        cached_expiry = self._negative.get(tweet_id)
-        if cached_expiry is not None:
+        self._prune_negative(now)
+        if tweet_id in self._negative:
             return unavailable
+        response = await self._get("/twitter/post", {"id": tweet_id})
+        if response is None:
+            return unavailable
+        if response.status_code in _RETRYABLE:
+            self._negative[tweet_id] = now + _NEGATIVE_TTL_SECONDS
+            self._prune_negative(now)
+            return unavailable
+        if response.status_code == 404:
+            return TweetFetch(tweet=None, provider_available=True)
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return unavailable
+        if isinstance(payload, list):
+            payload = payload[0] if payload else None
+        if not isinstance(payload, dict) or not payload:
+            return TweetFetch(tweet=None, provider_available=True)
+        tweet = _parse_desearch_tweet(payload)
+        return TweetFetch(tweet=tweet, provider_available=tweet is not None)
 
-        for attempt in range(self._attempts):
-            try:
-                response = await self._client.get(
-                    f"{self._base_url}/twitter/post",
-                    params={"id": tweet_id},
-                    headers=self._headers,
-                    timeout=self._timeout,
+    async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
+        """Fetch retweeters and quotes concurrently; quotes override retweets as in v2.
+
+        ``quote_count`` is the post's own quote count when the caller has it. Zero
+        skips the quote search, which can only come back empty.
+        """
+
+        lookups = [self._request_json("/twitter/post/retweeters", {"id": tweet_id})]
+        # Since 2026-10-09 Desearch holds a search with no matches for about 30
+        # seconds before answering, longer than the request timeout, so searching
+        # for quotes of an unquoted post made its engagement unavailable.
+        if quote_count != 0:
+            lookups.append(
+                self._request_json(
+                    "/twitter",
+                    {"query": f"quoted_tweet_id:{tweet_id}", "sort": "Latest", "count": 100},
                 )
-            except httpx.HTTPError:
-                if attempt + 1 == self._attempts:
-                    return TweetFetch(tweet=None, provider_available=False)
-                await asyncio.sleep(self._retry_delay * (2**attempt))
-                continue
-            if response.status_code in _RETRYABLE:
-                if attempt + 1 == self._attempts:
-                    self._negative[tweet_id] = now + _NEGATIVE_TTL_SECONDS
-                    self._prune_negative(self._negative, now)
-                    return unavailable
-                await asyncio.sleep(self._retry_delay * (2**attempt))
-                continue
-            if response.status_code == 404:
-                return TweetFetch(tweet=None, provider_available=True)
-            try:
-                response.raise_for_status()
-                payload = response.json()
-            except (httpx.HTTPError, ValueError):
-                return TweetFetch(tweet=None, provider_available=False)
-            if isinstance(payload, list):
-                payload = payload[0] if payload else None
-            if not isinstance(payload, dict) or not payload:
-                return TweetFetch(tweet=None, provider_available=True)
-            tweet = _parse_desearch_tweet(payload)
-            return TweetFetch(tweet=tweet, provider_available=tweet is not None)
-        return TweetFetch(tweet=None, provider_available=False)
-
-    async def fetch_engagements(self, tweet_id: str) -> EngagementFetch:
-        """Fetch retweeters and quotes concurrently; quotes override retweets as in v2."""
-
-        retweeters_result, quotes_result = await asyncio.gather(
-            self._request_json("/twitter/post/retweeters", {"id": tweet_id}),
-            self._request_json(
-                "/twitter",
-                {"query": f"quoted_tweet_id:{tweet_id}", "sort": "Latest", "count": 100},
-            ),
-        )
-        retweeters, retweeters_available = retweeters_result
-        quotes, quotes_available = quotes_result
-        if not retweeters_available or not quotes_available:
-            return EngagementFetch(engagements={}, provider_available=False)
+            )
+        results = await asyncio.gather(*lookups)
+        retweeters, retweeters_available = results[0]
+        quotes, quotes_available = results[1] if len(results) > 1 else ([], True)
         engagements: dict[str, str] = {}
         users = retweeters.get("users", []) if isinstance(retweeters, dict) else []
         for user in users:
@@ -200,12 +199,35 @@ class DesearchProvider:
             parsed = _parse_desearch_tweet(payload)
             if parsed is not None and parsed.quoted_tweet_id == tweet_id:
                 engagements[parsed.author] = "quote"
-        return EngagementFetch(engagements=engagements, provider_available=True)
+        # A failed lookup leaves the result unavailable, so settlement still waits
+        # for complete evidence, but it keeps whatever the other lookup returned.
+        return EngagementFetch(
+            engagements=engagements,
+            provider_available=retweeters_available and quotes_available,
+        )
 
     async def _request_json(
         self, path: str, params: dict[str, Any]
     ) -> tuple[dict[str, Any] | list[Any] | None, bool]:
+        response = await self._get(path, params)
+        if response is None or response.status_code in _RETRYABLE:
+            return None, False
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError):
+            return None, False
+        return payload if isinstance(payload, (dict, list)) else None, True
+
+    async def _get(self, path: str, params: dict[str, Any]) -> httpx.Response | None:
+        """GET with backoff on transport errors and transient statuses.
+
+        Returns the first non-retryable response, the final retryable one, or
+        None when the final attempt failed in transport.
+        """
+
         for attempt in range(self._attempts):
+            final = attempt + 1 == self._attempts
             try:
                 response = await self._client.get(
                     f"{self._base_url}{path}",
@@ -214,17 +236,13 @@ class DesearchProvider:
                     timeout=self._timeout,
                 )
             except httpx.HTTPError:
-                response = None
-            if response is not None and response.status_code not in _RETRYABLE:
-                try:
-                    response.raise_for_status()
-                    payload = response.json()
-                except (httpx.HTTPError, ValueError):
-                    return None, False
-                return payload if isinstance(payload, (dict, list)) else None, True
-            if attempt + 1 < self._attempts:
-                await asyncio.sleep(self._retry_delay * (2**attempt))
-        return None, False
+                if final:
+                    return None
+            else:
+                if final or response.status_code not in _RETRYABLE:
+                    return response
+            await asyncio.sleep(self._retry_delay * (2**attempt))
+        return None
 
 
 def _parse_desearch_tweet(payload: dict[str, Any]) -> Tweet | None:

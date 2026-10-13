@@ -1,6 +1,5 @@
 """Safe source auto-update behavior."""
 
-import hashlib
 import json
 import sqlite3
 import sys
@@ -11,65 +10,69 @@ from typing import Any
 import pytest
 
 from bitcast_x import auto_update
+from bitcast_x import main as main_module
 from bitcast_x.auto_update import Release, SourceUpdateManager
 from bitcast_x.config import Settings
 from bitcast_x.miner.store import MinerStore
 from bitcast_x.validator.store import ValidatorStore
 
 
-def _digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _logical_dump(path: Path) -> str:
+    """Return schema version and content, ignoring WAL/checkpoint byte changes."""
+
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
-        return "\n".join(connection.iterdump())
+        version = connection.execute("PRAGMA user_version").fetchone()[0]
+        return "\n".join((f"PRAGMA user_version = {version}", *connection.iterdump()))
     finally:
         connection.close()
 
 
-def test_automatic_updates_require_explicit_opt_in(tmp_path: Path) -> None:
-    settings = Settings(state_dir=tmp_path / "state")
-    assert not auto_update.auto_update_enabled(settings)
-    assert auto_update.auto_update_enabled(Settings(auto_update=True))
-    assert not auto_update.auto_update_enabled(Settings(auto_update=False))
-
-
-def test_upgrade_check_uses_disposable_copies_without_changing_state(tmp_path: Path) -> None:
+def test_upgrade_check_uses_a_disposable_copy_and_ignores_the_miner_database(
+    tmp_path: Path,
+) -> None:
     state = tmp_path / "state"
     miner_path = state / "miner.sqlite3"
     validator_path = state / "validator.sqlite3"
     MinerStore(miner_path)
     ValidatorStore(validator_path)
-    before = {path.name: _digest(path) for path in (miner_path, validator_path)}
+    # Only the validator updates itself, so a miner sharing its state directory
+    # on an older schema must not block the update.
+    connection = sqlite3.connect(miner_path)
+    try:
+        connection.execute("PRAGMA user_version = 3")
+    finally:
+        connection.close()
+    before = {path.name: _logical_dump(path) for path in (miner_path, validator_path)}
 
     versions = auto_update.verify_automatic_upgrade(state)
 
-    assert versions.keys() == before.keys()
-    assert {_path.name: _digest(_path) for _path in (miner_path, validator_path)} == before
+    assert versions == {"validator.sqlite3": 6}
+    assert {path.name: _logical_dump(path) for path in (miner_path, validator_path)} == before
     assert not list(state.glob("*upgrade*"))
 
 
-def test_upgrade_check_rejects_schema_change_without_mutating_original(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("openrouter_api_key", [None, "existing-openrouter-key"])
+async def test_update_check_refuses_a_candidate_whose_validator_would_not_start(
+    tmp_path: Path, openrouter_api_key: str | None
 ) -> None:
-    state = tmp_path / "state"
-    miner_path = state / "miner.sqlite3"
-    MinerStore(miner_path)
-    original = _digest(miner_path)
+    ValidatorStore(tmp_path / "validator.sqlite3")
+    settings = Settings(
+        _env_file=None,
+        state_dir=tmp_path,
+        desearch_api_key="desearch",
+        openrouter_api_key=openrouter_api_key,
+    )
+    check = SimpleNamespace(command="_auto-update-check")
 
-    class MigratingStore:
-        def __init__(self, path: Path) -> None:
-            connection = sqlite3.connect(path)
-            connection.execute("PRAGMA user_version = 999")
-            connection.close()
-
-    monkeypatch.setattr(auto_update, "MinerStore", MigratingStore)
-    with pytest.raises(RuntimeError, match="manual schema upgrade"):
-        auto_update.verify_automatic_upgrade(state)
-
-    assert _digest(miner_path) == original
+    if openrouter_api_key is None:
+        # The supervisor then keeps the running validator instead of swapping in
+        # a release that exits at startup.
+        with pytest.raises(ValueError, match="OPENROUTER_API_KEY.*a Chutes key alone is not"):
+            await main_module.run_command(check, settings)  # type: ignore[arg-type]
+    else:
+        result = await main_module.run_command(check, settings)  # type: ignore[arg-type]
+        assert result == {"schemas": {"validator.sqlite3": 6}}
 
 
 def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) -> None:
@@ -85,21 +88,14 @@ def test_upgrade_check_rejects_campaign_contract_schema_upgrade(tmp_path: Path) 
 
     original = _logical_dump(validator_path)
 
-    with pytest.raises(RuntimeError, match=r"validator\.sqlite3: 4 -> 6"):
+    with pytest.raises(
+        RuntimeError, match=r"manual schema upgrade for validator\.sqlite3: 4 -> \d+"
+    ):
         auto_update.verify_automatic_upgrade(state)
 
-    # Opening a WAL database for online backup may checkpoint it on newer SQLite
-    # releases. Compare logical content instead of the mutable file representation.
+    # The dump covers user_version and every table definition, so the original
+    # database is still at version 4 without campaign_contract_json.
     assert _logical_dump(validator_path) == original
-    connection = sqlite3.connect(validator_path)
-    try:
-        columns = {
-            str(row[1]) for row in connection.execute("PRAGMA table_info(campaign_protocols)")
-        }
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
-        assert "campaign_contract_json" not in columns
-    finally:
-        connection.close()
 
 
 def test_upgrade_check_allows_rollback_safe_featured_selection_table(tmp_path: Path) -> None:
@@ -148,6 +144,51 @@ def test_manager_refuses_update_from_modified_checkout(
 
     with pytest.raises(RuntimeError, match="tracked changes"):
         manager.prepare(Release("a" * 40, source, Path(sys.executable)))
+
+
+@pytest.mark.parametrize(
+    ("checkout_version", "outdated"), [("3.0.0", True), ("3.1.0", False), ("10.0.0", False)]
+)
+def test_release_reports_an_invoking_checkout_older_than_restart_safe_supervisors(
+    tmp_path: Path, checkout_version: str, outdated: bool
+) -> None:
+    checkout = tmp_path / "checkout"
+    (checkout / ".git" / "worktrees" / "release").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text(
+        f'[project]\nname = "bitcast-x"\nversion = "{checkout_version}"\n', encoding="utf-8"
+    )
+    release = tmp_path / "updates" / "releases" / ("b" * 40)
+    module = release / "src" / "bitcast_x" / "auto_update.py"
+    module.parent.mkdir(parents=True)
+    (release / ".git").write_text(
+        f"gitdir: {checkout / '.git' / 'worktrees' / 'release'}\n", encoding="utf-8"
+    )
+
+    found = auto_update.outdated_supervisor_checkout(module)
+
+    assert found == (checkout if outdated else None)
+    # The checkout itself, a container image and an unreadable pointer report nothing.
+    assert auto_update.outdated_supervisor_checkout(checkout / "src" / "x.py") is None
+    assert auto_update.outdated_supervisor_checkout(tmp_path / "image" / "x.py") is None
+    (release / ".git").write_text("gitdir: /\n", encoding="utf-8")
+    assert auto_update.outdated_supervisor_checkout(module) is None
+
+
+def test_restarted_supervisor_resumes_the_activated_release(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    settings = Settings(state_dir=tmp_path / "state", auto_update_dir=tmp_path / "updates")
+    manager = SourceUpdateManager(source, settings)
+    root = manager.update_dir / "releases" / ("b" * 40)
+    python = root / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    # A virtualenv's python links to the base interpreter outside the release.
+    python.symlink_to(sys.executable)
+    manager.activate(Release("b" * 40, root, python))
+
+    restarted = SourceUpdateManager(source, settings)
+
+    assert restarted.current_release() == Release("b" * 40, root, python)
 
 
 @pytest.mark.parametrize("update_suffix", (".", "updates"))

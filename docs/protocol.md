@@ -1,8 +1,8 @@
 # Bitcast X v3 protocol
 
 This document is the self-contained protocol overview for the Bitcast X miner and validator in
-this repository. It covers SN93 mechanism 1, the `preclaim_v2` mining path, the temporary
-scoring and weight construction. No external source repository is
+this repository. It covers SN93 mechanism 1, the `preclaim_v2` mining path, scoring, and
+floor-first weight construction. No external source repository is
 required to understand or implement the released behavior.
 
 The exact schemas and formulas shipped by a release are authoritative. Their primary source files
@@ -22,10 +22,17 @@ consensus-visible rule.
   recalculates provisional campaign results, freezes positive reward allocations, and calculates
   mechanism-1 weights.
 - X-data and LLM providers are availability and evidence dependencies. Their failure does not
-  become a rejection. An unavailable tweet remains explicitly pending while independently
-  verifiable campaign tweets continue through final scoring and rewards.
+  become a rejection. Settlement waits up to 900 blocks (three hours) for evidence a provider could
+  not return; after that, a tweet whose post cannot be fetched remains explicitly pending while
+  independently verifiable campaign tweets continue through final scoring and rewards, and a
+  fetched tweet with an incomplete engagement lookup is scored with the engagers that were found.
 
-The campaign publisher, X provider, and configured LLM are not decentralized by this protocol.
+- The TAO/USD price is an external input to weights. Alpha's TAO price and the miner emission are
+  read from finalized chain state. When the TAO/USD price is unavailable, weights fall back to floor
+  proportions rather than failing the cycle.
+
+The campaign publisher, X provider, configured LLM, and TAO/USD price source are not decentralized
+by this protocol.
 Validators independently verify miner history and repeat the scoring rules, but they consume the
 same published campaign input and external public-content evidence.
 
@@ -41,6 +48,7 @@ Several version numbers cover different boundaries and must not be conflated:
 | Claim event | `2` | Strict claim schema and draft-commitment hashing |
 | Batch content and envelope | `2` or `3` | Version 3 identifies a post-recovery history; version 2 is historical replay |
 | Submission event | `2` or `3` | Version 3 adds the immutable creator X ID; version 2 is historical replay only |
+| Surplus-beneficiary event | `1` | Names the hotkey that receives a miner's surplus weight |
 | Campaign mining mode | `preclaim_v2` | Uses committed claims and submissions; legacy campaigns are retired |
 
 The strict wire models are in
@@ -230,8 +238,11 @@ A winner needs a score of at least `0.70` and a margin of at least `0.10` over t
 exact tie, weak match, or narrow margin abstains rather than assigning the tweet.
 
 Every submitted tweet receives an accepted, pending, or rejected reason for the current campaign
-cycle. Evidence that is unavailable at reconciliation remains `evidence_unavailable` pending rather
-than rejecting the tweet or blocking independently verifiable campaign results. A campaign with no
+cycle. Final reconciliation waits for unavailable evidence until 900 blocks after the campaign's
+settlement block (its emission start, or its scoring close when it has none), so a temporary outage
+cannot make validators freeze different results. Evidence still unavailable after that remains
+`evidence_unavailable` pending rather than rejecting the tweet or blocking independently verifiable
+campaign results. A campaign with no
 positive allocation is retried, so later evidence or an updated brief can replace that provisional
 decision. Campaign checks report the first failed requirement
 in deterministic evaluation order: `post_outside_campaign_window`,
@@ -254,16 +265,30 @@ zero-value campaigns adopt the current cutoff when retried.
 
 Only accepted attributions that pass the campaign's semantic brief evaluation enter rewards.
 Engagement evidence is taken from the configured X provider and retained provisionally until the
-campaign produces a positive allocation. The
-validator performs the campaign-selected LLM prompt checks with temperature zero; any passing check
-passes the tweet. Unavailable engagement or semantic evidence leaves only that tweet's reward
-disposition pending; available tweets continue without translating the outage into rejection.
-Prompt text and parsing behavior are shipped in this repository. A new prompt version is dormant
+campaign produces a positive allocation. The validator sends one JEV request per tweet to
+OpenRouter's `/api/v1/systemone` endpoint, using the pinned `typesafe/jev-1.13` model and the
+existing `BITCAST_X_OPENROUTER_API_KEY`. The request carries the brief, the selected version's rules,
+a final verdict, a product-identity check and that version's yes/no rule gates. The validator also
+checks in code that every tag or link the brief explicitly requires is present. The tweet passes
+only when every check passes. Final scoring waits out the same 900-block grace period. After it,
+a tweet whose post is available but whose engagement lookup (retweeters or quote search) is still
+incomplete is scored from its baseline and the engagers that were fetched, because the baseline is
+nearly all of a score. Semantic evidence still unavailable leaves only that tweet's reward
+disposition pending, and available tweets continue without translating the outage into rejection.
+Previews score the same way.
+Request text and decision thresholds are shipped in this repository. A new prompt version is dormant
 until selected by a campaign; changing an existing version would change its durable cache key and
 evaluation behavior.
 
+The published `reasoning` explains failed checks in plain language for creators. It does not
+include internal check names or model scores. An overall rejection without a more specific result
+states that no specific unmet requirement was identified. These messages describe the scored
+conditions, not a model-written explanation. Numeric results remain in the validator's durable
+`detailed_breakdown` for audit; wording does not change pass/fail decisions.
+
 The engagement score starts at twice the author's influence. Retweets from considered accounts add
-`1 * influence`; quotes add `3 * influence`. When a positive relationship score exists from an
+`1 * influence`; quotes add `3 * influence`. Quotes come from a quote search, which is skipped when
+the post itself reports a quote count of zero. When a positive relationship score exists from an
 engager to the author, that contribution is multiplied by `0.1 + 0.9 / relationship_score`.
 Self-engagement is excluded. After brief evaluation, passing campaign participants cannot increase
 one another's scores. Influence uses the maximum of the tweet-time value, current considered value,
@@ -279,36 +304,85 @@ Reward construction then:
    engagements per view—each adding at most 5% to score;
 4. at the first healthy preview on or after one day before the campaign's UTC `closes_at`,
    deterministically selects one of the five most-viewed campaign-local assigned tweets and pins
-   that featured identity; final rewards replay it and apply a 1.05 score multiplier to its author
-   and engaging accounts;
+   that featured identity; final rewards apply a 1.05 score multiplier to its author and engaging
+   accounts when it still qualifies;
 5. divides the daily budget in proportion to `max(score, 0) ** 0.65` and freezes the per-tweet
    daily USD floors;
-6. sums floors by miner UID and normalizes them into the mechanism-1 weight vector.
+6. builds the mechanism-1 weight vector floor-first, as described below.
+
+### Floor-first weights
+
+Each accepted tweet's frozen daily USD **floor** is what its miner owes the creator for each day of
+the campaign's seven-day emission window. A **miner's floor** is the sum over its tweets in campaigns
+whose emission window contains the weight block, counting each `(campaign, tweet)` once. Weights
+cover every miner's floors in USD before anything else:
+
+```text
+V = daily miner emission (alpha) x alpha price (USD)       # emission value
+F = sum of miner floors (USD per day)
+funding ratio = min(1, V / F)
+
+floor weight_i   = floor_i / V                 when V > F
+surplus weight_i = (1 - F / V) x score share_i when V > F
+weight_i         = floor weight_i + surplus weight_i
+```
+
+The **surplus**, the emission value left after floors, is split by **score share**: each miner's
+share of the unique tweet scores behind those floors (or by floors when no score is positive).
+When `V <= F` (a **shortfall**) every miner receives `floor_i / F`: floors are paid pro rata and
+there is no surplus.
+
+The **pricing snapshot** for a weight block has three inputs. The daily miner emission is
+`7200 x alpha_out_emission x 0.41 x` the mechanism's share of the emission split. Alpha's TAO price
+is the chain's moving average, `SubnetMovingPrice` (about an eight-hour half-life for SN93), not
+the pool's spot `tao_in / alpha_in`, so one block's trading cannot move it. Both are read from
+finalized state at that block. TAO/USD comes from CoinGecko; a failed request reuses the last quote,
+read back from the validator's stored allocations after a restart, for up to 7,200 blocks (a day).
+A snapshot is fixed once per block. When no snapshot is available, all weight is
+split in floor proportions. That still covers floors whenever they are funded, and only the
+surplus split changes for that cycle.
+
+### Surplus beneficiary
+
+A miner may commit a `surplus_beneficiary` event in its ordinary batch history:
+
+```json
+{"version": 1, "kind": "surplus_beneficiary", "event_id": "<128-bit hex>",
+ "beneficiary_hotkey": "<ss58 hotkey or null>"}
+```
+
+The batch's miner hotkey is the donor. The latest designation in chain order (block, extrinsic,
+event index) stays in force until replaced, and a null `beneficiary_hotkey` clears it. Validators
+that predate this event quarantine a batch carrying it, so every validator must upgrade before a
+miner emits one.
+
+At weight time a donor keeps its floor weight and gives its surplus weight to the beneficiary's UID.
+The beneficiary may be any registered hotkey, including the burn UID. Each donation moves only the
+donor's own surplus, computed before any donation, so chains and cycles never pass weight on twice.
+An unregistered beneficiary, a self-designation, a shortfall or an unpriced cycle donates nothing.
+The reference miner commits the hotkey configured in `BITCAST_X_MINER_SURPLUS_BENEFICIARY` once it
+differs from the miner's latest designation; unsetting it commits a clearing event.
 
 If no `preclaim_v2` miner has productive content, its standalone fallback assigns the vector to
 burn UID 0. The formulas are in [`src/bitcast_x/scoring.py`](../src/bitcast_x/scoring.py) and
 [`src/bitcast_x/rewards.py`](../src/bitcast_x/rewards.py). Positive attribution, evidence, reward
 decisions, and weights are durable and reused after restart. Zero-value state is also durable for
 inspection and crash recovery, but it is replaced by the next successful campaign cycle.
-The featured identity is the exception: once pinned it is creator-visible protocol state and is
-never reselected. If selection was missed during downtime, the first later healthy preview or final
-reward cycle creates it. Temporary provider or ingestion failures preserve the last successful
-preview and retry; missing selected-tweet evidence at finalization defers the complete coupled
-assignment and weight submission rather than silently dropping or changing the bonus. If the
-campaign feed temporarily omits a pinned, unsettled campaign, validators retain its stored contract
-and continue recovery from that authoritative record. A pinned selection is released only when the
-campaign contract in force provably excludes it — determinable from the stored pin and its scored
-tweet snapshot alone, such as a scoring-window edit adopted after the pin was created. Release
-drops the pin, records an audit event, and lets settlement proceed without the featured bonus; a
-replacement is selected from the tweets that qualify under the current contract. Exclusions that
-cannot be proven from durable state keep the conservative deferral.
+The featured identity is creator-visible once pinned and is never replaced by a different tweet.
+The pin does not freeze the campaign contract: edits are adopted until economics settle, as for any
+campaign. At settlement the pinned tweet receives the featured bonus if it still qualifies;
+otherwise that campaign settles without a featured bonus. If no pin exists, for example after
+downtime, the final reward cycle selects the featured tweet from final data. Either way the
+featured identity freezes with the campaign's rewards.
 
 ## Legacy campaign retirement
 
 The last `legacy_connection` campaign completed emissions on 2026-09-01. The validator no longer
 collects legacy tweets, replays legacy snapshots, emits legacy referrals, or combines legacy
 weights with preclaim rewards. All weight construction uses the preclaim reward vector, including
-its normal burn behavior. A legacy campaign in the live feed fails the cycle closed.
+its normal burn behavior. `legacy_connection` is no longer a valid `mining_protocol`: a feed that
+carries it fails validation and the cycle fails closed. A stored contract that still names it is
+quarantined if it is ever read, without affecting other campaigns.
 
 Historical records retain their original protocol identifiers. Existing signed preclaim histories,
 creator-binding activation rules, and batch wire compatibility remain in force. Preserve archived
@@ -323,8 +397,10 @@ validator. See the [operator runbook](operator-runbook.md).
   HTTP. The draft is private only until its submission is batched.
 - Campaign service: manifest and ecosystem-map requests.
 - X provider: public tweet and engagement lookup identifiers and campaign discovery queries.
-- LLM provider: public tweet text and campaign brief content; no wallet secret or private draft is
-  required for semantic scoring.
+- OpenRouter / TypeSafe JEV: public tweet text and campaign brief content; no wallet secret or
+  private draft is required for semantic scoring.
+- CoinGecko: one TAO/USD price request per validator weight cycle; nothing is sent beyond the
+  request.
 - Central ingestion, when explicitly enabled: hotkey-signed frozen campaign, attribution, scoring,
   and reward output.
 - Remote logging, when configured: application log records. Operators must treat logs as potentially

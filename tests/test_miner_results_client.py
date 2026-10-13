@@ -1,10 +1,15 @@
 """Central miner API signing and endpoint client tests."""
 
-import json
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from typing import Any
 
 import httpx
+import pytest
 
 from bitcast_x.miner.results import MinerResultsClient, canonical_query
+
+Handler = Callable[[httpx.Request], Awaitable[httpx.Response]]
 
 
 class Signer:
@@ -18,18 +23,9 @@ class Signer:
         return b"signature"
 
 
-async def test_repeated_ecosystem_filters_are_canonical_and_signed() -> None:
-    signer = Signer()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v2/miners/x/campaigns"
-        assert request.url.params.multi_items() == [
-            ("ecosystem_id", "ai agents"),
-            ("ecosystem_id", "tao"),
-        ]
-        assert request.headers["X-Bitcast-Hotkey"] == signer.ss58_address
-        assert request.headers["X-Bitcast-Signature"] == b"signature".hex()
-        return httpx.Response(200, json={"items": [{"campaign_id": "campaign"}]})
+@asynccontextmanager
+async def _client(handler: Handler, signer: Signer) -> AsyncIterator[MinerResultsClient]:
+    """Yield a results client whose HTTP transport is the given handler."""
 
     client = MinerResultsClient("https://example.test", signer)
     await client._client.aclose()  # noqa: SLF001 - replace transport in a focused unit test
@@ -38,70 +34,78 @@ async def test_repeated_ecosystem_filters_are_canonical_and_signed() -> None:
         transport=httpx.MockTransport(handler),
     )
     try:
-        campaigns = await client.campaigns(("ai agents", "tao"))
+        yield client
     finally:
         await client.close()
 
-    assert campaigns == [{"campaign_id": "campaign"}]
-    signed = signer.messages[0].decode().splitlines()
-    assert signed[:3] == [
+
+@pytest.mark.parametrize(
+    ("call", "path", "params", "signed_target", "body", "expected"),
+    [
+        pytest.param(
+            lambda client: client.campaigns(("ai agents", "tao")),
+            "/api/v2/miners/x/campaigns",
+            [("ecosystem_id", "ai agents"), ("ecosystem_id", "tao")],
+            "/api/v2/miners/x/campaigns?ecosystem_id=ai%20agents&ecosystem_id=tao",
+            {"items": [{"campaign_id": "campaign"}]},
+            [{"campaign_id": "campaign"}],
+            id="campaigns-repeated-ecosystem-filters",
+        ),
+        pytest.param(
+            lambda client: client.leaderboard(("tao",), limit=25, offset=50),
+            "/api/v2/miners/x/leaderboard",
+            [("ecosystem_id", "tao"), ("limit", "25"), ("offset", "50")],
+            "/api/v2/miners/x/leaderboard?ecosystem_id=tao&limit=25&offset=50",
+            {"ecosystem_ids": ["tao"], "accounts": []},
+            {"ecosystem_ids": ["tao"], "accounts": []},
+            id="leaderboard-filters-and-page",
+        ),
+        pytest.param(
+            lambda client: client.submissions(campaign_id="campaign", tweet_id="123"),
+            "/api/v2/miners/x/submissions",
+            [("campaign_id", "campaign"), ("tweet_id", "123")],
+            "/api/v2/miners/x/submissions?campaign_id=campaign&tweet_id=123",
+            {"items": [{"submission_id": "a" * 32}]},
+            [{"submission_id": "a" * 32}],
+            id="submissions-owner-endpoint",
+        ),
+    ],
+)
+async def test_reads_call_their_endpoint_with_signed_canonical_queries(
+    call: Callable[[MinerResultsClient], Awaitable[Any]],
+    path: str,
+    params: list[tuple[str, str]],
+    signed_target: str,
+    body: dict[str, Any],
+    expected: object,
+) -> None:
+    signer = Signer()
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=body)
+
+    async with _client(handler, signer) as client:
+        result = await call(client)
+
+    assert result == expected
+    [request] = requests
+    assert request.method == "GET"
+    assert request.url.path == path
+    assert request.url.params.multi_items() == params
+    [message] = signer.messages
+    assert message.decode().splitlines() == [
         "bitcast-x-miner-api-v1",
         "GET",
-        "/api/v2/miners/x/campaigns?ecosystem_id=ai%20agents&ecosystem_id=tao",
+        signed_target,
+        request.headers["X-Bitcast-Timestamp"],
     ]
+    assert request.headers["X-Bitcast-Hotkey"] == signer.ss58_address
+    assert request.headers["X-Bitcast-Signature"] == b"signature".hex()
 
 
-async def test_leaderboard_signs_ecosystem_filters_and_limit() -> None:
-    signer = Signer()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v2/miners/x/leaderboard"
-        assert request.url.params.multi_items() == [
-            ("ecosystem_id", "tao"),
-            ("limit", "25"),
-            ("offset", "50"),
-        ]
-        return httpx.Response(200, json={"ecosystem_ids": ["tao"], "accounts": []})
-
-    client = MinerResultsClient("https://example.test", signer)
-    await client._client.aclose()  # noqa: SLF001
-    client._client = httpx.AsyncClient(  # noqa: SLF001
-        base_url="https://example.test",
-        transport=httpx.MockTransport(handler),
-    )
-    try:
-        leaderboard = await client.leaderboard(("tao",), limit=25, offset=50)
-    finally:
-        await client.close()
-
-    assert leaderboard["ecosystem_ids"] == ["tao"]
-    assert signer.messages[0].decode().splitlines()[2] == (
-        "/api/v2/miners/x/leaderboard?ecosystem_id=tao&limit=25&offset=50"
-    )
-
-
-async def test_submission_collection_uses_owner_endpoint() -> None:
-    signer = Signer()
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            content=json.dumps({"items": [{"submission_id": "a" * 32}]}),
-            headers={"content-type": "application/json"},
-        )
-
-    client = MinerResultsClient("https://example.test", signer)
-    await client._client.aclose()  # noqa: SLF001
-    client._client = httpx.AsyncClient(  # noqa: SLF001
-        base_url="https://example.test",
-        transport=httpx.MockTransport(handler),
-    )
-    try:
-        submissions = await client.submissions(campaign_id="campaign", tweet_id="123")
-    finally:
-        await client.close()
-
-    assert submissions == [{"submission_id": "a" * 32}]
+def test_canonical_query_sorts_out_of_order_parameters() -> None:
     assert (
         canonical_query([("tweet_id", "123"), ("campaign_id", "campaign")])
         == "campaign_id=campaign&tweet_id=123"

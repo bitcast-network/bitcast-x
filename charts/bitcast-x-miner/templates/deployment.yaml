@@ -85,6 +85,10 @@ spec:
             - name: BITCAST_X_EXPECTED_HOTKEY
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.surplusBeneficiary }}
+            - name: BITCAST_X_MINER_SURPLUS_BENEFICIARY
+              value: {{ . | quote }}
+            {{- end }}
             {{- if eq .Values.mode "run-miner-api" }}
             - name: BITCAST_X_MINER_API_TOKEN
               valueFrom:

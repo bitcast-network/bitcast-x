@@ -14,6 +14,9 @@ software major release.
 - **Minor**: backward-compatible operator or application functionality.
 - **Patch**: backward-compatible fixes and documentation corrections.
 
+A version that `main` reported without a release tag, such as 3.0.0, is not a release. The next
+release is measured against the last tagged one, so 3.1.0 is a major release relative to 2.2.0.
+
 Every release must update `pyproject.toml`, `bitcast_x.__version__`, the container version default,
 the CI image version, and `CHANGELOG.md` together. Regression tests enforce equality across those
 surfaces. Validator remote-log labels and public health responses use `bitcast_x.__version__`.

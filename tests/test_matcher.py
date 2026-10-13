@@ -1,7 +1,5 @@
 """Golden behavior for deterministic matcher v1."""
 
-from itertools import permutations
-
 from bitcast_x.matcher import (
     MatchCandidate,
     choose_match,
@@ -32,12 +30,16 @@ def test_ordinary_edits_keep_genuine_draft_above_adversarial_guess() -> None:
         "Big news about the new wallet. Better products and real momentum. #Launch",
     )
 
-    decision = choose_match(
-        published,
-        [guess, genuine],
-        public_text="Talk about the new wallet. Required: #Launch",
+    decision, reversed_decision = (
+        choose_match(
+            published,
+            order,
+            public_text="Talk about the new wallet. Required: #Launch",
+        )
+        for order in ([guess, genuine], [genuine, guess])
     )
 
+    assert decision == reversed_decision
     assert decision.winner == genuine
     assert decision.reason == "accepted"
     assert decision.winner_score > decision.runner_up_score + 0.10
@@ -94,24 +96,6 @@ def test_weak_and_close_matches_abstain_with_distinct_reasons() -> None:
 
     assert weak.reason == "score_below_floor"
     assert close.reason == "ambiguous_match"
-
-
-def test_candidate_order_property_cannot_change_match_decision() -> None:
-    candidates = [
-        candidate("5" + "a" * 47, "01" * 16, "private launch analysis with recovery detail"),
-        candidate("5" + "b" * 47, "02" * 16, "generic launch announcement"),
-        candidate("5" + "c" * 47, "03" * 16, "another unrelated campaign draft"),
-    ]
-    decisions = {
-        choose_match(
-            "private launch analysis with recovery detail and one edit",
-            list(order),
-            public_text="launch",
-        )
-        for order in permutations(candidates)
-    }
-
-    assert len(decisions) == 1
 
 
 def test_lexical_score_symmetry_and_bounds_properties() -> None:

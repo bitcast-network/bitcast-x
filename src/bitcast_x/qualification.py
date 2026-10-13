@@ -179,6 +179,11 @@ class QualificationReader:
             else QualificationSchedule(configurations=(config,))
         )
 
+    async def eligible(self, miner_hotkey: str, block: int) -> bool:
+        """Return eligibility at an exact historical finalized block."""
+
+        return (await self.read(miner_hotkey, block=block)).eligible
+
     async def read(
         self,
         miner_hotkey: str,
@@ -255,15 +260,3 @@ class QualificationReader:
             eligible=eligible,
             reason=reason,
         )
-
-
-class HistoricalQualificationChecker:
-    """Boolean adapter used by consensus replay while retaining explanatory reads elsewhere."""
-
-    def __init__(self, reader: QualificationReader) -> None:
-        self._reader = reader
-
-    async def eligible(self, miner_hotkey: str, block: int) -> bool:
-        """Return eligibility at an exact historical finalized block."""
-
-        return (await self._reader.read(miner_hotkey, block=block)).eligible

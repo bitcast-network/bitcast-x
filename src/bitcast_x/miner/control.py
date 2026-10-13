@@ -11,8 +11,10 @@ from typing import Any, Protocol
 from bitcast_x.campaigns import CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.miner.engine import MinerSdk
+from bitcast_x.miner.errors import ErrorCode, OperationError
 from bitcast_x.miner.results import MinerResultsClient
 from bitcast_x.miner.store import EventStatus, OperationMetadata
+from bitcast_x.protocol import MAX_ACTIVE_CLAIMS
 
 GRACE_SUBMISSION_COMMIT_TIMEOUT_SECONDS = 30.0
 
@@ -61,7 +63,7 @@ class MinerControlService:
         status = await self.qualification_status_cached()
         if not status.get("eligible", False):
             reason = status.get("reason", "unknown")
-            raise ProtocolError(f"miner is not qualified: {reason}")
+            raise OperationError(ErrorCode.MINER_NOT_QUALIFIED, f"miner is not qualified: {reason}")
 
     async def qualification_status_cached(self) -> dict[str, Any]:
         """Qualification snapshot, cached for a bounded window.
@@ -83,7 +85,9 @@ class MinerControlService:
     def _ecosystems(self, requested: tuple[str, ...] = ()) -> tuple[str, ...]:
         configured = set(self.enabled_ecosystem_ids)
         if requested and configured and not set(requested).issubset(configured):
-            raise ProtocolError("requested ecosystem is not enabled by this miner")
+            raise OperationError(
+                ErrorCode.ECOSYSTEM_NOT_ENABLED, "requested ecosystem is not enabled by this miner"
+            )
         return requested or self.enabled_ecosystem_ids
 
     async def ecosystems(self) -> list[dict[str, Any]]:
@@ -116,8 +120,7 @@ class MinerControlService:
         return [
             campaign.model_dump(mode="json")
             for campaign in campaigns
-            if campaign.access.mining_protocol.value == "preclaim_v2"
-            and (not selected or bool(set(campaign.pools).intersection(selected)))
+            if (not selected or bool(set(campaign.pools).intersection(selected)))
             and (
                 campaign.access.exclusive_miner_hotkey is None
                 or campaign.access.exclusive_miner_hotkey == self.sdk.engine.miner_hotkey
@@ -189,10 +192,18 @@ class MinerControlService:
             None,
         )
 
-    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+    async def _available_campaign(self, campaign_id: str) -> dict[str, Any]:
+        """Return a campaign this miner may operate on, or refuse the operation."""
+
         campaign = await self.campaign(campaign_id)
         if campaign is None:
-            raise ProtocolError("campaign is not available to this miner")
+            raise OperationError(
+                ErrorCode.CAMPAIGN_NOT_FOUND, "campaign is not available to this miner"
+            )
+        return campaign
+
+    async def eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
+        await self._available_campaign(campaign_id)
         return await self._creator_eligibility(campaign_id, creator_x_id)
 
     async def _creator_eligibility(self, campaign_id: str, creator_x_id: str) -> dict[str, Any]:
@@ -229,8 +240,7 @@ class MinerControlService:
         campaign_id: str,
         ecosystem_ids: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        if await self.campaign(campaign_id) is None:
-            raise ProtocolError("campaign is not available to this miner")
+        await self._available_campaign(campaign_id)
         if self.results_client is None:
             raise ProtocolError("central campaign results service is unavailable")
         return await self.results_client.campaign_tweets(
@@ -250,14 +260,14 @@ class MinerControlService:
         """Validate, persist, and commit a pre-publication claim."""
 
         await self._require_qualified()
-        campaign = await self.campaign(campaign_id)
-        if campaign is None:
-            raise ProtocolError("campaign is not available to this miner")
+        campaign = await self._available_campaign(campaign_id)
         if not campaign.get("capabilities", {}).get("can_claim", False):
             raise ProtocolError("campaign does not accept claims")
-        eligibility = await self.eligibility(campaign_id, creator_x_id)
+        eligibility = await self._creator_eligibility(campaign_id, creator_x_id)
         if not eligibility.get("claim_eligible", False):
-            raise ProtocolError("creator is not eligible to claim this campaign")
+            raise OperationError(
+                ErrorCode.CREATOR_NOT_ELIGIBLE, "creator is not eligible to claim this campaign"
+            )
         metadata = OperationMetadata(
             idempotency_key=idempotency_key,
             request_fingerprint=_fingerprint(
@@ -298,9 +308,7 @@ class MinerControlService:
         """Validate and durably accept a published tweet mapping."""
 
         await self._require_qualified()
-        campaign = await self.campaign(campaign_id)
-        if campaign is None:
-            raise ProtocolError("campaign is not available to this miner")
+        campaign = await self._available_campaign(campaign_id)
         if not campaign.get("capabilities", {}).get("can_submit", False):
             raise ProtocolError("campaign does not accept submissions")
         requires_claim = bool(campaign.get("capabilities", {}).get("requires_claim", True))
@@ -320,13 +328,15 @@ class MinerControlService:
         if claim_id is not None:
             claim = self.claim_status(claim_id)
             if claim is None:
-                raise ProtocolError("submission claim_id does not belong to this miner")
+                raise OperationError(
+                    ErrorCode.CLAIM_NOT_FOUND, "submission claim_id does not belong to this miner"
+                )
             if claim.get("campaign_id") != campaign_id:
                 raise ProtocolError("claim campaign does not match submission campaign")
             if claim.get("creator_x_id") != creator_x_id:
                 raise ProtocolError("claim creator does not match submission creator")
             if not claim.get("usability", {}).get("safe_to_post", False):
-                raise ProtocolError("claim is not safe to post")
+                raise OperationError(ErrorCode.CLAIM_NOT_SAFE_TO_POST, "claim is not safe to post")
             operation_snapshot_id = str(claim["campaign_snapshot_id"])
             operation_ecosystem_ids = tuple(claim.get("ecosystem_ids", []))
         else:
@@ -337,7 +347,10 @@ class MinerControlService:
             # validators separately enforce that the tweet was published by
             # campaign.closes_at.
             if not eligibility.get("eligible", False):
-                raise ProtocolError("creator is not eligible to submit to this campaign")
+                raise OperationError(
+                    ErrorCode.CREATOR_NOT_ELIGIBLE,
+                    "creator is not eligible to submit to this campaign",
+                )
 
         metadata = OperationMetadata(
             idempotency_key=idempotency_key,
@@ -365,7 +378,10 @@ class MinerControlService:
         if grace_submission:
             commitment_block = await self._await_submission_commit(submission_id)
             if scoring_close_block is None or commitment_block > scoring_close_block:
-                raise ProtocolError("submission deadline passed before on-chain commitment")
+                raise OperationError(
+                    ErrorCode.SUBMISSION_DEADLINE_PASSED,
+                    "submission deadline passed before on-chain commitment",
+                )
         submission = await self.submission_status(submission_id)
         if submission is None:
             raise ProtocolError("durable submission disappeared")
@@ -391,7 +407,7 @@ class MinerControlService:
             "usability": {
                 "status": usability,
                 "safe_to_post": status == EventStatus.SAFE_TO_POST.value,
-                "maximum_active_claims": 5,
+                "maximum_active_claims": MAX_ACTIVE_CLAIMS,
                 "evicted_by_claim_id": receipt["evicted_by_claim_id"],
                 "consumed_by_submission_id": receipt["consumed_by_submission_id"],
             },
@@ -422,13 +438,21 @@ class MinerControlService:
         )
         return [self._claim_resource(receipt) for receipt in receipts]
 
-    def _submission_resource(self, receipt: dict[str, object]) -> dict[str, Any]:
-        claim_commitment = None
+    def _submission_resources(self, receipts: list[dict[str, object]]) -> list[dict[str, Any]]:
+        """Project submission receipts, reading every referenced claim in one query."""
+
+        store = self.sdk.engine.store
+        claim_ids = {str(receipt["claim_id"]) for receipt in receipts if receipt["claim_id"]}
+        claims = store.receipts(kind="claim", event_ids=tuple(claim_ids)) if claim_ids else []
+        commitments = {str(claim["event_id"]): claim["commitment"] for claim in claims}
+        return [self._submission_resource(receipt, commitments) for receipt in receipts]
+
+    @staticmethod
+    def _submission_resource(
+        receipt: dict[str, object],
+        claim_commitments: dict[str, object],
+    ) -> dict[str, Any]:
         claim_id = receipt["claim_id"]
-        if claim_id is not None:
-            claim = self.sdk.engine.store.receipt(str(claim_id))
-            if claim is not None and claim["kind"] == "claim":
-                claim_commitment = claim["commitment"]
         return {
             "submission_id": receipt["submission_id"],
             "external_id": receipt["external_id"],
@@ -439,7 +463,9 @@ class MinerControlService:
             "claim_id": claim_id,
             "creator": {"submitted_x_id": receipt["creator_x_id"]},
             "status": receipt["status"],
-            "claim_commitment": claim_commitment,
+            "claim_commitment": (
+                None if claim_id is None else claim_commitments.get(str(claim_id))
+            ),
             "submission_commitment": receipt["commitment"],
             "created_at": _timestamp(int(str(receipt["created_ns"]))),
             "updated_at": _timestamp(int(str(receipt["updated_ns"]))),
@@ -449,7 +475,7 @@ class MinerControlService:
         receipt = self.sdk.engine.store.receipt(submission_id)
         if receipt is None or receipt["kind"] != "submission":
             return None
-        local = self._submission_resource(receipt)
+        local = self._submission_resources([receipt])[0]
         if self.results_client is None:
             return local
         result = await self.results_client.submission(submission_id)
@@ -487,9 +513,9 @@ class MinerControlService:
             external_id=external_id,
             ecosystem_ids=self._ecosystems(ecosystem_ids),
         )
-        local = [self._submission_resource(receipt) for receipt in receipts]
         if tweet_id is not None:
-            local = [item for item in local if item["tweet_id"] == tweet_id]
+            receipts = [receipt for receipt in receipts if receipt["tweet_id"] == tweet_id]
+        local = self._submission_resources(receipts)
         if self.results_client is None:
             return local
         central = await self.results_client.submissions(
@@ -509,12 +535,12 @@ class MinerControlService:
 
         if self.results_client is None:
             return
+        pending = self.sdk.engine.store.submission_ids(EventStatus.VERIFICATION_PENDING)
+        if not pending:
+            return
         central = await self.results_client.submissions()
         by_id = {str(item["submission_id"]): item for item in central}
-        for submission in self.sdk.submissions():
-            if submission["status"] != EventStatus.VERIFICATION_PENDING.value:
-                continue
-            submission_id = str(submission["submission_id"])
+        for submission_id in pending:
             result = by_id.get(submission_id)
             if result is None:
                 continue
@@ -562,6 +588,8 @@ class MinerControlService:
         try:
             return await asyncio.wait_for(commit_until_finalized(), timeout=timeout)
         except TimeoutError as error:
-            raise ProtocolError(
-                "submission commitment was not confirmed before request timeout"
+            raise OperationError(
+                ErrorCode.SUBMISSION_COMMITMENT_PENDING,
+                "submission commitment was not confirmed before request timeout",
+                retryable=True,
             ) from error
