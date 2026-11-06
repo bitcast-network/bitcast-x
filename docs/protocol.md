@@ -176,6 +176,15 @@ The miner serves complete finalized batches through `POST /v3/batches`. Requests
 HTTP authentication bound to the miner receiver hotkey, request method, path, body, timestamp, and
 nonce. Replayed requests and callers without a current validator permit are rejected. Request,
 response, page-count, and per-validator rate bounds apply.
+Both batch routes incrementally enforce the request byte limit even without Content-Length,
+and enforce `BITCAST_X_REQUEST_TIMEOUT_SECONDS` while reading. Signature verification still
+requires the bounded complete body. Signed callers consume their rate allowance before permit
+authorization. Permit snapshots are shared across hotkeys for up to 12 seconds; failed refreshes
+fail closed rather than serving stale permits.
+
+Discovery accepts only literal globally routable IP addresses and valid nonzero TCP ports.
+Private/local addresses and hostnames are not production miner endpoints. No fixed port
+allowlist is imposed: independent miner operators may advertise any valid TCP port.
 
 The v3 response includes the miner-reported `(block, extrinsic_index)` for each batch. A validator
 does not trust that position: it reads the historical finalized block, verifies the exact signed

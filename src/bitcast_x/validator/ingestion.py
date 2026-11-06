@@ -1,9 +1,11 @@
 """Finalized commitment scanning and deterministic miner reconciliation."""
 
 import asyncio
+import ipaddress
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 from pydantic import ValidationError
@@ -89,9 +91,29 @@ class ValidatorIngestor:
         endpoints: list[MinerEndpoint] = []
         for neuron in graph.neurons:
             axon = str(neuron.axon or "")
-            if not axon or axon.endswith(":0"):
+            try:
+                parsed = urlsplit(f"http://{axon}")
+                address = ipaddress.ip_address(parsed.hostname or "")
+                port = parsed.port
+            except ValueError:
                 continue
-            endpoints.append(MinerEndpoint(hotkey=str(neuron.hotkey), base_url=f"http://{axon}"))
+            if (
+                not address.is_global
+                or address.is_multicast
+                or address.is_unspecified
+                or port is None
+                or port == 0
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+            ):
+                continue
+            host = f"[{address}]" if address.version == 6 else str(address)
+            endpoints.append(
+                MinerEndpoint(hotkey=str(neuron.hotkey), base_url=f"http://{host}:{port}")
+            )
         return sorted(endpoints, key=lambda endpoint: endpoint.hotkey)
 
     async def reconcile_all(

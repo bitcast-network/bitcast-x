@@ -40,7 +40,7 @@ class Chain:
     def __init__(self, metagraph: Metagraph | None) -> None:
         self._metagraph = metagraph
 
-    async def metagraph(self) -> Metagraph | None:
+    async def validator_metagraph(self) -> Metagraph | None:
         return self._metagraph
 
 

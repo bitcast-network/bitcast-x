@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import secrets
+import time
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ _RAO_PER_ALPHA = 1_000_000_000
 # The runtime encodes the moving price as I96F32, with 32 fractional bits.
 _I96F32_ONE = 1 << 32
 _WEIGHT_NONCE_ATTEMPTS = 3
+_VALIDATOR_PERMIT_CACHE_SECONDS = 12.0
 _WEIGHT_NONCE_RETRY_MIN_MS = 250
 _WEIGHT_NONCE_RETRY_JITTER_MS = 750
 LOGGER = logging.getLogger(__name__)
@@ -61,6 +63,9 @@ class BittensorChain:
         self._client = client
         self.netuid = netuid
         self.mechanism_id = mechanism_id
+        self._validator_graph: Any = None
+        self._validator_graph_expires = 0.0
+        self._validator_graph_lock = asyncio.Lock()
 
     @classmethod
     async def connect(cls, network: str, *, netuid: int, mechanism_id: int = 1) -> "BittensorChain":
@@ -79,6 +84,17 @@ class BittensorChain:
 
         client = await self._client.at(block) if block is not None else self._client
         return await client.subnets.metagraph(netuid=self.netuid)
+
+    async def validator_metagraph(self) -> Any:
+        """Share one short-lived permit snapshot across all HTTP caller identities."""
+
+        async with self._validator_graph_lock:
+            if time.monotonic() >= self._validator_graph_expires:
+                # Invalidate before fetching: failures must never authorize from stale data.
+                self._validator_graph = None
+                self._validator_graph_expires = time.monotonic() + _VALIDATOR_PERMIT_CACHE_SECONDS
+                self._validator_graph = await self.metagraph()
+            return self._validator_graph
 
     async def commitment(self, hotkey_ss58: str, *, block: int | None = None) -> Any:
         """Read one hotkey's commitment, optionally at a historical block."""
