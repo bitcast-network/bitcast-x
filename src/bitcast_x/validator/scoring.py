@@ -3,16 +3,18 @@
 import asyncio
 import logging
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from bitcast_x.brief_filter import BriefEvaluation, BriefFilter
 from bitcast_x.campaigns import (
     CampaignFeed,
     CampaignRecord,
     EcosystemMap,
+    considered_account_ids_for_campaign,
     considered_accounts_for_campaign,
     ecosystem_map_at,
     eligible_creator_ids_for_campaign,
+    uses_x_id_scoring,
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionResult
@@ -43,6 +45,7 @@ class ScoredAttribution(BaseModel):
     llm_checks_used: int = 0
     engagements: tuple[str, ...] = ()
     author_followers_count: int = 0
+    scoring_by_x_id: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class AttributionScorer:
@@ -75,9 +78,14 @@ class AttributionScorer:
         """
 
         accepted = [result for result in attributions if result.accepted]
-        tweet_ids = sorted({item.tweet_id for item in accepted})
-        evidence_values = await asyncio.gather(*(self._fetch_evidence(item) for item in tweet_ids))
-        evidence = dict(zip(tweet_ids, evidence_values, strict=True))
+        versions = {
+            campaign.access.campaign_id: uses_x_id_scoring(campaign) for campaign in feed.campaigns
+        }
+        evidence_keys = sorted({(item.tweet_id, versions[item.campaign_id]) for item in accepted})
+        evidence_values = await asyncio.gather(
+            *(self._fetch_evidence(tweet_id, by_id=by_id) for tweet_id, by_id in evidence_keys)
+        )
+        evidence = dict(zip(evidence_keys, evidence_values, strict=True))
         context = _CampaignContext(feed)
         scored: list[ScoredAttribution] = []
         for item in accepted:
@@ -86,7 +94,7 @@ class AttributionScorer:
                     self._score_one(
                         context,
                         item,
-                        *evidence[item.tweet_id],
+                        *evidence[(item.tweet_id, versions[item.campaign_id])],
                         incomplete_engagement_ok=defer_unavailable_tweets,
                     )
                 )
@@ -169,6 +177,8 @@ class AttributionScorer:
     async def _fetch_evidence(
         self,
         tweet_id: str,
+        *,
+        by_id: bool = False,
     ) -> tuple[TweetFetch, EngagementFetch]:
         async with self._semaphore:
             tweet = await self._x.fetch_tweet_by_id(tweet_id)
@@ -179,7 +189,8 @@ class AttributionScorer:
                 if tweet.provider_available and tweet.tweet is not None
                 else None
             )
-            engagements = await self._x.fetch_engagements(tweet_id, quote_count=quote_count)
+            fetch = self._x.fetch_engagements_by_id if by_id else self._x.fetch_engagements
+            engagements = await fetch(tweet_id, quote_count=quote_count)
             return tweet, engagements
 
     def _score_one(
@@ -215,6 +226,7 @@ class AttributionScorer:
             for item in context.feed.campaigns
             if item.access.campaign_id == attribution.campaign_id
         )
+        by_id = uses_x_id_scoring(campaign)
         tweet_ecosystem = _campaign_map_at(context, campaign, tweet)
         try:
             considered, current_ecosystem, relationships = context.considered(
@@ -227,7 +239,7 @@ class AttributionScorer:
                 account
                 for account in current_ecosystem.accounts
                 if account.x_id == tweet.author_x_id
-                or account.username.casefold() == tweet.author.casefold()
+                or (not by_id and account.username.casefold() == tweet.author.casefold())
             ),
             None,
         )
@@ -237,27 +249,38 @@ class AttributionScorer:
                 account.influence
                 for account in tweet_ecosystem.accounts
                 if account.x_id == tweet.author_x_id
-                or account.username.casefold() == tweet.author.casefold()
+                or (not by_id and account.username.casefold() == tweet.author.casefold())
             ),
             None,
         )
-        current_influence = considered.get(tweet.author.lower())
+        author_key = tweet.author_x_id if by_id else tweet.author.lower()
+        current_influence = considered.get(author_key)
         author_influence = max(
             value
             for value in (tweet_time_influence, current_influence, minimum)
             if value is not None
         )
-        engagements = {
-            username.lower(): kind
-            for username, kind in engagement_result.engagements.items()
-            if username.lower() != tweet.author.lower()
-        }
+        if by_id:
+            engagements: dict[str, str] = {
+                item.x_id: item.kind
+                for item in engagement_result.identities
+                if item.x_id != tweet.author_x_id
+            }
+            identity_handles = {item.x_id: item.username for item in engagement_result.identities}
+        else:
+            engagements = {
+                username.lower(): kind
+                for username, kind in engagement_result.engagements.items()
+                if username.lower() != tweet.author.lower()
+            }
+            identity_handles = None
         score, details = calculate_tweet_score(
             engagements,
             author_influence=author_influence,
-            author=tweet.author,
+            author=author_key,
             considered_accounts=considered,
             relationships=relationships,
+            identity_handles=identity_handles,
         )
         return ScoredAttribution(
             attribution=attribution,
@@ -266,7 +289,8 @@ class AttributionScorer:
             author_influence=round(author_influence, 6),
             baseline_score=round(author_influence * BASELINE_TWEET_SCORE_FACTOR, 6),
             details=tuple(details),
-            engagements=tuple(sorted(engagement_result.engagements)),
+            engagements=tuple(sorted(engagements if by_id else engagement_result.engagements)),
+            scoring_by_x_id=by_id,
             author_followers_count=(
                 author_account.followers_count if author_account is not None else 0
             ),
@@ -299,19 +323,28 @@ class _CampaignContext:
     ) -> tuple[dict[str, float], EcosystemMap, dict[tuple[str, str], float]]:
         """Return considered influence, the current map, and its relationship edges.
 
-        Edges are keyed by lowercased ``(source, target)`` usernames and kept only
-        when both ends are considered; a later duplicate edge replaces an earlier one.
+        Edges use campaign-selected identities: legacy handles or IDs resolved through
+        this map's own accounts. Only considered endpoints contribute.
         """
 
         key = (campaign.access.campaign_id, pool)
         if key not in self._considered:
-            considered, current = considered_accounts_for_campaign(
-                self.feed, campaign, ecosystem_id=pool
+            by_id = uses_x_id_scoring(campaign)
+            consider = (
+                considered_account_ids_for_campaign if by_id else considered_accounts_for_campaign
             )
+            considered, current = consider(self.feed, campaign, ecosystem_id=pool)
             relationships: dict[tuple[str, str], float] = {}
+            identities = (
+                {account.username.lower(): account.x_id for account in current.accounts}
+                if by_id
+                else {}
+            )
             for edge in current.relationships:
                 source = edge.source_username.lower()
                 target = edge.target_username.lower()
+                if by_id:
+                    source, target = identities[source], identities[target]
                 if source in considered and target in considered:
                     relationships[(source, target)] = edge.score
             self._considered[key] = (considered, current, relationships)
@@ -346,13 +379,16 @@ def _exclude_participant_engagement(
     for item in scored:
         if item.meets_brief:
             passing_by_campaign.setdefault(item.attribution.campaign_id, set()).add(
-                item.tweet.author.casefold()
+                item.tweet.author_x_id if item.scoring_by_x_id else item.tweet.author.casefold()
             )
     output: list[ScoredAttribution] = []
     for item in scored:
         participants = passing_by_campaign.get(item.attribution.campaign_id, set())
         remaining = tuple(
-            detail for detail in item.details if detail.username.casefold() not in participants
+            detail
+            for detail in item.details
+            if (detail.x_id if item.scoring_by_x_id else detail.username.casefold())
+            not in participants
         )
         if len(remaining) == len(item.details):
             output.append(item)

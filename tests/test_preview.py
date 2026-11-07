@@ -14,7 +14,7 @@ from bitcast_x.validator.preview import (
     _refresh_interval,
     import_legacy_preview_cache,
 )
-from bitcast_x.x_provider import EngagementFetch, Tweet, TweetFetch
+from bitcast_x.x_provider import EngagementFetch, EngagementIdentity, Tweet, TweetFetch
 
 NOW = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
@@ -56,6 +56,19 @@ class Provider:
         return EngagementFetch(
             engagements={username: "quote"},
             provider_available=True,
+        )
+
+    async def fetch_engagements_by_id(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
+        result = await self.fetch_engagements(tweet_id, quote_count=quote_count)
+        return result.model_copy(
+            update={
+                "identities": tuple(
+                    EngagementIdentity(x_id="42", username=username, kind="quote")
+                    for username in result.engagements
+                )
+            }
         )
 
     async def close(self) -> None:
@@ -109,6 +122,75 @@ async def test_preview_evidence_is_cached_then_refreshed_and_merged(tmp_path: Pa
     assert upstream.engagement_fetches == 2
     assert refreshed_tweet.tweet is not None and refreshed_tweet.tweet.views_count == 2
     assert refreshed_engagements.engagements == {"alice": "quote", "bob": "quote"}
+
+
+async def test_identity_preview_never_reuses_legacy_cache_and_persists_separate_keys(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "preview.sqlite3"
+    upstream = Provider()
+    with closing(PreviewStore(path)) as store:
+        provider = PreviewXProvider(upstream, store, now=lambda: NOW)
+        legacy = await provider.fetch_engagements("123", quote_count=0)
+        identities = await provider.fetch_engagements_by_id("123", quote_count=0)
+        assert upstream.engagement_fetches == 2
+        assert legacy.identities == ()
+        assert identities.identities == (
+            EngagementIdentity(x_id="42", username="bob", kind="quote"),
+        )
+        assert store._get("engagements:123")["result"] == {
+            "engagements": {"alice": "quote"},
+            "provider_available": True,
+        }
+        assert store._get("engagements-x-id:123")["result"]["identities"] == [
+            {"x_id": "42", "username": "bob", "kind": "quote"}
+        ]
+
+    with closing(PreviewStore(path)) as store:
+        provider = PreviewXProvider(upstream, store, now=lambda: NOW)
+        assert await provider.fetch_engagements("123") == legacy
+        assert await provider.fetch_engagements_by_id("123") == identities
+        assert upstream.engagement_fetches == 2
+
+
+def test_identity_preview_merges_renames_by_id_and_preserves_quotes(tmp_path: Path) -> None:
+    with closing(PreviewStore(tmp_path / "preview.sqlite3")) as store:
+        store.record_preview_engagement_evidence(
+            "123",
+            EngagementFetch(
+                engagements={"alice": "quote"},
+                identities=(EngagementIdentity(x_id="42", username="alice", kind="quote"),),
+                provider_available=True,
+            ),
+            attempted_at=NOW,
+            by_id=True,
+        )
+        merged = store.record_preview_engagement_evidence(
+            "123",
+            EngagementFetch(
+                engagements={"renamed": "retweet", "alice": "retweet"},
+                identities=(
+                    EngagementIdentity(x_id="42", username="renamed", kind="retweet"),
+                    EngagementIdentity(x_id="43", username="alice", kind="retweet"),
+                ),
+                provider_available=True,
+            ),
+            attempted_at=NOW + timedelta(hours=4),
+            by_id=True,
+        )
+        assert merged.result.identities == (
+            EngagementIdentity(x_id="42", username="renamed", kind="quote"),
+            EngagementIdentity(x_id="43", username="alice", kind="retweet"),
+        )
+        unavailable = store.record_preview_engagement_evidence(
+            "123",
+            EngagementFetch(engagements={}, provider_available=False),
+            attempted_at=NOW + timedelta(hours=5),
+            by_id=True,
+        )
+        assert unavailable.result == merged.result
+        assert not unavailable.last_attempt_available
+        assert store.preview_engagement_evidence("123") is None
 
 
 async def test_featured_tweet_engagements_refresh_hourly_without_refreshing_other_old_tweets(

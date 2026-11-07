@@ -3,7 +3,7 @@
 import asyncio
 import time
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -62,6 +62,16 @@ class TweetFetch(BaseModel):
     provider_available: bool
 
 
+class EngagementIdentity(BaseModel):
+    """One immutable engager identity; usernames are display evidence only."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    x_id: str = Field(pattern=r"^[0-9]+$")
+    username: str
+    kind: Literal["retweet", "quote"]
+
+
 class EngagementFetch(BaseModel):
     """Normalized max-one-contribution engagement map for v2 scoring.
 
@@ -72,6 +82,7 @@ class EngagementFetch(BaseModel):
 
     engagements: dict[str, str]
     provider_available: bool
+    identities: tuple[EngagementIdentity, ...] = ()
 
 
 class XProvider(Protocol):
@@ -80,6 +91,10 @@ class XProvider(Protocol):
     async def fetch_tweet_by_id(self, tweet_id: str) -> TweetFetch: ...
 
     async def fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch: ...
+
+    async def fetch_engagements_by_id(
         self, tweet_id: str, *, quote_count: int | None = None
     ) -> EngagementFetch: ...
 
@@ -181,6 +196,7 @@ class DesearchProvider:
         retweeters, retweeters_available = results[0]
         quotes, quotes_available = results[1] if len(results) > 1 else ([], True)
         engagements: dict[str, str] = {}
+        identities: dict[str, EngagementIdentity] = {}
         users = retweeters.get("users", []) if isinstance(retweeters, dict) else []
         for user in users:
             if not isinstance(user, dict):
@@ -188,6 +204,9 @@ class DesearchProvider:
             username = str(user.get("username") or user.get("screen_name") or "").lower()
             if username:
                 engagements[username] = "retweet"
+            x_id = _optional_numeric(user.get("id"))
+            if x_id is not None and x_id.isascii():
+                identities[x_id] = EngagementIdentity(x_id=x_id, username=username, kind="retweet")
         quote_items = (
             quotes
             if isinstance(quotes, list)
@@ -199,12 +218,23 @@ class DesearchProvider:
             parsed = _parse_desearch_tweet(payload)
             if parsed is not None and parsed.quoted_tweet_id == tweet_id:
                 engagements[parsed.author] = "quote"
+                identities[parsed.author_x_id] = EngagementIdentity(
+                    x_id=parsed.author_x_id, username=parsed.author, kind="quote"
+                )
         # A failed lookup leaves the result unavailable, so settlement still waits
         # for complete evidence, but it keeps whatever the other lookup returned.
         return EngagementFetch(
             engagements=engagements,
             provider_available=retweeters_available and quotes_available,
+            identities=tuple(identities.values()),
         )
+
+    async def fetch_engagements_by_id(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
+        """Fetch immutable IDs without resolving missing identities from handles."""
+
+        return await self.fetch_engagements(tweet_id, quote_count=quote_count)
 
     async def _request_json(
         self, path: str, params: dict[str, Any]

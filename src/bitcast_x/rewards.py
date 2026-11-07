@@ -36,6 +36,8 @@ class RewardTweet:
     quote_count: int = 0
     bookmark_count: int = 0
     engagement_usernames: tuple[str, ...] = ()
+    engagement_x_ids: tuple[str, ...] = ()
+    scoring_by_x_id: bool = False
     performance_bonus_pct: float = 0.0
     performance_bonus_breakdown: dict[str, float] | None = None
     featured_tweet_bonus: bool = False
@@ -284,13 +286,20 @@ def apply_v2_featured_bonus(
     )
     if featured is None:
         return campaign
-    bonus_accounts = {item.casefold() for item in featured.engagement_usernames}
-    bonus_accounts.add(featured.author_username.casefold())
+    if featured.scoring_by_x_id:
+        bonus_accounts = set(featured.engagement_x_ids)
+        bonus_accounts.add(featured.creator_x_id)
+    else:
+        bonus_accounts = {item.casefold() for item in featured.engagement_usernames}
+        bonus_accounts.add(featured.author_username.casefold())
     adjusted: dict[str, RewardTweet] = {}
     for tweet in campaign.tweets:
         if tweet.tweet_id not in assigned_tweet_ids:
             continue
-        receives_bonus = tweet.author_username.casefold() in bonus_accounts
+        identity = (
+            tweet.creator_x_id if featured.scoring_by_x_id else tweet.author_username.casefold()
+        )
+        receives_bonus = identity in bonus_accounts
         adjusted[tweet.tweet_id] = replace(
             tweet,
             score=tweet.score * FEATURED_MULTIPLIER if receives_bonus else tweet.score,

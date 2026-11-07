@@ -36,6 +36,16 @@ LOGGER = logging.getLogger(__name__)
 # freeze different results. A waiting campaign is left out of weights; the others keep emitting.
 EVIDENCE_GRACE_BLOCKS = 900
 
+# Campaign opening time, not validator wall clock, fixes scoring through recovery/replay.
+# Delete the live handle scorer after the last pre-cutover campaign finalizes, preserving
+# finalized state/backups and pinned legacy code plus original inputs for historical rebuilds.
+X_ID_SCORING_CUTOVER = datetime(2026, 11, 16, tzinfo=UTC)
+
+
+def uses_x_id_scoring(campaign: "CampaignRecord") -> bool:
+    """Select immutable-identity scoring without changing the public feed."""
+    return campaign.opens_at >= X_ID_SCORING_CUTOVER
+
 
 class SocialAccount(BaseModel):
     """Time-frozen influence entry used by v2-compatible engagement scoring."""
@@ -426,6 +436,33 @@ def considered_accounts_for_campaign(
     ecosystem_id: str | None = None,
     stale_decay: float = 0.5,
 ) -> tuple[dict[str, float], EcosystemMap]:
+    """Legacy handle influence; retain for pre-cutover campaign recovery and replay."""
+    return _considered_accounts(
+        feed, campaign, ecosystem_id=ecosystem_id, stale_decay=stale_decay, by_id=False
+    )
+
+
+def considered_account_ids_for_campaign(
+    feed: CampaignFeed,
+    campaign: CampaignRecord,
+    *,
+    ecosystem_id: str | None = None,
+    stale_decay: float = 0.5,
+) -> tuple[dict[str, float], EcosystemMap]:
+    """Merge map influence by immutable ID; a rename never creates another account."""
+    return _considered_accounts(
+        feed, campaign, ecosystem_id=ecosystem_id, stale_decay=stale_decay, by_id=True
+    )
+
+
+def _considered_accounts(
+    feed: CampaignFeed,
+    campaign: CampaignRecord,
+    *,
+    ecosystem_id: str | None,
+    stale_decay: float,
+    by_id: bool,
+) -> tuple[dict[str, float], EcosystemMap]:
     """Reproduce v2's latest-full / dropped-account-decayed influence map."""
 
     selected_pool = ecosystem_id or campaign.primary_pool
@@ -439,11 +476,14 @@ def considered_accounts_for_campaign(
     if not maps:
         raise ValueError(f"campaign {campaign.access.campaign_id} has no ecosystem maps")
     latest = maps[-1]
-    considered = {account.username.casefold(): account.influence for account in latest.accounts}
+    considered = {
+        (account.x_id if by_id else account.username.casefold()): account.influence
+        for account in latest.accounts
+    }
     older_scores: dict[str, float] = {}
     for ecosystem in maps[:-1]:
         for account in ecosystem.accounts:
-            older_scores[account.username.casefold()] = account.influence
+            older_scores[account.x_id if by_id else account.username.casefold()] = account.influence
     for username, influence in older_scores.items():
         considered.setdefault(username, influence * stale_decay)
     return considered, latest

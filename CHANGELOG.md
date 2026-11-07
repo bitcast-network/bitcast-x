@@ -16,6 +16,14 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Added
 
+- Validator-only immutable X-ID scoring for campaigns opening at or after
+  `2026-11-16T00:00:00Z`, including influence, relationships, exclusions and featured bonuses.
+  Earlier campaigns retain historical username matching regardless of evaluation time.
+  ID engagement evidence has a separate cache namespace; frozen positive economics are preserved.
+  Pre-cutover serialized scores omit the new identity flag so previous validators can reload them.
+  No miner upgrade or miner-validator wire/schema/hash change is required.
+- Add `author_x_id` alongside the display `author` in preview and final brief-tweet uploads.
+
 - Optional surplus beneficiary. A miner names a hotkey with
   `BITCAST_X_MINER_SURPLUS_BENEFICIARY` (chart value `surplusBeneficiary`). The miner commits it as
   a `surplus_beneficiary` batch event with its next batch, and validators then give that hotkey

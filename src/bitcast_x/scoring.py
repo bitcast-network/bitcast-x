@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 BASELINE_TWEET_SCORE_FACTOR = 2.0
 RETWEET_WEIGHT = 1.0
@@ -18,6 +18,7 @@ class EngagementContribution(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     username: str
+    x_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     influence_score: float
     engagement_type: str
     relationship_score: float
@@ -32,6 +33,7 @@ def calculate_tweet_score(
     author: str,
     considered_accounts: dict[str, float],
     relationships: Mapping[tuple[str, str], float] | None = None,
+    identity_handles: Mapping[str, str] | None = None,
 ) -> tuple[float, list[EngagementContribution]]:
     """Apply v2's bit-identical baseline, engagement weights, and cabal scaling.
 
@@ -61,7 +63,10 @@ def calculate_tweet_score(
         total += contribution
         details.append(
             EngagementContribution(
-                username=username,
+                username=(
+                    identity_handles.get(username, "") if identity_handles is not None else username
+                ),
+                x_id=username if identity_handles is not None else None,
                 influence_score=round(influence, 6),
                 engagement_type=engagement_type,
                 relationship_score=round(relationship, 2),

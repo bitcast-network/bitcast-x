@@ -197,6 +197,46 @@ def test_v2_performance_then_featured_bonus_fixture_is_exact() -> None:
     assert second.score == 1.1812500000000001
 
 
+def test_identity_featured_bonus_does_not_follow_reused_handle() -> None:
+    campaign = RewardCampaign(
+        campaign_id="campaign",
+        reward_pool_usd=700,
+        max_tweets_per_creator=None,
+        tweets=(
+            RewardTweet(
+                "campaign",
+                "t1",
+                "1",
+                "miner",
+                10,
+                author_username="author",
+                engagement_x_ids=("2",),
+                scoring_by_x_id=True,
+            ),
+            RewardTweet(
+                "campaign",
+                "t2",
+                "2",
+                "miner",
+                10,
+                author_username="renamed",
+                scoring_by_x_id=True,
+            ),
+            RewardTweet(
+                "campaign",
+                "t3",
+                "3",
+                "miner",
+                10,
+                author_username="old_handle",
+                scoring_by_x_id=True,
+            ),
+        ),
+    )
+    result = apply_v2_featured_bonus(campaign, {"t1", "t2", "t3"}, "t1")
+    assert [tweet.featured_tweet_bonus for tweet in result.tweets] == [True, True, False]
+
+
 def _tweet_reward(
     campaign_id: str,
     tweet_id: str,

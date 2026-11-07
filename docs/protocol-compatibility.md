@@ -38,6 +38,17 @@ strings are consensus-visible contracts.
   chain state; only the TAO/USD quote differs between validators, so their vectors differ slightly
   and the chain's consensus reconciles them. Changing the weight formula or its pricing inputs
   requires a coordinated validator release.
+- Immutable X-ID scoring is a validator-only, per-campaign activation:
+  `opens_at >= 2026-11-16T00:00:00Z` selects ID matching; earlier campaigns retain historical
+  username matching even when evaluated later. All validators must deploy the scoring release
+  before that boundary. Miner transport, signed events, canonical hashes, envelopes, and manifest
+  versions are unchanged; no miner upgrade is required for this activation.
+- Brief-tweet uploads add `author_x_id` alongside display `author` in previews and final results.
+  Consumers should use the immutable ID for identity and retain the handle for display.
+- ID engagement evidence uses its own `engagements-x-id` cache namespace and never reinterprets
+  username-only cache entries as IDs. Frozen positive scores and allocations remain unchanged.
+  Removing the legacy scoring path requires both finalization of every pre-cutover campaign and
+  preservation of historical replay with its original rules, evidence and map versions.
 - New attribution reason strings may be added without changing the wire version when they refine
   an existing rejected outcome without changing acceptance. Consumers must preserve unknown reason
   strings and provide a generic rejection fallback rather than treating the enum as closed.
