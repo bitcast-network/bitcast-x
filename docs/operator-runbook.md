@@ -81,6 +81,12 @@ registered hotkey. The designation is committed with the miner's next batch.
 - Supply secrets through the runtime secret store. Never place wallet material, Desearch keys or
   signed payloads in the image or environment example file.
 
+Batch ingress reads at most `BITCAST_X_MAX_REQUEST_BYTES` (default 16 KiB) within
+`BITCAST_X_REQUEST_TIMEOUT_SECONDS` (default 15 seconds), including chunked requests.
+Permit changes can take up to 12 seconds to reach the miner's authorization snapshot.
+Validators skip nonpublic or nonliteral advertised IPs; local test clients may still explicitly
+construct their test endpoints without using production discovery.
+
 The validator RPC must provide finalized historical reads for miner-reported commitment blocks.
 Startup does not scan a block range: it asks each miner for batches beyond the durable per-miner
 cursor, verifies only their reported blocks, and checks that the resulting sequence and hash equal

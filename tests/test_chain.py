@@ -1,5 +1,6 @@
 """Unit tests for the narrow Bittensor v11 chain adapter."""
 
+import asyncio
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,29 @@ from commitment_fixture import (
     FixtureClient,
     load_duplicate_commitment_fixture,
 )
+
+
+async def test_validator_permit_snapshot_is_single_flight_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr("bitcast_x.chain.time.monotonic", lambda: now)
+    graph = object()
+    fetch = AsyncMock(return_value=graph)
+    chain = BittensorChain(SimpleNamespace(subnets=SimpleNamespace(metagraph=fetch)), netuid=93)
+    snapshots = await asyncio.gather(*(chain.validator_metagraph() for _ in range(20)))
+    assert all(snapshot is graph for snapshot in snapshots)
+    fetch.assert_awaited_once_with(netuid=93)
+    now += 13
+    fetch.side_effect = RuntimeError("RPC unavailable")
+    with pytest.raises(RuntimeError, match="RPC unavailable"):
+        await chain.validator_metagraph()
+    assert await chain.validator_metagraph() is None
+    assert fetch.await_count == 2
+    now += 13
+    fetch.side_effect = None
+    assert await chain.validator_metagraph() is graph
+    assert fetch.await_count == 3
 
 
 class FakeClient:

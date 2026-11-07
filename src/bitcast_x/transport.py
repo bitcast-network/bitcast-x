@@ -162,6 +162,7 @@ def create_miner_app(
     max_request_bytes: int = 16_384,
     auth_max_age: float = 10.0,
     auth_allowed_skew: float = 2.0,
+    request_timeout_seconds: float = 15.0,
     requests_per_minute: int = 120,
     readiness: ReadinessProvider | None = None,
 ) -> FastAPI:
@@ -207,9 +208,18 @@ def create_miner_app(
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid content-length")
             if declared_length > max_request_bytes:
                 raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "request is too large")
-        body = await request.body()
-        if len(body) > max_request_bytes:
-            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "request is too large")
+        body_buffer = bytearray()
+        try:
+            async with asyncio.timeout(request_timeout_seconds):
+                async for chunk in request.stream():
+                    if len(chunk) > max_request_bytes - len(body_buffer):
+                        raise HTTPException(
+                            status.HTTP_413_CONTENT_TOO_LARGE, "request is too large"
+                        )
+                    body_buffer.extend(chunk)
+        except TimeoutError as exc:
+            raise HTTPException(status.HTTP_408_REQUEST_TIMEOUT, "body read timed out") from exc
+        body = bytes(body_buffer)
         try:
             caller = authenticator.verify(
                 request.headers,
@@ -221,10 +231,10 @@ def create_miner_app(
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED, "invalid Bittensor authentication"
             ) from exc
-        if not await authorize_validator(caller.hotkey_ss58):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "validator is not authorized")
         if not await rate_limiter.allow(caller.hotkey_ss58):
             raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "validator rate limit exceeded")
+        if not await authorize_validator(caller.hotkey_ss58):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "validator is not authorized")
         return body, caller.hotkey_ss58
 
     @app.post(BATCHES_PATH, response_model=BatchPageResponse)

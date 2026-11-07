@@ -94,6 +94,7 @@ def create_protocol_app(
         authorize_validator=authorize_validator,
         max_request_bytes=settings.max_request_bytes,
         auth_max_age=settings.auth_max_age_seconds,
+        request_timeout_seconds=settings.request_timeout_seconds,
         auth_allowed_skew=settings.auth_allowed_skew_seconds,
         requests_per_minute=settings.validator_requests_per_minute,
         readiness=readiness,
@@ -103,7 +104,7 @@ def create_protocol_app(
 async def is_permitted_validator(chain: BittensorChain, hotkey: str) -> bool:
     """Return whether ``hotkey`` currently holds a validator permit on the subnet."""
 
-    metagraph = await chain.metagraph()
+    metagraph = await chain.validator_metagraph()
     if metagraph is None:
         return False
     neuron = metagraph.by_hotkey(hotkey)

@@ -2,7 +2,9 @@
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -26,6 +28,36 @@ from bitcast_x.validator.store import ValidatorStore
 
 MINER = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
 OLD_MINER = "5FhG3BhBVmqugRW8m39Q9WQgJ3PjJDgMvnP89SDo9Rsz7rAF"
+
+
+@pytest.mark.parametrize(
+    "axon",
+    [
+        "127.0.0.1:8095",
+        "10.0.0.1:80",
+        "169.254.170.2:80",
+        "100.64.0.1:80",
+        "224.0.0.1:80",
+        "[::1]:80",
+        "[fc00::1]:80",
+        "miner.example:80",
+        "8.8.8.8:0",
+        "8.8.8.8:65536",
+        "user@8.8.8.8:80",
+        "8.8.8.8:80/path",
+    ],
+)
+async def test_discovery_rejects_nonpublic_or_malformed_axons(tmp_path: Path, axon: str) -> None:
+    graph = SimpleNamespace(
+        neurons=[
+            SimpleNamespace(hotkey="unsafe", axon=axon),
+            SimpleNamespace(hotkey=MINER, axon="8.8.8.8:8095"),
+        ]
+    )
+    chain: Any = SimpleNamespace(metagraph=AsyncMock(return_value=graph))
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    ingestor = ValidatorIngestor(chain, store, client_factory=lambda _: FakeClient([]))
+    assert await ingestor.discover() == [MinerEndpoint(MINER, "http://8.8.8.8:8095")]
 
 
 def batches() -> tuple[CommittedBatch, CommittedBatch]:

@@ -6,6 +6,14 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [3.1.0] - Unreleased
 
+### Security
+
+- Bound streamed `/v2/batches` and `/v3/batches` bodies before authentication, with a read
+  deadline. Rate-limit signed callers before permit checks; share a fail-closed 12-second
+  metagraph snapshot so rotating unregistered hotkeys cannot amplify chain RPC traffic.
+- Discover only literal globally routable miner IPs with valid ports, rejecting private,
+  loopback, link-local, multicast, hostname, and malformed axon destinations.
+
 ### Added
 
 - Optional surplus beneficiary. A miner names a hotkey with

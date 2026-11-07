@@ -1,6 +1,7 @@
 """End-to-end tests for Bittensor v11 signed HTTP authentication."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -279,6 +280,54 @@ async def test_oversized_request_is_rejected_before_authentication(tmp_path: Pat
         response = await client.post(BATCHES_PATH, content=b"x" * 11)
 
     assert response.status_code == 413
+
+
+@pytest.mark.parametrize("path", [BATCHES_PATH, LEGACY_BATCHES_PATH])
+async def test_chunked_body_stops_at_limit_without_draining(tmp_path: Path, path: str) -> None:
+    app = make_app(create_wallet(tmp_path, "miner"), max_request_bytes=10)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"123456"
+        yield b"78901"
+        raise AssertionError("oversized stream must not be drained")
+
+    async with asgi_client(app) as client:
+        response = await client.post(path, content=chunks())
+    assert response.status_code == 413
+
+
+async def test_slow_body_times_out_before_authorization(tmp_path: Path) -> None:
+    app = make_app(create_wallet(tmp_path, "miner"), request_timeout_seconds=0.01)
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"{"
+        await asyncio.sleep(1)
+        yield b"}"
+
+    async with asgi_client(app) as client:
+        response = await client.post(BATCHES_PATH, content=chunks())
+    assert response.status_code == 408
+
+
+async def test_rejected_hotkey_is_limited_before_authorization(tmp_path: Path) -> None:
+    miner = create_wallet(tmp_path, "miner")
+    validator = create_wallet(tmp_path, "validator")
+    checked: list[str] = []
+
+    async def deny(hotkey: str) -> bool:
+        checked.append(hotkey)
+        return False
+
+    app = make_app(miner, authorize_validator=deny, requests_per_minute=1)
+    client = signed_client(validator, miner, app)
+    try:
+        for expected in (403, 429):
+            with pytest.raises(httpx.HTTPStatusError) as exc:
+                await client.fetch_batches(BatchPageRequest(after_sequence=0))
+            assert exc.value.response.status_code == expected
+    finally:
+        await client.close()
+    assert checked == [validator.hotkey.ss58_address]
 
 
 async def test_oversized_miner_response_is_rejected_without_parsing(tmp_path: Path) -> None:

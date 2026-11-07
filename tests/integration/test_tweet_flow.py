@@ -131,7 +131,7 @@ class InMemoryChain:
             neurons=[
                 SimpleNamespace(
                     hotkey=self._miner_hotkey,
-                    axon="miner.test:80",
+                    axon="8.8.8.8:80",
                 )
             ]
         )
@@ -374,7 +374,7 @@ async def test_tweet_flows_from_miner_api_to_published_reward(
         client_factory=client_factory,
     )
     endpoints = await validator.discover(block=30)
-    assert endpoints == [MinerEndpoint(miner_hotkey, "http://miner.test:80")]
+    assert endpoints == [MinerEndpoint(miner_hotkey, "http://8.8.8.8:80")]
     ingestion = await validator.reconcile(endpoints[0], block=30)
 
     expected_batches = 1 if exclusive else 2
