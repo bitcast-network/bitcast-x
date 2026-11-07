@@ -279,6 +279,8 @@ def test_brief_tweets_payload_preserves_v2_shape_and_v3_miner_target() -> None:
         "attribution_rejected": 0,
     }
     tweet = payload["tweets"][0]  # type: ignore[index]
+    assert tweet["author"] == "alice"
+    assert tweet["author_x_id"] == "456"
     assert tweet["usd_target"] == 100.0
     assert tweet["total_usd_target"] == 700.0
     assert tweet["alpha_target"] is None
@@ -390,6 +392,8 @@ async def test_preview_publishes_zero_dollar_bonuses_and_omits_unscored_acceptan
     assert isinstance(decisions, list)
     assert [item["tweet_id"] for item in decisions] == ["123", "125"]
     tweet = payload["tweets"][0]  # type: ignore[index]
+    assert tweet["author"] == "alice"
+    assert tweet["author_x_id"] == "456"
     assert tweet["performance_bonus_pct"] == 20.0
     assert tweet["performance_bonus_breakdown"] == {
         "views": 5.0,

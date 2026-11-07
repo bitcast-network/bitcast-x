@@ -283,6 +283,68 @@ persists the random history ID, preserves old rows for audit, marks pre-boundary
 sequence 1 automatically and becomes the signed on-chain boundary. Running recovery again after
 new batches exist creates another new history; it never alters either older history.
 
+## Immutable X-ID scoring rollout
+
+Deploy the coordinated validator release before `2026-11-16T00:00:00Z`. Each campaign's
+`opens_at >= 2026-11-16T00:00:00Z` selects ID matching, including one opening exactly at
+the boundary. A pre-cutover campaign retains username matching even if it closes, settles,
+or is replayed later. No miner upgrade, manifest change, signed-event change, or transport
+version change is required. Do not edit campaign dates to force activation.
+
+ID engagement evidence uses `EngagementIdentity(x_id, username, kind)` and
+`fetch_engagements_by_id`; its `engagements-x-id` cache namespace does not read the legacy
+username cache. Keep display handles for presentation, not identity repair. Preview and final
+brief-tweet uploads add `author_x_id` alongside `author`.
+
+### Production deployment path
+
+The production container deployment is owned by
+[`bitcast-network/bitcast-infra`](https://github.com/bitcast-network/bitcast-infra), not this
+repository's CI. The reviewed workflow is
+`.github/workflows/rollout-x-validator-config.yml` (**Deploy X validator candidate**):
+
+1. Record the prior task definition/image digest and complete the backup procedure below.
+2. Dispatch that infrastructure workflow with `source_revision` set to the exact reviewed
+   40-character lowercase Bitcast X commit SHA and `clear_uid60_state=false`. Complete its
+   protected `production` environment approval; do not clear state for this scoring release.
+3. The workflow builds or verifies that immutable revision in ECR `bitcast-x-validator`,
+   verifies image/package identity, stops the old writer for a state backup, and rolls ECS
+   cluster `bitcast`, service `bitcast-x-validator1`, to the candidate. Its reviewed task
+   configuration runs `/entrypoint.sh run-validator`. It stops the previous SQLite writer
+   before starting the replacement.
+4. Retain the workflow's backup, task definition, source revision and image digest. Confirm
+   readiness and compare both a pre-cutover campaign and an ID campaign against an independent
+   validator before completing the coordinated rollout. This workflow targets validator1 only;
+   other operators must deploy the same reviewed release through their own runtime path.
+5. If rollout fails after the candidate could migrate state, the workflow leaves the service
+   stopped. Restore the verified pre-upgrade backup before restarting an older image; do not
+   bypass the stopped-writer protection.
+
+### Finalized state and legacy replay retention
+
+Normal restart does not rescore finalized raw evidence. `RewardCoordinator.freeze_scores`
+loads the stored `ScoredAttribution` JSON for a finalized campaign; weight construction reuses
+its stored rewards. `ValidatorStore` rejects changes to finalized scores and rewards. Keep
+the finalized database and verified backups, rather than flushing caches or state to activate
+the new scorer.
+
+State loss/rebuild is different: after ingestion recovers verified batches, a retained feed
+campaign whose settlement block has passed and whose finalized rows are missing goes through
+`CampaignReconciler.reconcile_feed` and `RewardCoordinator.freeze_scores` again. That path
+executes the scorer; there is no age-based exemption for historical campaigns. Rebuilding from
+mutable provider evidence alone does not guarantee reproduction of the original economics.
+`replay_commitment_block` only reports finalized chain commitment envelopes; it is not a
+frozen-score restore or raw-evidence rescore command.
+
+Delete the live legacy username-scoring path only after the **last pre-cutover campaign has
+finalized**, with finalized stores and verified backups preserved. That condition alone does
+not make arbitrary historical raw-input replay safe: retain a pinned legacy-capable executable,
+the original campaign contracts, evidence and immutable map versions for historical rebuilds,
+or retain the legacy path in the current executable while such replay remains supported.
+The activation date, end of an emission window, or deployment completion is not itself a
+deletion criterion. This legacy scoring retention is separate from the retired
+`legacy_connection` mining protocol.
+
 ## Upgrade and rollback
 
 1. Record the running image digest, package version, finalized cursor and readiness response.

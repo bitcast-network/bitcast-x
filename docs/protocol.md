@@ -304,6 +304,39 @@ one another's scores. Influence uses the maximum of the tweet-time value, curren
 and the current map minimum; an account dropped from the latest map retains half its prior value.
 Scores are rounded to six decimal places.
 
+### Immutable X-ID scoring activation
+
+Each campaign independently selects its scoring identity from its UTC `opens_at`:
+`opens_at >= 2026-11-16T00:00:00Z` uses immutable numeric X IDs; an earlier opening uses
+the historical username-matching rules, even when scored or replayed after that date.
+This is not a wall-clock switch, a close-time switch, or an operator setting. The campaign
+contract retained with settled economics supplies the same boundary on restart.
+
+For ID campaigns, author influence, considered membership, relationship edges, self-engagement
+exclusion, participant exclusion, engagement deduplication, and featured-author/engager bonuses
+match X IDs, not current or historical handles. Display usernames remain labels; a reused handle
+does not transfer another account's influence or relationship. Influence and reward formulas
+remain unchanged. Pre-cutover campaigns retain their legacy matching and formulas.
+
+Provider engagement evidence uses `EngagementIdentity(x_id, username, kind)` through
+`fetch_engagements_by_id`. Its `engagements-x-id` cache namespace never reads legacy
+username-only engagement entries. Missing immutable identity must not be reconstructed by
+matching a display username.
+
+This coordinated validator scoring release changes no miner-validator wire version, campaign
+manifest version, claim/submission schema, canonical hash, or commitment envelope. No miner
+upgrade is needed for this scoring cutover. Brief-tweet uploads add `author_x_id` beside the
+existing display `author`, including previews; this is an additive application payload field,
+not a miner transport change.
+
+Positive allocations and their stored scores remain frozen, rather than being rescored under
+the new identity rule. Historical raw-input recomputation must still choose the campaign's
+original rule and retain its original evidence and map versions. The live legacy scorer can
+be retired only after the last pre-cutover campaign is finalized, and only if historical
+replay remains available through retained versioned code and inputs; the calendar boundary
+alone is not permission to delete it.
+
+
 Reward construction then:
 
 1. divides each campaign reward pool into seven equal daily budgets;

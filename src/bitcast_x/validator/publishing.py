@@ -295,6 +295,7 @@ def create_brief_tweets_payload(
             {
                 "tweet_id": tweet.tweet_id,
                 "author": tweet.author,
+                "author_x_id": tweet.author_x_id,
                 "text": tweet.text,
                 "created_at": tweet.created_at.strftime("%a %b %d %H:%M:%S %z %Y"),
                 "lang": tweet.lang,

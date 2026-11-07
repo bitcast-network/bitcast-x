@@ -233,3 +233,55 @@ async def test_quote_search_is_skipped_for_a_post_nobody_quoted(
     assert result.provider_available is available
     assert result.engagements == {"alice": "retweet"}
     assert ("/twitter" in paths) is (quote_count > 0)
+
+
+async def test_identity_engagements_deduplicate_renames_and_skip_unknown_ids() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/retweeters"):
+            return httpx.Response(
+                200,
+                json={
+                    "users": [
+                        {"id": "1", "username": "OldName"},
+                        {"id": "1", "username": "NewName"},
+                        {"id": "2", "username": "Other"},
+                        {"username": "Missing"},
+                        {"id": "not-an-id", "username": "Invalid"},
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": "501",
+                    "created_at": "2026-08-05T12:00:00Z",
+                    "text": "A real quote",
+                    "quoted_status_id": "123",
+                    "user": {"id": "1", "username": "Renamed"},
+                }
+            ],
+        )
+
+    async with desearch(handler) as provider:
+        result = await provider.fetch_engagements_by_id("123")
+
+    assert result.provider_available
+    assert result.identities == (
+        x_provider.EngagementIdentity(x_id="1", username="renamed", kind="quote"),
+        x_provider.EngagementIdentity(x_id="2", username="other", kind="retweet"),
+    )
+    assert result.engagements == {
+        "oldname": "retweet",
+        "newname": "retweet",
+        "other": "retweet",
+        "missing": "retweet",
+        "invalid": "retweet",
+        "renamed": "quote",
+    }
+
+
+@pytest.mark.parametrize("x_id", ["", "alice", "-1", "1.2"])
+def test_engagement_identity_requires_decimal_id(x_id: str) -> None:
+    with pytest.raises(ValueError):
+        x_provider.EngagementIdentity(x_id=x_id, username="alice", kind="retweet")

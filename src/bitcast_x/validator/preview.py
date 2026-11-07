@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from bitcast_x.sqlite import apply_migrations, connect
 from bitcast_x.x_provider import (
     EngagementFetch,
+    EngagementIdentity,
     Tweet,
     TweetFetch,
     XProvider,
@@ -129,10 +130,13 @@ class PreviewStore:
             ),
         )
 
-    def preview_engagement_evidence(self, tweet_id: str) -> PreviewEvidence[EngagementFetch] | None:
+    def preview_engagement_evidence(
+        self, tweet_id: str, *, by_id: bool = False
+    ) -> PreviewEvidence[EngagementFetch] | None:
         """Return the latest cumulative pre-close engagement evidence."""
 
-        return self._load_evidence(f"engagements:{tweet_id}", EngagementFetch)
+        prefix = "engagements-x-id" if by_id else "engagements"
+        return self._load_evidence(f"{prefix}:{tweet_id}", EngagementFetch)
 
     def record_preview_engagement_evidence(
         self,
@@ -140,10 +144,11 @@ class PreviewStore:
         result: EngagementFetch,
         *,
         attempted_at: datetime,
+        by_id: bool = False,
     ) -> PreviewEvidence[EngagementFetch]:
         """Merge cumulative preview engagements and retain them across provider outages."""
 
-        existing = self.preview_engagement_evidence(tweet_id)
+        existing = self.preview_engagement_evidence(tweet_id, by_id=by_id)
         refreshed_at: datetime | None
         if result.provider_available:
             engagements = (
@@ -154,7 +159,22 @@ class PreviewStore:
             engagements.update(
                 {username.casefold(): kind for username, kind in result.engagements.items()}
             )
-            effective = EngagementFetch(engagements=engagements, provider_available=True)
+            identities: dict[str, EngagementIdentity] = {}
+            if by_id:
+                if existing is not None and existing.result.provider_available:
+                    identities.update(
+                        (identity.x_id, identity) for identity in existing.result.identities
+                    )
+                for identity in result.identities:
+                    previous = identities.get(identity.x_id)
+                    if previous is not None and previous.kind == "quote":
+                        identity = identity.model_copy(update={"kind": "quote"})
+                    identities[identity.x_id] = identity
+            effective = EngagementFetch(
+                engagements=engagements,
+                provider_available=True,
+                identities=tuple(identities.values()),
+            )
             refreshed_at = attempted_at
         elif existing is not None and existing.result.provider_available:
             effective = existing.result
@@ -163,7 +183,7 @@ class PreviewStore:
             effective = result
             refreshed_at = None
         return self._save_evidence(
-            f"engagements:{tweet_id}",
+            f"{'engagements-x-id' if by_id else 'engagements'}:{tweet_id}",
             PreviewEvidence(
                 result=effective,
                 refreshed_at=refreshed_at,
@@ -240,7 +260,10 @@ class PreviewStore:
         self._set(
             key,
             {
-                "result": evidence.result.model_dump(mode="json"),
+                "result": evidence.result.model_dump(
+                    mode="json",
+                    exclude={"identities"} if key.startswith("engagements:") else None,
+                ),
                 "refreshed_at": refreshed_at.isoformat() if refreshed_at is not None else None,
                 "attempted_at": evidence.attempted_at.isoformat(),
                 "last_attempt_available": evidence.last_attempt_available,
@@ -391,10 +414,24 @@ class PreviewXProvider:
     async def fetch_engagements(
         self, tweet_id: str, *, quote_count: int | None = None
     ) -> EngagementFetch:
-        """Fetch new/due engagement identities, preserving the cumulative set."""
+        """Fetch legacy handle evidence using its original cache namespace."""
+
+        return await self._fetch_engagements(tweet_id, quote_count=quote_count, by_id=False)
+
+    async def fetch_engagements_by_id(
+        self, tweet_id: str, *, quote_count: int | None = None
+    ) -> EngagementFetch:
+        """Fetch immutable identity evidence without consulting the legacy cache."""
+
+        return await self._fetch_engagements(tweet_id, quote_count=quote_count, by_id=True)
+
+    async def _fetch_engagements(
+        self, tweet_id: str, *, quote_count: int | None, by_id: bool
+    ) -> EngagementFetch:
+        """Fetch new/due evidence, preserving the selected cumulative set."""
 
         current = self._now()
-        cached = self._store.preview_engagement_evidence(tweet_id)
+        cached = self._store.preview_engagement_evidence(tweet_id, by_id=by_id)
         tweet = self._store.preview_tweet_evidence(tweet_id)
         featured = tweet_id in self._featured_tweet_ids
         refresh_interval = _FEATURED_TWEET_ENGAGEMENT_REFRESH if featured else None
@@ -407,13 +444,15 @@ class PreviewXProvider:
             return cached.result
         # A featured tweet's engagement refreshes faster than its cached post, whose
         # quote count may be stale, so always search for its quotes.
-        fresh = await self._upstream.fetch_engagements(
-            tweet_id, quote_count=None if featured else quote_count
+        fetch = (
+            self._upstream.fetch_engagements_by_id if by_id else self._upstream.fetch_engagements
         )
+        fresh = await fetch(tweet_id, quote_count=None if featured else quote_count)
         effective = self._store.record_preview_engagement_evidence(
             tweet_id,
             fresh,
             attempted_at=current,
+            by_id=by_id,
         )
         LOGGER.info(
             "preview engagement evidence refreshed tweet_id=%s available=%s engagements=%s",

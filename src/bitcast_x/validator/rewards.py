@@ -422,5 +422,7 @@ def _reward_tweet(
         reply_count=item.tweet.reply_count,
         quote_count=item.tweet.quote_count,
         bookmark_count=item.tweet.bookmark_count,
-        engagement_usernames=item.engagements,
+        engagement_usernames=() if item.scoring_by_x_id else item.engagements,
+        engagement_x_ids=item.engagements if item.scoring_by_x_id else (),
+        scoring_by_x_id=item.scoring_by_x_id,
     )
