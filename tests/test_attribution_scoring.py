@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from bitcast_x.brief_filter import BriefEvaluation, JevBriefFilter
 from bitcast_x.campaigns import (
@@ -20,6 +21,7 @@ from bitcast_x.campaigns import (
 )
 from bitcast_x.errors import ReconciliationUnavailableError
 from bitcast_x.protocol import AttributionReason, AttributionResult, CampaignAccess, MiningProtocol
+from bitcast_x.scoring import EngagementContribution
 from bitcast_x.validator.rewards import RewardCoordinator
 from bitcast_x.validator.scoring import AttributionScorer
 from bitcast_x.validator.store import ValidatorStore
@@ -488,3 +490,36 @@ async def test_pre_cutover_rebuild_selects_handle_scorer_after_cutover(tmp_path:
         assert provider.engagement_fetches == 1
     finally:
         store.close()
+
+
+class LegacyScoredAttribution(BaseModel):
+    """Pre-ID release schema: unknown fields make a rollback unreadable."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attribution: AttributionResult
+    tweet: Tweet
+    score: float
+    author_influence: float
+    baseline_score: float
+    details: tuple[EngagementContribution, ...]
+    meets_brief: bool = True
+    brief_reasoning: str = ""
+    brief_detailed_breakdown: str | None = None
+    llm_checks_used: int = 0
+    engagements: tuple[str, ...] = ()
+    author_followers_count: int = 0
+
+
+async def test_pre_cutover_score_serialization_is_rollback_compatible() -> None:
+    score = (await AttributionScorer(FakeX()).score(feed(), [accepted("999")]))[0]
+    legacy = LegacyScoredAttribution.model_validate(score.model_dump(exclude={"scoring_by_x_id"}))
+    serialized = score.model_dump_json()
+    assert "scoring_by_x_id" not in score.model_dump()
+    assert serialized == legacy.model_dump_json()
+    assert LegacyScoredAttribution.model_validate_json(serialized) == legacy
+
+    # New-campaign evidence must still retain its identity semantics on reload.
+    identity_score = score.model_copy(update={"scoring_by_x_id": True})
+    assert json.loads(identity_score.model_dump_json())["scoring_by_x_id"] is True
+    assert type(score).model_validate_json(identity_score.model_dump_json()).scoring_by_x_id

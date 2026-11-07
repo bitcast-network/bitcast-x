@@ -20,6 +20,7 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `2026-11-16T00:00:00Z`, including influence, relationships, exclusions and featured bonuses.
   Earlier campaigns retain historical username matching regardless of evaluation time.
   ID engagement evidence has a separate cache namespace; frozen positive economics are preserved.
+  Pre-cutover serialized scores omit the new identity flag so previous validators can reload them.
   No miner upgrade or miner-validator wire/schema/hash change is required.
 - Add `author_x_id` alongside the display `author` in preview and final brief-tweet uploads.
 

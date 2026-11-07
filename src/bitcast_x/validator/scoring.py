@@ -3,7 +3,7 @@
 import asyncio
 import logging
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from bitcast_x.brief_filter import BriefEvaluation, BriefFilter
 from bitcast_x.campaigns import (
@@ -45,7 +45,7 @@ class ScoredAttribution(BaseModel):
     llm_checks_used: int = 0
     engagements: tuple[str, ...] = ()
     author_followers_count: int = 0
-    scoring_by_x_id: bool = False
+    scoring_by_x_id: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class AttributionScorer:
