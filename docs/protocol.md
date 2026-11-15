@@ -79,10 +79,13 @@ Each campaign configures:
 
 `required_link` is an optional nullable string of 1–255 characters without whitespace. When set,
 an expanded post-link destination must contain it after both strings are casefolded, stripped of
-a leading `http://` or `https://`, then stripped of a leading `www.`. Paths and query strings
-participate in this loose substring match. Missing/null leaves existing behavior unchanged.
-Validators check URL and media entities first. Only if none matches, unrepresented `https://t.co/`
-tokens in full post text are resolved with one HEAD request without following redirects.
+a leading `http:` or `https:`, and stripped of a `www.` that follows any leading slashes (so
+destinations compare as `//host/path`). `https://www.a.io/x`, `/www.a.io/x` and `a.io/x` are
+equivalent requirements; a path-only requirement such as `/x/c` keeps its slash. Paths and query
+strings participate in this loose substring match. Missing/null leaves existing behavior unchanged.
+Validators check URL entities first; media attachments never satisfy the requirement and are
+never resolved. Only if no URL entity matches, other `https://t.co/` tokens in the full post text
+are resolved with one HEAD request without following redirects.
 An unavailable resolution follows the same evidence grace/pending rules below. This applies to
 open and exclusive campaigns, and `required_link` is public text for draft matching.
 

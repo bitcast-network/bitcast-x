@@ -35,12 +35,20 @@ SHORT_LINK_TOKEN = re.compile(r"(?<![\w/])https://t\.co/[A-Za-z0-9]+(?![A-Za-z0-
 
 
 def _normalize_link(value: str) -> str:
+    """Casefold and drop the scheme and a leading ``www.``, keeping any leading slashes.
+
+    Destinations normalize to ``//host/path``, so a requirement written with or without
+    the scheme, slashes or ``www.`` (``https://www.a.io/x``, ``/www.a.io/x``, ``a.io/x``)
+    and a path-only one (``/x/c``) all match as substrings.
+    """
+
     normalized = value.casefold()
-    for prefix in ("https://", "http://"):
-        if normalized.startswith(prefix):
-            normalized = normalized[len(prefix) :]
+    for scheme in ("https:", "http:"):
+        if normalized.startswith(scheme):
+            normalized = normalized[len(scheme) :]
             break
-    return normalized.removeprefix("www.")
+    rest = normalized.lstrip("/")
+    return normalized[: len(normalized) - len(rest)] + rest.removeprefix("www.")
 
 
 class QualificationChecker(Protocol):

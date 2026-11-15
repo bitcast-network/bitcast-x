@@ -1708,6 +1708,14 @@ def test_reconciliation_skips_designations_beside_campaign_events(tmp_path: Path
         ("http://stitch3.ai/coplan", "https://stitch3.ai/coplan?source=x", True),
         ("source=x", "https://stitch3.ai/coplan?source=x", True),
         ("stitch3.ai/other", "https://stitch3.ai/coplan/c/creator", False),
+        # The form written in the original request, against a real result link.
+        ("/www.stitch3.ai/coplan", "https://www.stitch3.ai/coplan/c/0xemoni", True),
+        ("/www.stitch3.ai/coplan", "https://stitch3.ai/coplan/c/lazz_eth", True),
+        ("https://www.stitch3.ai/coplan", "https://stitch3.ai/coplan/c/lazz_eth", True),
+        ("www.stitch3.ai", "https://stitch3.ai/coplan", True),
+        # Path-only requirements keep their slash: it must start a path segment.
+        ("/coplan/c", "https://www.stitch3.ai/coplan/c/0xemoni", True),
+        ("/coplan", "https://www.stitch3.ai/xcoplan", False),
     ],
 )
 async def test_required_link_entity_matching(
