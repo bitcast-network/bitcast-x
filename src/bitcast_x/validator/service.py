@@ -34,6 +34,7 @@ from bitcast_x.qualification import (
     QualificationSchedule,
 )
 from bitcast_x.release import source_revision
+from bitcast_x.short_links import ShortLinkResolver
 from bitcast_x.validator.ingestion import (
     ValidatorIngestor,
     signed_client_factory,
@@ -251,6 +252,11 @@ class ValidatorService:
             timeout=settings.request_timeout_seconds,
         )
         stack.push_async_callback(x_provider.close)
+        short_links = ShortLinkResolver(
+            cache_path=settings.state_dir / "short-links.json",
+            timeout_seconds=settings.request_timeout_seconds,
+        )
+        stack.push_async_callback(short_links.close)
         qualification = QualificationReader(chain, qualification_policy)
         preview_path = settings.state_dir / "preview.sqlite3"
         # A large one-time import takes seconds, so it runs off the event loop.
@@ -286,7 +292,9 @@ class ValidatorService:
         return _Economics(
             feed=feed,
             schedule=qualification.schedule,
-            reconciler=CampaignReconciler(store, x_provider, qualification),
+            reconciler=CampaignReconciler(
+                store, x_provider, qualification, short_links=short_links
+            ),
             rewards=RewardCoordinator(
                 store,
                 AttributionScorer(
@@ -297,7 +305,9 @@ class ValidatorService:
             ),
             pricing=pricing,
             preview_provider=preview_provider,
-            preview_reconciler=CampaignReconciler(store, preview_provider, qualification),
+            preview_reconciler=CampaignReconciler(
+                store, preview_provider, qualification, short_links=short_links
+            ),
             preview_scorer=AttributionScorer(
                 preview_provider,
                 brief_filter=brief_filter,

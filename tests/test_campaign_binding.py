@@ -1,16 +1,34 @@
 """Campaign contracts remain pinned across feed changes and protocol retirement."""
 
+import json
 import sqlite3
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
-from bitcast_x.campaigns import CampaignFeed, CampaignRecord
-from bitcast_x.protocol import CampaignAccess, MiningProtocol
+from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, RETIRED_V4_CAMPAIGN_FEED_URL
+from bitcast_x.campaigns import CampaignFeed, CampaignFeedClient, CampaignRecord, _map_digest
+from bitcast_x.chain import ChainCommitment
+from bitcast_x.protocol import (
+    AttributionReason,
+    CampaignAccess,
+    ClaimEvent,
+    CommitmentEnvelope,
+    CommittedBatch,
+    DraftReveal,
+    MiningProtocol,
+    SubmissionEvent,
+)
 from bitcast_x.rewards import TweetReward
+from bitcast_x.validator.preview import PreviewStore
+from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.store import ValidatorStore
+from bitcast_x.x_provider import Tweet, TweetFetch, TweetLink
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 HOTKEY = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -27,6 +45,7 @@ MUTABLE_CAMPAIGN_FIELDS = (
     "required_terms",
     "tag",
     "quoted_tweet_id",
+    "required_link",
     "inclusion_keywords",
     "prompt_version",
     "max_tweets_per_creator",
@@ -77,6 +96,7 @@ def mutate_campaign_contract(record: CampaignRecord, field: str) -> CampaignReco
         "required_terms": ("#required",),
         "tag": "#tag",
         "quoted_tweet_id": "123",
+        "required_link": "example.org/product",
         "inclusion_keywords": ("keyword",),
         "prompt_version": 2,
         "max_tweets_per_creator": 2,
@@ -336,3 +356,260 @@ def test_archived_legacy_binding_does_not_block_current_campaigns(tmp_path) -> N
             "SELECT mining_protocol FROM campaign_protocols WHERE campaign_id = ?",
             ("retired",),
         ).fetchone() == ("legacy_connection",)
+
+
+# Literal contract shape emitted by release 4b3960f, not constructed by today's serializer.
+OLD_CAMPAIGN_JSON = (
+    '{"access":{"campaign_id":"same","mechanism_id":1,"mining_protocol":"preclaim_v2",'
+    '"scoring_close_block":20,"exclusive_miner_hotkey":null},"display":"same","brief":"brief",'
+    '"pools":["eco"],"opens_at":"2026-08-05T00:00:00Z","closes_at":"2026-08-06T00:00:00Z",'
+    '"reward_pool_usd":"700","required_terms":[],"tag":null,"quoted_tweet_id":null,'
+    '"inclusion_keywords":[],"prompt_version":1,"max_tweets_per_creator":null,'
+    '"max_members":150,"cap":null,"emission_start_block":30,"emission_end_block":40}'
+)
+
+
+@pytest.mark.parametrize("explicit_null", [False, True])
+def test_old_contract_serialization_and_binding_are_unchanged(
+    tmp_path: Path, explicit_null: bool
+) -> None:
+    payload = json.loads(OLD_CAMPAIGN_JSON)
+    if explicit_null:
+        payload["required_link"] = None
+    record = CampaignRecord.model_validate(payload)
+    assert record.model_dump_json() == OLD_CAMPAIGN_JSON
+    assert record.model_dump(mode="json") == json.loads(OLD_CAMPAIGN_JSON)
+    assert "required_link" not in record.model_dump()
+    assert "required_link" not in feed(record).model_dump()["campaigns"][0]
+    store = ValidatorStore(tmp_path / "validator.sqlite3")
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "INSERT INTO campaign_protocols "
+            "(campaign_id, mining_protocol, exclusive_miner_hotkey, campaign_contract_json) "
+            "VALUES ('same', 'preclaim_v2', NULL, ?)",
+            (OLD_CAMPAIGN_JSON,),
+        )
+    assert store.bind_campaign_protocols((record,)) == (record,)
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT campaign_contract_json FROM campaign_protocols WHERE campaign_id = 'same'"
+        ).fetchone() == (OLD_CAMPAIGN_JSON,)
+
+
+@pytest.mark.parametrize("has_link", [False, True])
+async def test_required_link_upgrade_preserves_old_state_and_enforces_new_campaign(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, has_link: bool
+) -> None:
+    """Restart from v4 contracts, frozen economics, preview entries and manifest cache."""
+    from bitcast_x.campaigns import EcosystemMap, SocialAccount
+
+    path = tmp_path / "validator.sqlite3"
+    store = ValidatorStore(path)
+    old = CampaignRecord.model_validate_json(OLD_CAMPAIGN_JSON)
+    store.bind_campaign_protocols((old,))
+    freeze_positive_campaign(store, old)
+    # Persist the literal release bytes in every contract-bearing table.
+    with sqlite3.connect(path) as connection:
+        for statement in (
+            "UPDATE campaign_protocols SET campaign_contract_json = ? WHERE campaign_id = 'same'",
+            "UPDATE reconciliations SET campaign_json = ? WHERE campaign_id = 'same'",
+            "UPDATE campaign_rewards SET campaign_json = ? WHERE campaign_id = 'same'",
+        ):
+            connection.execute(statement, (OLD_CAMPAIGN_JSON,))
+        old_queries = (
+            "SELECT * FROM campaign_protocols WHERE campaign_id = 'same'",
+            "SELECT * FROM reconciliations WHERE campaign_id = 'same'",
+            "SELECT * FROM campaign_rewards WHERE campaign_id = 'same'",
+        )
+        old_rows = {query: connection.execute(query).fetchall() for query in old_queries}
+        schema = connection.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ).fetchall()
+
+    preview_path = tmp_path / "preview.sqlite3"
+    PreviewStore(preview_path).close()
+    # Old normalized tweet JSON has no links field; do not use the new Tweet serializer.
+    preview_json = (
+        '{"result":{"tweet":{"tweet_id":"999","author_x_id":"456",'
+        '"created_at":"2026-08-05T00:10:00Z","text":"A useful product",'
+        '"author":"creator"},"provider_available":true},'
+        '"refreshed_at":"2026-08-05T00:20:00Z","attempted_at":"2026-08-05T00:20:00Z",'
+        '"last_attempt_available":true}'
+    )
+    engagement_json = (
+        '{"result":{"engagements":{"reader":"retweet"},"provider_available":true},'
+        '"refreshed_at":"2026-08-05T00:20:00Z","attempted_at":"2026-08-05T00:20:00Z",'
+        '"last_attempt_available":true}'
+    )
+    publication_json = (
+        '{"payload_hash":"old-hash","run_id":"old-preview","payload":{"tweets":[]},'
+        '"attempted_at":"2026-08-05T00:20:00Z","succeeded":true}'
+    )
+    preview_rows = [
+        ("engagements:999", engagement_json, 1),
+        ("publication:same", publication_json, 1),
+        ("tweet:999", preview_json, 1),
+    ]
+    with sqlite3.connect(preview_path) as connection:
+        connection.executemany("INSERT INTO preview_entries VALUES (?, ?, ?)", preview_rows)
+    preview = PreviewStore(preview_path)
+    try:
+        evidence = preview.preview_tweet_evidence("999")
+        assert evidence is not None and evidence.result.tweet is not None
+        assert evidence.result.tweet.links == ()
+        engagements = preview.preview_engagement_evidence("999")
+        assert engagements is not None
+        assert engagements.result.engagements == {"reader": "retweet"}
+        publication = preview.preview_publication("same")
+        assert publication is not None and publication.succeeded
+        assert publication.run_id == "old-preview"
+    finally:
+        preview.close()
+
+    linked_payload = {
+        **json.loads(OLD_CAMPAIGN_JSON),
+        "access": {**old.access.model_dump(mode="json"), "campaign_id": "linked"},
+        "required_link": "HTTPS://WWW.Example.org/Product",
+    }
+    ecosystem = EcosystemMap(
+        ecosystem_id="eco",
+        name="Eco",
+        eligible_creator_x_ids=("456",),
+        updated_at=NOW,
+        accounts=(SocialAccount(x_id="456", username="creator", influence=1.0),),
+    )
+    digest = _map_digest(ecosystem)
+    manifest = {
+        "protocol_version": 5,
+        "snapshot_id": "upgrade",
+        "published_at": NOW.isoformat(),
+        "campaigns": [json.loads(OLD_CAMPAIGN_JSON), linked_payload],
+        "ecosystem_maps": [
+            {
+                "ecosystem_id": "eco",
+                "run_id": 1,
+                "updated_at": NOW.isoformat(),
+                "digest": digest,
+                "path": f"/api/v2/public/x/ecosystem-maps/{digest}",
+                "size_bytes": 100,
+            }
+        ],
+    }
+    cache = tmp_path / "campaign-feed.json"
+    cache.write_text(
+        json.dumps(
+            {
+                "url": RETIRED_V4_CAMPAIGN_FEED_URL,
+                "etag": '"v4"',
+                "manifest": {
+                    **manifest,
+                    "protocol_version": 4,
+                    "campaigns": [json.loads(OLD_CAMPAIGN_JSON)],
+                },
+            }
+        )
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == CAMPAIGN_FEED_URL:
+            assert "if-none-match" not in request.headers
+            return httpx.Response(200, json=manifest)
+        assert request.url.path == f"/api/v2/public/x/ecosystem-maps/{digest}"
+        return httpx.Response(200, json=ecosystem.model_dump(mode="json"))
+
+    client = CampaignFeedClient(
+        RETIRED_V4_CAMPAIGN_FEED_URL, cache_path=cache, transport=httpx.MockTransport(handler)
+    )
+    try:
+        snapshot = await client.fetch()
+    finally:
+        await client.close()
+    store = ValidatorStore(path)
+    assert store.bind_campaign_protocols(snapshot.campaigns) == snapshot.campaigns
+    assert store.reconciliation("upgrade", "same", old.model_dump_json()) == []
+    frozen_rewards = store.campaign_rewards("same", old.model_dump_json())
+    assert frozen_rewards is not None and frozen_rewards[0][0].daily_usd_floor == 1.0
+    assert store.reconciled_campaigns() == [old]
+
+    text = "A useful product with a thoughtful recovery experience."
+    reveal = DraftReveal(claim_id="01" * 16, draft=text, nonce="02" * 32)
+    claim = ClaimEvent(
+        claim_id=reveal.claim_id,
+        campaign_id="linked",
+        creator_x_id="456",
+        created_at=NOW + timedelta(minutes=1),
+        draft_commitment=reveal.commitment(),
+    )
+    first = CommittedBatch.create(
+        miner_hotkey=HOTKEY, sequence=1, previous_batch_hash=None, events=(claim,)
+    )
+    submission = SubmissionEvent(
+        submission_id="03" * 16,
+        campaign_id="linked",
+        tweet_id="999",
+        claim_id=claim.claim_id,
+        miner_hotkey=HOTKEY,
+        creator_x_id="456",
+    )
+    second = CommittedBatch.create(
+        miner_hotkey=HOTKEY,
+        sequence=2,
+        previous_batch_hash=first.batch_hash,
+        events=(submission,),
+        reveals=(reveal,),
+    )
+    for block, batch, minute in ((10, first, 1), (11, second, 20)):
+        store.persist_verified(
+            batch,
+            ChainCommitment(
+                hotkey=HOTKEY,
+                block=block,
+                extrinsic_index=0,
+                timestamp=NOW + timedelta(minutes=minute),
+                envelope=CommitmentEnvelope(
+                    sequence=batch.sequence,
+                    event_count=len(batch.events),
+                    batch_hash=bytes.fromhex(batch.batch_hash),
+                ),
+            ),
+        )
+    published = Tweet(
+        tweet_id="999",
+        author_x_id="456",
+        author="creator",
+        text=text,
+        created_at=NOW + timedelta(minutes=10),
+        links=(TweetLink(url="https://t.co/example", expanded_url="https://example.org/product"),)
+        if has_link
+        else (),
+    )
+    provider = AsyncMock()
+    provider.fetch_tweet_by_id.return_value = TweetFetch(tweet=published, provider_available=True)
+    qualification = AsyncMock()
+    qualification.eligible.return_value = True
+    results = await CampaignReconciler(store, provider, qualification).reconcile_feed(
+        snapshot, finalized_block=30
+    )
+    linked_results = [item for item in results if item.campaign_id == "linked"]
+    assert len(linked_results) == 1
+    assert linked_results[0].accepted is has_link
+    if not has_link:
+        assert linked_results[0].reason is AttributionReason.REQUIRED_LINK_MISSING
+    assert "quarantin" not in caplog.text.lower()
+    assert "using frozen contract" not in caplog.text
+    with sqlite3.connect(path) as connection:
+        for query, rows in old_rows.items():
+            assert connection.execute(query).fetchall() == rows
+        assert (
+            connection.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+            == schema
+        )
+    with sqlite3.connect(preview_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT key, value_json, updated_ns FROM preview_entries ORDER BY key"
+            ).fetchall()
+            == preview_rows
+        )

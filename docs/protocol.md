@@ -42,7 +42,7 @@ Several version numbers cover different boundaries and must not be conflated:
 
 | Boundary | Current version | Meaning |
 | --- | --- | --- |
-| Campaign manifest | `4` | Adds each campaign's required top-`max_members` creator-rank cutoff |
+| Campaign manifest | `5` | Adds optional `required_link`; retains required top-`max_members` cutoff |
 | Validator-to-miner HTTP | `3` | `/v3/batches` includes each batch's claimed finalized chain position |
 | Temporary HTTP overlap | `2` | `/v2/batches` returns the same complete batches without positions |
 | Claim event | `2` | Strict claim schema and draft-commitment hashing |
@@ -59,7 +59,7 @@ commitment envelope is in
 
 ## Public campaign input
 
-The configured campaign URL returns a v4 manifest. Each map reference includes its ecosystem ID,
+The configured campaign URL returns a v5 manifest. Each map reference includes its ecosystem ID,
 activation time, byte size, path, and `sha256-<hex>` digest. Miners may list campaigns without
 downloading maps. Validators download the maps needed for scoring, enforce the response-size bound,
 and verify each digest before caching. After a complete map is verified, validators durably bind its
@@ -76,6 +76,15 @@ Each campaign configures:
 - eligible ecosystem pools, their historical maps, and a positive `max_members` cutoff;
 - brief text, required terms, language, tag, quoted-tweet, keyword, and prompt-version rules;
 - reward pool, optional per-creator tweet limit, and emission block interval.
+
+`required_link` is an optional nullable string of 1–255 characters without whitespace. When set,
+an expanded post-link destination must contain it after both strings are casefolded, stripped of
+a leading `http://` or `https://`, then stripped of a leading `www.`. Paths and query strings
+participate in this loose substring match. Missing/null leaves existing behavior unchanged.
+Validators check URL and media entities first. Only if none matches, unrepresented `https://t.co/`
+tokens in full post text are resolved with one HEAD request without following redirects.
+An unavailable resolution follows the same evidence grace/pending rules below. This applies to
+open and exclusive campaigns, and `required_link` is public text for draft matching.
 
 Campaign and map schemas reject unknown fields, ambiguous duplicate IDs, naive timestamps, invalid
 windows, and incomplete emission bounds. The `campaign_id` is the stable identity. Until a positive
@@ -256,8 +265,8 @@ positive allocation is retried, so later evidence or an updated brief can replac
 decision. Campaign checks report the first failed requirement
 in deterministic evaluation order: `post_outside_campaign_window`,
 `creator_not_eligible_for_campaign`, `required_terms_missing`, `retweet_not_allowed`,
-`reply_not_allowed`, `campaign_tag_missing`, `required_quote_missing_or_incorrect`, or
-`required_campaign_keyword_missing`. The broader `campaign_ineligible` reason remains valid for
+`reply_not_allowed`, `campaign_tag_missing`, `required_quote_missing_or_incorrect`,
+`required_campaign_keyword_missing`, or `required_link_missing`. The broader `campaign_ineligible` reason remains valid for
 aggregate campaign limits and incompatible campaign routing. The complete reason enum and
 model are in [`src/bitcast_x/protocol/models.py`](../src/bitcast_x/protocol/models.py); the replay
 rules are in

@@ -8,10 +8,11 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from bitcast_x import x_provider
 from bitcast_x.campaigns import EVIDENCE_GRACE_BLOCKS
-from bitcast_x.x_provider import DesearchProvider, TweetFetch
+from bitcast_x.x_provider import DesearchProvider, Tweet, TweetFetch, TweetLink
 
 Handler = Callable[[httpx.Request], Awaitable[httpx.Response]]
 
@@ -285,3 +286,92 @@ async def test_identity_engagements_deduplicate_renames_and_skip_unknown_ids() -
 def test_engagement_identity_requires_decimal_id(x_id: str) -> None:
     with pytest.raises(ValueError):
         x_provider.EngagementIdentity(x_id=x_id, username="alice", kind="retweet")
+
+
+@pytest.mark.parametrize(
+    ("entities", "expected"),
+    [
+        (None, ()),
+        ([], ()),
+        ({}, ()),
+        ({"urls": None, "media": "invalid"}, ()),
+        (
+            {
+                "urls": [
+                    None,
+                    "invalid",
+                    {},
+                    {"url": "https://t.co/a"},
+                    {"expanded_url": "https://example.com"},
+                    {"url": "", "expanded_url": "https://example.com"},
+                    {"url": "https://t.co/a", "expanded_url": ""},
+                    {"url": 123, "expanded_url": "https://example.com"},
+                    {"url": "https://t.co/a", "expanded_url": 123},
+                ]
+            },
+            (),
+        ),
+        (
+            {
+                "urls": [{"url": "https://t.co/a", "expanded_url": "https://example.com/article"}],
+                "media": [
+                    {"url": "https://t.co/b", "expanded_url": "https://x.com/u/status/123/photo/1"}
+                ],
+            },
+            (
+                TweetLink(url="https://t.co/a", expanded_url="https://example.com/article"),
+                TweetLink(url="https://t.co/b", expanded_url="https://x.com/u/status/123/photo/1"),
+            ),
+        ),
+    ],
+)
+async def test_desearch_parses_url_and_media_entities(
+    entities: Any, expected: tuple[TweetLink, ...]
+) -> None:
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "123",
+                "created_at": "2026-08-05T12:00:00Z",
+                # Long-post text may be truncated before its URL/media entities.
+                "text": "Long post without any visible short links",
+                "user": {"id": "456", "username": "Creator"},
+                "entities": entities,
+            },
+        )
+
+    async with desearch(handler) as provider:
+        result = await provider.fetch_tweet_by_id("123")
+
+    assert result.tweet is not None
+    assert result.tweet.links == expected
+
+
+def test_stored_tweets_without_links_remain_readable_and_rollback_compatible() -> None:
+    evidence = {
+        "tweet_id": "123",
+        "author_x_id": "456",
+        "created_at": "2026-08-05T12:00:00Z",
+        "text": "Legacy evidence",
+        "author": "creator",
+    }
+    tweet = Tweet.model_validate(evidence)
+    assert tweet.links == ()
+    assert "links" not in tweet.model_dump()
+    assert "links" not in tweet.model_dump_json()
+    linked = tweet.model_copy(
+        update={"links": (TweetLink(url="https://t.co/a", expanded_url="https://example.com"),)}
+    )
+    assert Tweet.model_validate_json(linked.model_dump_json()) == linked
+    assert (
+        TweetFetch(tweet=tweet, provider_available=True).model_dump()["tweet"].get("links") is None
+    )
+
+
+def test_tweet_link_is_frozen_and_forbids_extra_fields() -> None:
+    link = TweetLink(url="https://t.co/a", expanded_url="https://example.com")
+    with pytest.raises(ValidationError):
+        link.url = "https://t.co/b"
+    with pytest.raises(ValidationError):
+        TweetLink.model_validate({**link.model_dump(), "unexpected": True})

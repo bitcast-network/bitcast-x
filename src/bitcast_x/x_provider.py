@@ -18,6 +18,15 @@ _NEGATIVE_TTL_SECONDS = 3600
 _NEGATIVE_CACHE_MAX = 4096
 
 
+class TweetLink(BaseModel):
+    """One provider-reported URL and its expanded destination."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    expanded_url: str
+
+
 class Tweet(BaseModel):
     """Stable normalized tweet evidence consumed by reconciliation and scoring."""
 
@@ -29,6 +38,7 @@ class Tweet(BaseModel):
     text: str
     author: str
     tagged_accounts: tuple[str, ...] = ()
+    links: tuple[TweetLink, ...] = Field(default=(), exclude_if=lambda value: not value)
     retweeted_user: str | None = None
     retweeted_tweet_id: str | None = None
     quoted_user: str | None = None
@@ -309,6 +319,7 @@ def _parse_desearch_tweet(payload: dict[str, Any]) -> Tweet | None:
             for mention in mentions
             if isinstance(mention, dict) and mention.get("screen_name")
         ),
+        links=_parse_links(entities),
         retweeted_user=_nested_username(retweet),
         retweeted_tweet_id=_optional_numeric(retweet.get("id")) if retweet else None,
         quoted_user=_nested_username(quote),
@@ -323,6 +334,26 @@ def _parse_desearch_tweet(payload: dict[str, Any]) -> Tweet | None:
         in_reply_to_status_id=_optional_numeric(payload.get("in_reply_to_status_id")),
         in_reply_to_user=(str(payload.get("in_reply_to_screen_name") or "").lower() or None),
     )
+
+
+def _parse_links(entities: Any) -> tuple[TweetLink, ...]:
+    """Keep URL and media evidence, including links absent from truncated text."""
+
+    if not isinstance(entities, dict):
+        return ()
+    links: list[TweetLink] = []
+    for kind in ("urls", "media"):
+        entries = entities.get(kind)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            expanded_url = entry.get("expanded_url")
+            if isinstance(url, str) and url and isinstance(expanded_url, str) and expanded_url:
+                links.append(TweetLink(url=url, expanded_url=expanded_url))
+    return tuple(links)
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

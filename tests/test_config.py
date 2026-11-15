@@ -27,7 +27,7 @@ def test_operator_defaults_match_the_published_network() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.campaign_feed_url == (
-        "https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest-v4"
+        "https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest-v5"
     )
     assert settings.qualification_policy is PUBLIC_FINNEY_QUALIFICATION_SCHEDULE
     # Legacy single-config fields apply only off Finney and default to the public values.

@@ -31,6 +31,16 @@ verify already committed preclaim history; they are separate from retired legacy
 Preview state is kept in `preview.sqlite3`. A `preview-cache` directory left by an earlier
 release is imported on first start and can be deleted once rollback is no longer needed.
 
+Campaign clients now read `https://bitcast-api.bitcast.network/api/v2/public/x/campaign-manifest-v5`.
+Explicit retired v3 and v4 feed URLs are automatically mapped to v5; old manifest caches are
+refetched. Upgrade validators before publishing any brief with `required_link`; v4 remains
+available to older validators but does not expose that requirement. Upgrade miners by hand.
+The validator stores resolved t.co destinations in `short-links.json` beside `validator.sqlite3`.
+Preview and settlement share this bounded, atomically written cache; unreadable files are logged
+and rebuilt. Backups need not include it, but retaining it avoids repeat HEAD requests. The
+validator database schema is unchanged. Resolution failures use the normal evidence grace and
+pending rules. Roll back before storing link-required campaign contracts, not after.
+
 ### Desearch activity budget
 
 New preclaim submissions receive a replaceable pre-close verification preview. Preview tweet and

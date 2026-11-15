@@ -12,11 +12,16 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
+from bitcast_x.campaign_urls import (
+    CAMPAIGN_FEED_URL,
+    LEGACY_CAMPAIGN_FEED_URL,
+    RETIRED_V4_CAMPAIGN_FEED_URL,
+)
 from bitcast_x.campaigns import (
     CampaignFeed,
     CampaignFeedClient,
     CampaignManifest,
+    CampaignRecord,
     EcosystemMap,
     SocialAccount,
     _map_digest,
@@ -71,7 +76,7 @@ def _manifest() -> dict[str, object]:
     campaigns = deepcopy(FEED["campaigns"])
     campaigns[0]["max_members"] = 1  # type: ignore[index]
     return {
-        "protocol_version": 4,
+        "protocol_version": 5,
         "snapshot_id": "snapshot-1",
         "published_at": FEED["published_at"],
         "campaigns": campaigns,
@@ -139,6 +144,9 @@ def test_campaign_contract_accepts_supported_prompt_versions(supported: int) -> 
         ),
         pytest.param(
             lambda value: value.update({"protocol_version": 3}), "protocol_version", id="v3"
+        ),
+        pytest.param(
+            lambda value: value.update({"protocol_version": 4}), "protocol_version", id="v4"
         ),
     ],
 )
@@ -219,21 +227,22 @@ async def test_rejects_oversized_snapshot_without_replacing_cache(tmp_path: Path
     assert path.exists() is False
 
 
-async def test_retired_v3_feed_url_reads_the_v4_manifest(tmp_path: Path) -> None:
+@pytest.mark.parametrize("url", (LEGACY_CAMPAIGN_FEED_URL, RETIRED_V4_CAMPAIGN_FEED_URL))
+async def test_retired_feed_url_reads_the_v5_manifest(tmp_path: Path, url: str) -> None:
     requests: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request.url.path)
         return httpx.Response(200, json=_manifest())
 
-    async with feed_client(handler, tmp_path / "feed.json", LEGACY_CAMPAIGN_FEED_URL) as client:
+    async with feed_client(handler, tmp_path / "feed.json", url) as client:
         campaigns = await client.fetch_campaigns()
 
     assert client.url == CAMPAIGN_FEED_URL
     assert campaigns[0].access.campaign_id == "campaign-1"
     assert campaigns[0].max_members == 1
     # Listing campaigns reads only the manifest, never the referenced maps.
-    assert requests == ["/api/v2/public/x/campaign-manifest-v4"]
+    assert requests == ["/api/v2/public/x/campaign-manifest-v5"]
 
 
 async def test_split_feed_downloads_each_map_once_then_uses_digest_cache(tmp_path: Path) -> None:
@@ -548,3 +557,42 @@ async def test_campaigns_command_reads_maps_larger_than_the_protocol_limit(
 
     assert feed is not None
     assert [c["access"]["campaign_id"] for c in feed["campaigns"]] == ["campaign-1"]
+
+
+@pytest.mark.parametrize("required_link", [None, "x", "HTTPS://WWW.Example.org/Offer", "x" * 255])
+def test_required_link_round_trips_without_normalizing(required_link: str | None) -> None:
+    payload = {**FEED["campaigns"][0], "required_link": required_link}  # type: ignore[index]
+    record = CampaignRecord.model_validate(payload)
+    assert record.required_link == required_link
+    for dumped in (record.model_dump(), json.loads(record.model_dump_json())):
+        if required_link is None:
+            assert "required_link" not in dumped
+        else:
+            assert dumped["required_link"] == required_link
+
+
+@pytest.mark.parametrize(
+    "required_link", ["", "x" * 256, " x", "x ", "a b", "a\nb", "a\tb", "a\u00a0b"]
+)
+def test_required_link_rejects_blank_long_or_whitespace_values(required_link: str) -> None:
+    payload = {**FEED["campaigns"][0], "required_link": required_link}  # type: ignore[index]
+    with pytest.raises(ValidationError, match="required_link"):
+        CampaignRecord.model_validate(payload)
+
+
+async def test_v4_url_cache_is_not_revalidated_at_v5(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["protocol_version"] = 4
+    path = tmp_path / "feed.json"
+    path.write_text(
+        json.dumps({"url": RETIRED_V4_CAMPAIGN_FEED_URL, "etag": '"old"', "manifest": manifest})
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == CAMPAIGN_FEED_URL
+        assert "if-none-match" not in request.headers
+        return httpx.Response(200, json=_manifest(), headers={"etag": '"new"'})
+
+    async with feed_client(handler, path, RETIRED_V4_CAMPAIGN_FEED_URL) as client:
+        assert len(await client.fetch_campaigns()) == 1
+    assert json.loads(path.read_text())["url"] == CAMPAIGN_FEED_URL

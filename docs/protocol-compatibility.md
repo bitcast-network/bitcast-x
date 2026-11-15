@@ -17,9 +17,22 @@ strings are consensus-visible contracts.
   reactivated. Older validators quarantine `DX3`; they must be upgraded during the rollout.
 - Resumes are future-only. Claims and submissions must belong to the same side of the latest
   verified history boundary. Existing verified batches and positive campaign economics remain immutable.
-- Campaign manifest v4 adds a required positive `max_members` cutoff. Clients read only v4; the v4
-  rollout is complete, so v3 manifests and v2 full-feed documents are rejected. A client configured
-  with the retired v3 endpoint reads the canonical v4 endpoint instead.
+- Campaign manifest v5 adds optional `required_link` and retains the required positive
+  `max_members` cutoff. Upgraded clients read v5 only; explicit retired v3/v4 URLs map to v5.
+  A cached v4 manifest is a cache miss. The publisher continues serving unchanged v4 for
+  validators not yet upgraded: briefs must not set `required_link` until validators have upgraded,
+  because only upgraded validators enforce it. Miners upgrade by hand to read v5.
+- Campaign records omit unset `required_link` when serialized, preserving old contracts,
+  reconciliation rows and publications byte-for-byte. No validator database schema change is needed.
+  A rollback after storing campaigns with a populated `required_link` is not safe: old strict
+  models cannot read that new contract or the new `required_link_missing` reason.
+- Desearch expanded URL/media entities are authoritative link evidence. Missing long-post link
+  entities use a cached, single HEAD to `https://t.co/<alphanumeric>` without following redirects;
+  only an absolute HTTP(S) redirect destination is accepted. This is a stopgap until Desearch
+  returns complete long-post link entities. Resolution failures defer the campaign during the
+  900-block evidence grace, then leave the tweet pending rather than rejecting it. Preview and
+  final reconciliation share the persistent cache; campaigns without a link requirement never
+  resolve short links.
 - Adding the first published cutoff does not rewrite a campaign with a positive reward allocation.
   Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.

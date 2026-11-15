@@ -1,6 +1,7 @@
 """Replay verified history into deterministic open and exclusive attribution."""
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,10 +26,21 @@ from bitcast_x.protocol import (
     SubmissionEvent,
     SurplusBeneficiaryEvent,
 )
+from bitcast_x.short_links import ShortLinkResolutionError, ShortLinkResolver
 from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet, XProvider
 
 LOGGER = logging.getLogger(__name__)
+SHORT_LINK_TOKEN = re.compile(r"(?<![\w/])https://t\.co/[A-Za-z0-9]+(?=$|[\s.,!?;:)\]}\"'])")
+
+
+def _normalize_link(value: str) -> str:
+    normalized = value.casefold()
+    for prefix in ("https://", "http://"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    return normalized.removeprefix("www.")
 
 
 class QualificationChecker(Protocol):
@@ -48,6 +60,8 @@ def _public_match_text(campaign: CampaignRecord) -> str:
     ]
     if campaign.tag is not None:
         parts.append(campaign.tag)
+    if campaign.required_link is not None:
+        parts.append(campaign.required_link)
     if campaign.quoted_tweet_id is not None:
         parts.extend(
             (
@@ -118,10 +132,13 @@ class CampaignReconciler:
         store: ValidatorStore,
         x_provider: XProvider,
         qualification: QualificationChecker,
+        *,
+        short_links: ShortLinkResolver | None = None,
     ) -> None:
         self.store = store
         self._x = x_provider
         self._qualification = qualification
+        self._short_links = short_links
         # Qualification at a fixed past block never changes, so those answers are kept.
         self._qualification_cache: dict[tuple[str, int], bool] = {}
         # Previews also ask at the moving chain head; only the latest head's are kept.
@@ -317,6 +334,9 @@ class CampaignReconciler:
                 continue
             try:
                 campaign_failure = self._campaign_failure(campaign, feed, tweet)
+                if campaign_failure is None and campaign.required_link is not None:
+                    if not await self._has_required_link(campaign.required_link, tweet):
+                        campaign_failure = AttributionReason.REQUIRED_LINK_MISSING
                 if campaign_failure is not None:
                     output.append(
                         self._reject(
@@ -398,6 +418,27 @@ class CampaignReconciler:
         ):
             return AttributionReason.REQUIRED_CAMPAIGN_KEYWORD_MISSING
         return None
+
+    async def _has_required_link(self, required_link: str, tweet: Tweet) -> bool:
+        required = _normalize_link(required_link)
+        if any(required in _normalize_link(link.expanded_url) for link in tweet.links):
+            return True
+        known = {link.url for link in tweet.links}
+        unresolved = dict.fromkeys(
+            match.group()
+            for match in SHORT_LINK_TOKEN.finditer(tweet.text)
+            if match.group() not in known
+        )
+        for url in unresolved:
+            if self._short_links is None:
+                raise ReconciliationUnavailableError("short-link resolver unavailable")
+            try:
+                destination = await self._short_links.resolve(url)
+            except ShortLinkResolutionError as exc:
+                raise ReconciliationUnavailableError(str(exc)) from exc
+            if required in _normalize_link(destination):
+                return True
+        return False
 
     async def _exclusive(
         self,

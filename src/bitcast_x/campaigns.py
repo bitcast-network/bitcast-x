@@ -16,12 +16,18 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     TypeAdapter,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
-from bitcast_x.campaign_urls import CAMPAIGN_FEED_URL, LEGACY_CAMPAIGN_FEED_URL
+from bitcast_x.campaign_urls import (
+    CAMPAIGN_FEED_URL,
+    LEGACY_CAMPAIGN_FEED_URL,
+    RETIRED_V4_CAMPAIGN_FEED_URL,
+)
 from bitcast_x.errors import ProtocolError
 from bitcast_x.http import read_bounded
 from bitcast_x.protocol import CampaignAccess
@@ -132,6 +138,7 @@ class CampaignRecord(BaseModel):
     required_terms: tuple[str, ...] = ()
     tag: str | None = Field(default=None, min_length=1, max_length=256)
     quoted_tweet_id: str | None = Field(default=None, pattern=r"^[0-9]+$")
+    required_link: str | None = Field(default=None, min_length=1, max_length=255, pattern=r"^\S+$")
     inclusion_keywords: tuple[str, ...] = ()
     prompt_version: Literal[1, 2, 5, 6] = 1
     max_tweets_per_creator: int | None = Field(default=None, ge=1)
@@ -139,6 +146,15 @@ class CampaignRecord(BaseModel):
     cap: float | None = Field(default=None, gt=0, le=1)
     emission_start_block: int | None = Field(default=None, ge=0)
     emission_end_block: int | None = Field(default=None, ge=0)
+
+    @model_serializer(mode="wrap")
+    def omit_absent_required_link(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        """Preserve stored contracts and cache keys for campaigns predating required links."""
+
+        serialized: dict[str, Any] = handler(self)
+        if self.required_link is None:
+            serialized.pop("required_link", None)
+        return serialized
 
     @model_validator(mode="before")
     @classmethod
@@ -292,11 +308,11 @@ class EcosystemMapReference(BaseModel):
 
 
 class CampaignManifest(BaseModel):
-    """Small protocol-v4 index whose maps are fetched only when needed."""
+    """Small protocol-v5 index whose maps are fetched only when needed."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    protocol_version: Literal[4] = Field(default=4, frozen=True)
+    protocol_version: Literal[5] = Field(default=5, frozen=True)
     snapshot_id: str = Field(min_length=1, max_length=256)
     published_at: datetime
     campaigns: tuple[CampaignRecord, ...]
@@ -318,7 +334,7 @@ class CampaignManifest(BaseModel):
         if len(set(identities)) != len(identities):
             raise ValueError("ecosystem map references must be unique")
         if any(item.max_members is None for item in self.campaigns):
-            raise ValueError("manifest v4 campaigns must define max_members")
+            raise ValueError("manifest v5 campaigns must define max_members")
         return self
 
 
@@ -502,10 +518,11 @@ class CampaignFeedClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         normalized_url = url.rstrip("/")
-        # Operators may still configure the retired v3 endpoint; it lacks the
-        # v4 rank cutoff, so always read the canonical v4 manifest instead.
+        # Explicit retired public endpoints must read the link-aware manifest.
         self.url = (
-            CAMPAIGN_FEED_URL if normalized_url == LEGACY_CAMPAIGN_FEED_URL else normalized_url
+            CAMPAIGN_FEED_URL
+            if normalized_url in {LEGACY_CAMPAIGN_FEED_URL, RETIRED_V4_CAMPAIGN_FEED_URL}
+            else normalized_url
         )
         self.cache_path = cache_path
         self._max_response_bytes = max_response_bytes
