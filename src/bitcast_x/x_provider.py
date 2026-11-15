@@ -39,6 +39,8 @@ class Tweet(BaseModel):
     author: str
     tagged_accounts: tuple[str, ...] = ()
     links: tuple[TweetLink, ...] = Field(default=(), exclude_if=lambda value: not value)
+    # Short links X attaches to photos and videos: never a destination, never resolved.
+    media_urls: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     retweeted_user: str | None = None
     retweeted_tweet_id: str | None = None
     quoted_user: str | None = None
@@ -320,6 +322,7 @@ def _parse_desearch_tweet(payload: dict[str, Any]) -> Tweet | None:
             if isinstance(mention, dict) and mention.get("screen_name")
         ),
         links=_parse_links(entities),
+        media_urls=_parse_media_urls(entities),
         retweeted_user=_nested_username(retweet),
         retweeted_tweet_id=_optional_numeric(retweet.get("id")) if retweet else None,
         quoted_user=_nested_username(quote),
@@ -336,24 +339,35 @@ def _parse_desearch_tweet(payload: dict[str, Any]) -> Tweet | None:
     )
 
 
-def _parse_links(entities: Any) -> tuple[TweetLink, ...]:
-    """Keep URL and media evidence, including links absent from truncated text."""
-
+def _entity_entries(entities: Any, kind: str) -> list[dict[str, Any]]:
     if not isinstance(entities, dict):
-        return ()
+        return []
+    entries = entities.get(kind)
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _parse_links(entities: Any) -> tuple[TweetLink, ...]:
+    """Keep linked destinations, which long posts may list only for their first 280 characters."""
+
     links: list[TweetLink] = []
-    for kind in ("urls", "media"):
-        entries = entities.get(kind)
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            url = entry.get("url")
-            expanded_url = entry.get("expanded_url")
-            if isinstance(url, str) and url and isinstance(expanded_url, str) and expanded_url:
-                links.append(TweetLink(url=url, expanded_url=expanded_url))
+    for entry in _entity_entries(entities, "urls"):
+        url = entry.get("url")
+        expanded_url = entry.get("expanded_url")
+        if isinstance(url, str) and url and isinstance(expanded_url, str) and expanded_url:
+            links.append(TweetLink(url=url, expanded_url=expanded_url))
     return tuple(links)
+
+
+def _parse_media_urls(entities: Any) -> tuple[str, ...]:
+    """Keep media short links so they are known to be attachments, not linked destinations."""
+
+    return tuple(
+        url
+        for entry in _entity_entries(entities, "media")
+        if isinstance(url := entry.get("url"), str) and url
+    )
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

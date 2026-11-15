@@ -31,7 +31,7 @@ from bitcast_x.validator.store import ValidatorStore
 from bitcast_x.x_provider import Tweet, XProvider
 
 LOGGER = logging.getLogger(__name__)
-SHORT_LINK_TOKEN = re.compile(r"(?<![\w/])https://t\.co/[A-Za-z0-9]+(?=$|[\s.,!?;:)\]}\"'])")
+SHORT_LINK_TOKEN = re.compile(r"(?<![\w/])https://t\.co/[A-Za-z0-9]+(?![A-Za-z0-9])")
 
 
 def _normalize_link(value: str) -> str:
@@ -423,7 +423,7 @@ class CampaignReconciler:
         required = _normalize_link(required_link)
         if any(required in _normalize_link(link.expanded_url) for link in tweet.links):
             return True
-        known = {link.url for link in tweet.links}
+        known = {link.url for link in tweet.links} | set(tweet.media_urls)
         unresolved = dict.fromkeys(
             match.group()
             for match in SHORT_LINK_TOKEN.finditer(tweet.text)

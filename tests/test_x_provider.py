@@ -289,12 +289,12 @@ def test_engagement_identity_requires_decimal_id(x_id: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("entities", "expected"),
+    ("entities", "expected_links", "expected_media"),
     [
-        (None, ()),
-        ([], ()),
-        ({}, ()),
-        ({"urls": None, "media": "invalid"}, ()),
+        (None, (), ()),
+        ([], (), ()),
+        ({}, (), ()),
+        ({"urls": None, "media": "invalid"}, (), ()),
         (
             {
                 "urls": [
@@ -307,8 +307,10 @@ def test_engagement_identity_requires_decimal_id(x_id: str) -> None:
                     {"url": "https://t.co/a", "expanded_url": ""},
                     {"url": 123, "expanded_url": "https://example.com"},
                     {"url": "https://t.co/a", "expanded_url": 123},
-                ]
+                ],
+                "media": [None, {}, {"url": ""}, {"url": 123}],
             },
+            (),
             (),
         ),
         (
@@ -318,15 +320,13 @@ def test_engagement_identity_requires_decimal_id(x_id: str) -> None:
                     {"url": "https://t.co/b", "expanded_url": "https://x.com/u/status/123/photo/1"}
                 ],
             },
-            (
-                TweetLink(url="https://t.co/a", expanded_url="https://example.com/article"),
-                TweetLink(url="https://t.co/b", expanded_url="https://x.com/u/status/123/photo/1"),
-            ),
+            (TweetLink(url="https://t.co/a", expanded_url="https://example.com/article"),),
+            ("https://t.co/b",),
         ),
     ],
 )
 async def test_desearch_parses_url_and_media_entities(
-    entities: Any, expected: tuple[TweetLink, ...]
+    entities: Any, expected_links: tuple[TweetLink, ...], expected_media: tuple[str, ...]
 ) -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -345,7 +345,9 @@ async def test_desearch_parses_url_and_media_entities(
         result = await provider.fetch_tweet_by_id("123")
 
     assert result.tweet is not None
-    assert result.tweet.links == expected
+    # Media short links are attachments: known, but never a linked destination.
+    assert result.tweet.links == expected_links
+    assert result.tweet.media_urls == expected_media
 
 
 def test_stored_tweets_without_links_remain_readable_and_rollback_compatible() -> None:
@@ -358,7 +360,9 @@ def test_stored_tweets_without_links_remain_readable_and_rollback_compatible() -
     }
     tweet = Tweet.model_validate(evidence)
     assert tweet.links == ()
+    assert tweet.media_urls == ()
     assert "links" not in tweet.model_dump()
+    assert "media_urls" not in tweet.model_dump_json()
     assert "links" not in tweet.model_dump_json()
     linked = tweet.model_copy(
         update={"links": (TweetLink(url="https://t.co/a", expanded_url="https://example.com"),)}

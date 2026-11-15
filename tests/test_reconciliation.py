@@ -1860,6 +1860,65 @@ async def test_required_link_does_not_resolve_known_entity_again(tmp_path: Path)
     store.close()
 
 
+async def test_required_link_ignores_media_attachments(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign().model_copy(update={"required_link": "x.com"})
+    # A screenshot post: its only short link is the photo X attached, which is not a link.
+    evidence = tweet().model_copy(
+        update={
+            "text": tweet().text + " https://t.co/photo1",
+            "media_urls": ("https://t.co/photo1",),
+        }
+    )
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(301, headers={"Location": "https://x.com/u/status/999/photo/1"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        reconciler = CampaignReconciler(
+            store,
+            FakeX({"999": TweetFetch(tweet=evidence, provider_available=True)}),
+            FakeQualification(),
+            short_links=ShortLinkResolver(
+                cache_path=tmp_path / "short-links.json", timeout_seconds=1, client=client
+            ),
+        )
+        results = await reconciler.reconcile_feed(feed(record), finalized_block=25)
+    assert results[0].reason is AttributionReason.REQUIRED_LINK_MISSING
+    assert requests == []
+    store.close()
+
+
+@pytest.mark.parametrize("suffix", ["…", "—", "🔥", "。", "\n", ""])
+async def test_required_link_finds_short_links_before_any_character(
+    tmp_path: Path, suffix: str
+) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign().model_copy(update={"required_link": "stitch3.ai/coplan"})
+    evidence = tweet().model_copy(update={"text": tweet().text + " https://t.co/abc123" + suffix})
+    requested: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(301, headers={"Location": "https://stitch3.ai/coplan/c/name"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        reconciler = CampaignReconciler(
+            store,
+            FakeX({"999": TweetFetch(tweet=evidence, provider_available=True)}),
+            FakeQualification(),
+            short_links=ShortLinkResolver(
+                cache_path=tmp_path / "short-links.json", timeout_seconds=1, client=client
+            ),
+        )
+        results = await reconciler.reconcile_feed(feed(record), finalized_block=25)
+    assert results[0].reason is AttributionReason.ACCEPTED
+    assert requested == ["https://t.co/abc123"]
+    store.close()
+
+
 async def test_required_link_is_public_draft_material(tmp_path: Path) -> None:
     public_link = "https://stitch3.ai/coplan"
     store = open_history(tmp_path / "validator.sqlite3", draft=public_link)
