@@ -1779,20 +1779,26 @@ async def test_required_link_matches_short_link_destinations(
 
 
 @pytest.mark.parametrize(
-    ("written", "accepted"),
+    ("requirement", "written", "accepted"),
     [
-        ("https://www.stitch3.ai/coplan/c/0xemoni", True),
-        ("http://STITCH3.AI/coplan.", True),
-        ("(stitch3.ai/coplan/c/creator)", True),
-        ("www.stitch3.ai/coplan/c/creator!", True),
-        ("https://stitch3.ai/other", False),
-        ("stitch3 coplan", False),
+        ("/www.stitch3.ai/coplan", "https://www.stitch3.ai/coplan/c/0xemoni", True),
+        ("/www.stitch3.ai/coplan", "http://STITCH3.AI/coplan.", True),
+        ("/www.stitch3.ai/coplan", "(stitch3.ai/coplan/c/creator)", True),
+        ("/www.stitch3.ai/coplan", "www.stitch3.ai/coplan/c/creator!", True),
+        ("/www.stitch3.ai/coplan", "https://stitch3.ai/other", False),
+        ("/www.stitch3.ai/coplan", "stitch3 coplan", False),
+        # Loose within links, never within plain words.
+        ("coplan", "I like Coplan", False),
+        ("coplan", "stitch3.ai/coplan", True),
+        ("/coplan/c", "see /coplan/c for details", False),
+        ("/coplan/c", "stitch3.ai/coplan/c/creator", True),
+        ("e.g", "e.g. this one", False),
     ],
 )
 async def test_required_link_counts_links_x_left_unshortened(
-    tmp_path: Path, written: str, accepted: bool
+    tmp_path: Path, requirement: str, written: str, accepted: bool
 ) -> None:
-    record = campaign().model_copy(update={"required_link": "/www.stitch3.ai/coplan"})
+    record = campaign().model_copy(update={"required_link": requirement})
     evidence = tweet().model_copy(update={"text": f"{tweet().text} {written}"})
     # No resolver: a written-out link needs no lookup.
     result = await reconcile_one(tmp_path, record, evidence, None)

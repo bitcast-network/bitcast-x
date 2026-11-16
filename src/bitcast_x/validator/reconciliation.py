@@ -34,6 +34,12 @@ LOGGER = logging.getLogger(__name__)
 SHORT_LINK_TOKEN = re.compile(r"(?<![\w/])https://t\.co/[A-Za-z0-9]+(?![A-Za-z0-9])")
 # Punctuation around a word in post text, never part of the link itself.
 _SURROUNDING_PUNCTUATION = re.compile(r"^[^\w/]+|[^\w/]+$")
+# A link written out in full: a scheme, a ``www.`` host, or a bare domain with a
+# letter TLD (optionally followed by a path, query or fragment). Plain words never are.
+_WRITTEN_LINK = re.compile(
+    r"(?:https?://|www\.)\S+|[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}(?:[/?#]\S*)?",
+    re.IGNORECASE,
+)
 
 
 def _normalize_link(value: str) -> str:
@@ -446,9 +452,12 @@ class CampaignReconciler:
         required = _normalize_link(required_link)
         for word in tweet.text.split():
             candidate = _SURROUNDING_PUNCTUATION.sub("", word)
-            if candidate and "t.co/" not in candidate.casefold():
-                if required in _link_form(candidate):
-                    return True
+            if (
+                _WRITTEN_LINK.fullmatch(candidate)
+                and "t.co/" not in candidate.casefold()
+                and required in _link_form(candidate)
+            ):
+                return True
         own_media = re.compile(
             rf"https?://(?:www\.)?(?:x|twitter)\.com/{re.escape(tweet.author)}"
             rf"/status/{tweet.tweet_id}/(?:photo|video)/\d+",

@@ -83,7 +83,8 @@ a leading `http:` or `https:`, and stripped of a `www.` that follows any leading
 destinations compare as `//host/path`). `https://www.a.io/x`, `/www.a.io/x` and `a.io/x` are
 equivalent requirements; a path-only requirement such as `/x/c` keeps its slash. Paths and query
 strings participate in this loose substring match. Missing/null leaves existing behavior unchanged.
-A post's links are the links written out in its text (X does not always shorten them) and the
+A post's links are the links written out in its text (a word starting with `http://`,
+`https://` or `www.`, or a bare domain such as `a.io/x`; X does not always shorten them) and the
 destination of every `https://t.co/` short link in its full text, each looked up with one HEAD
 request without following redirects and cached. Provider URL entities are not used: they omit
 links beyond the first 280 characters of long posts. A short link to the post's own photo or video
