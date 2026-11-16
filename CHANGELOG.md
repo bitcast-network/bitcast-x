@@ -6,6 +6,20 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ## [3.1.0] - Unreleased
 
+### Required campaign links
+
+- Read campaign manifest v5, retaining the required `max_members` cutoff and automatically
+  migrating explicitly configured v3/v4 URLs. The publisher retains unchanged v4 for older clients.
+- Enforce optional `required_link` against the links written out in a post and the destination
+  of every `t.co` short link in its full text, including exclusive campaigns and long posts whose
+  provider entities omit later links. Each short link is looked up once with a no-follow HEAD into
+  a bounded persistent `short-links.json` cache shared by preview and final reconciliation; the
+  post's own photos and videos never count. Unavailable lookups defer through evidence grace, then
+  remain pending; confirmed misses report `required_link_missing`.
+- Omit unset link requirements from serialized contracts so existing campaign state remains
+  byte-identical; validator SQLite schema stays unchanged. Deploy validators before setting the
+  field on briefs. Rollback is safe for unchanged campaigns, not newly stored link-required ones.
+
 ### Security
 
 - Bound streamed `/v2/batches` and `/v3/batches` bodies before authentication, with a read
@@ -58,8 +72,8 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   already applied.
 - Remove the remaining legacy compatibility code: `MiningProtocol.LEGACY_CONNECTION` and its
   retirement guard, the v3 manifest fallback, v2 full-feed parsing, `CampaignFeedClient.cached()`,
-  and the unused `max_referral_amount` map field. Clients read only the v4 manifest; the retired v3
-  URL is redirected to it. Feed and map caches written by earlier releases stay usable, an
+  and the unused `max_referral_amount` map field. Clients read only the v5 manifest; retired v3/v4
+  URLs are redirected to it. Earlier map caches stay usable and feed caches are refetched; an
   unreadable or retired feed fails the validator cycle instead of stopping the process, and a stored
   legacy contract is quarantined rather than failing every cycle.
 - Reshape miner store and engine internals: `MinerStore.preview_batch` becomes `batch_draft`,

@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 
 from bitcast_x.campaigns import (
@@ -35,6 +36,7 @@ from bitcast_x.protocol import (
     SurplusBeneficiaryEvent,
 )
 from bitcast_x.rewards import TweetReward
+from bitcast_x.short_links import ShortLinkResolver
 from bitcast_x.state import shadow_report
 from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.publishing import ShadowResultPublisher
@@ -1695,4 +1697,262 @@ def test_reconciliation_skips_designations_beside_campaign_events(tmp_path: Path
         reveal.claim_id
     ]
     assert events.by_campaign["campaign"].submissions == []
+    store.close()
+
+
+def short_link_resolver(
+    tmp_path: Path,
+    destinations: dict[str, str],
+    requested: list[str],
+    *,
+    status: int = 301,
+) -> ShortLinkResolver:
+    """Resolve ``t.co`` links from ``destinations``, recording every request made."""
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(status, headers={"Location": destinations[str(request.url)]})
+
+    return ShortLinkResolver(
+        cache_path=tmp_path / "short-links.json",
+        timeout_seconds=1,
+        client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+
+
+async def reconcile_one(
+    tmp_path: Path,
+    record: CampaignRecord,
+    evidence: Tweet,
+    resolver: ShortLinkResolver | None,
+    *,
+    exclusive: bool = False,
+) -> AttributionResult:
+    store = (
+        submission_only_history(tmp_path / "validator.sqlite3")
+        if exclusive
+        else open_history(tmp_path / "validator.sqlite3")
+    )
+    try:
+        reconciler = CampaignReconciler(
+            store,
+            FakeX({"999": TweetFetch(tweet=evidence, provider_available=True)}),
+            FakeQualification(),
+            short_links=resolver,
+        )
+        return (await reconciler.reconcile_campaign(record, feed(record), through_block=25))[0]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("requirement", "destination", "accepted"),
+    [
+        ("stitch3.ai/coplan", "https://www.stitch3.ai/coplan/c/creator", True),
+        ("HTTPS://WWW.STITCH3.AI/COPLAN", "http://stitch3.ai/coplan/c/creator", True),
+        ("http://stitch3.ai/coplan", "https://stitch3.ai/coplan?source=x", True),
+        ("source=x", "https://stitch3.ai/coplan?source=x", True),
+        ("stitch3.ai/other", "https://stitch3.ai/coplan/c/creator", False),
+        # The form written in the original request, against real result links.
+        ("/www.stitch3.ai/coplan", "https://www.stitch3.ai/coplan/c/0xemoni", True),
+        ("/www.stitch3.ai/coplan", "https://stitch3.ai/coplan/c/lazz_eth", True),
+        ("https://www.stitch3.ai/coplan", "https://stitch3.ai/coplan/c/lazz_eth", True),
+        ("www.stitch3.ai", "https://stitch3.ai/coplan", True),
+        # Path-only requirements keep their slash: it must start a path segment.
+        ("/coplan/c", "https://www.stitch3.ai/coplan/c/0xemoni", True),
+        ("/coplan", "https://www.stitch3.ai/xcoplan", False),
+    ],
+)
+async def test_required_link_matches_short_link_destinations(
+    tmp_path: Path, requirement: str, destination: str, accepted: bool
+) -> None:
+    requested: list[str] = []
+    record = campaign().model_copy(update={"required_link": requirement})
+    evidence = tweet().model_copy(update={"text": tweet().text + " https://t.co/abc"})
+    resolver = short_link_resolver(tmp_path, {"https://t.co/abc": destination}, requested)
+    result = await reconcile_one(tmp_path, record, evidence, resolver)
+    assert result.accepted is accepted
+    assert result.reason is (
+        AttributionReason.ACCEPTED if accepted else AttributionReason.REQUIRED_LINK_MISSING
+    )
+    assert requested == ["https://t.co/abc"]
+
+
+@pytest.mark.parametrize(
+    ("requirement", "written", "accepted"),
+    [
+        ("/www.stitch3.ai/coplan", "https://www.stitch3.ai/coplan/c/0xemoni", True),
+        ("/www.stitch3.ai/coplan", "http://STITCH3.AI/coplan.", True),
+        ("/www.stitch3.ai/coplan", "(stitch3.ai/coplan/c/creator)", True),
+        ("/www.stitch3.ai/coplan", "www.stitch3.ai/coplan/c/creator!", True),
+        ("/www.stitch3.ai/coplan", "https://stitch3.ai/other", False),
+        ("/www.stitch3.ai/coplan", "stitch3 coplan", False),
+        # Loose within links, never within plain words.
+        ("coplan", "I like Coplan", False),
+        ("coplan", "stitch3.ai/coplan", True),
+        ("/coplan/c", "see /coplan/c for details", False),
+        ("/coplan/c", "stitch3.ai/coplan/c/creator", True),
+        ("e.g", "e.g. this one", False),
+    ],
+)
+async def test_required_link_counts_links_x_left_unshortened(
+    tmp_path: Path, requirement: str, written: str, accepted: bool
+) -> None:
+    record = campaign().model_copy(update={"required_link": requirement})
+    evidence = tweet().model_copy(update={"text": f"{tweet().text} {written}"})
+    # No resolver: a written-out link needs no lookup.
+    result = await reconcile_one(tmp_path, record, evidence, None)
+    assert result.reason is (
+        AttributionReason.ACCEPTED if accepted else AttributionReason.REQUIRED_LINK_MISSING
+    )
+
+
+@pytest.mark.parametrize("exclusive", [False, True])
+@pytest.mark.parametrize("has_link", [False, True])
+async def test_required_link_applies_to_open_and_exclusive(
+    tmp_path: Path, exclusive: bool, has_link: bool
+) -> None:
+    record = campaign(exclusive=MINER if exclusive else None).model_copy(
+        update={"required_link": "stitch3.ai/coplan"}
+    )
+    destination = "https://stitch3.ai/coplan" if has_link else "https://other.example"
+    evidence = tweet().model_copy(update={"text": tweet().text + " https://t.co/abc"})
+    resolver = short_link_resolver(tmp_path, {"https://t.co/abc": destination}, [])
+    result = await reconcile_one(tmp_path, record, evidence, resolver, exclusive=exclusive)
+    assert result.accepted is has_link
+    assert has_link or result.reason is AttributionReason.REQUIRED_LINK_MISSING
+
+
+@pytest.mark.parametrize(
+    ("required", "status", "after_grace", "expected", "calls"),
+    [
+        (True, 301, False, AttributionReason.ACCEPTED, 1),
+        (True, 503, False, None, 1),
+        (True, 503, True, AttributionReason.EVIDENCE_UNAVAILABLE, 1),
+        (False, 503, False, AttributionReason.ACCEPTED, 0),
+    ],
+)
+async def test_required_link_resolution_and_evidence_grace(
+    tmp_path: Path,
+    required: bool,
+    status: int,
+    after_grace: bool,
+    expected: AttributionReason | None,
+    calls: int,
+) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign().model_copy(
+        update={"required_link": "stitch3.ai/coplan" if required else None}
+    )
+    # A long post: Desearch lists no entity for a link this far in; the lookup still sees it.
+    evidence = tweet().model_copy(
+        update={"text": tweet().text + " " * 300 + "https://t.co/pHzwF1qB1w"}
+    )
+    requested: list[str] = []
+    resolver = short_link_resolver(
+        tmp_path,
+        {"https://t.co/pHzwF1qB1w": "https://www.stitch3.ai/coplan/c/loaded_m3dia"},
+        requested,
+        status=status,
+    )
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=evidence, provider_available=True)}),
+        FakeQualification(),
+        short_links=resolver,
+    )
+    results = await reconciler.reconcile_feed(
+        feed(record), finalized_block=20 + (EVIDENCE_GRACE_BLOCKS if after_grace else 5)
+    )
+    if expected is None:
+        assert results == []
+        assert reconciler.completed_campaign_ids == frozenset()
+    else:
+        assert results[0].reason is expected
+        assert results[0].pending is (expected is AttributionReason.EVIDENCE_UNAVAILABLE)
+    assert len(requested) == calls
+    store.close()
+
+
+async def test_required_link_without_resolver_defers(tmp_path: Path) -> None:
+    store = open_history(tmp_path / "validator.sqlite3")
+    record = campaign().model_copy(update={"required_link": "stitch3.ai"})
+    evidence = tweet().model_copy(update={"text": tweet().text + " https://t.co/abc"})
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=evidence, provider_available=True)}),
+        FakeQualification(),
+    )
+    assert await reconciler.reconcile_feed(feed(record), finalized_block=25) == []
+    assert not reconciler.completed_campaign_ids
+    store.close()
+
+
+async def test_required_link_looks_up_each_short_link_once(tmp_path: Path) -> None:
+    requested: list[str] = []
+    record = campaign().model_copy(update={"required_link": "stitch3.ai/coplan"})
+    evidence = tweet().model_copy(
+        update={"text": tweet().text + " https://t.co/one https://t.co/two https://t.co/one"}
+    )
+    destinations = {
+        "https://t.co/one": "https://other.example",
+        "https://t.co/two": "https://stitch3.ai/coplan/c/creator",
+    }
+    resolver = short_link_resolver(tmp_path, destinations, requested)
+    first = await reconcile_one(tmp_path / "first", record, evidence, resolver)
+    second = await reconcile_one(tmp_path / "second", record, evidence, resolver)
+    assert first.reason is second.reason is AttributionReason.ACCEPTED
+    # Duplicates are looked up once, and the cached answers serve the replay.
+    assert requested == ["https://t.co/one", "https://t.co/two"]
+
+
+@pytest.mark.parametrize(
+    ("destination", "requirement", "accepted"),
+    [
+        # A screenshot: X shortens the post's own photo too, but it is not a link.
+        ("https://x.com/creator/status/999/photo/1", "x.com", False),
+        ("https://twitter.com/Creator/status/999/video/1", "twitter.com", False),
+        # A link to someone else's post still counts.
+        ("https://x.com/stitch3_ai/status/2120914123680870866", "x.com/stitch3_ai", True),
+    ],
+)
+async def test_required_link_ignores_the_posts_own_media(
+    tmp_path: Path, destination: str, requirement: str, accepted: bool
+) -> None:
+    record = campaign().model_copy(update={"required_link": requirement})
+    evidence = tweet().model_copy(update={"text": tweet().text + " https://t.co/media1"})
+    resolver = short_link_resolver(tmp_path, {"https://t.co/media1": destination}, [])
+    result = await reconcile_one(tmp_path, record, evidence, resolver)
+    assert result.accepted is accepted
+
+
+@pytest.mark.parametrize("suffix", ["…", "—", "🔥", "。", "\n", ""])
+async def test_required_link_finds_short_links_before_any_character(
+    tmp_path: Path, suffix: str
+) -> None:
+    requested: list[str] = []
+    record = campaign().model_copy(update={"required_link": "stitch3.ai/coplan"})
+    evidence = tweet().model_copy(update={"text": tweet().text + " https://t.co/abc123" + suffix})
+    resolver = short_link_resolver(
+        tmp_path, {"https://t.co/abc123": "https://stitch3.ai/coplan/c/name"}, requested
+    )
+    result = await reconcile_one(tmp_path, record, evidence, resolver)
+    assert result.reason is AttributionReason.ACCEPTED
+    assert requested == ["https://t.co/abc123"]
+
+
+async def test_required_link_is_public_draft_material(tmp_path: Path) -> None:
+    public_link = "https://stitch3.ai/coplan"
+    store = open_history(tmp_path / "validator.sqlite3", draft=public_link)
+    record = campaign().model_copy(
+        update={"brief": "Unrelated", "required_terms": (), "required_link": public_link}
+    )
+    reconciler = CampaignReconciler(
+        store,
+        FakeX({"999": TweetFetch(tweet=tweet(text=public_link), provider_available=True)}),
+        FakeQualification(),
+    )
+    result = (await reconciler.reconcile_campaign(record, feed(record)))[0]
+    assert result.reason is AttributionReason.SCORE_BELOW_FLOOR
+    assert result.winner_score == pytest.approx(0.55)
     store.close()

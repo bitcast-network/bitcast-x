@@ -288,6 +288,7 @@ class AttributionReason(StrEnum):
     CAMPAIGN_TAG_MISSING = "campaign_tag_missing"
     REQUIRED_QUOTE_MISSING_OR_INCORRECT = "required_quote_missing_or_incorrect"
     REQUIRED_CAMPAIGN_KEYWORD_MISSING = "required_campaign_keyword_missing"
+    REQUIRED_LINK_MISSING = "required_link_missing"
     CLAIM_NOT_ACTIVE = "claim_not_active"
     CLAIM_AFTER_PUBLICATION = "claim_after_publication"
     DRAFT_REVEAL_MISMATCH = "draft_reveal_mismatch"

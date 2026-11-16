@@ -17,9 +17,24 @@ strings are consensus-visible contracts.
   reactivated. Older validators quarantine `DX3`; they must be upgraded during the rollout.
 - Resumes are future-only. Claims and submissions must belong to the same side of the latest
   verified history boundary. Existing verified batches and positive campaign economics remain immutable.
-- Campaign manifest v4 adds a required positive `max_members` cutoff. Clients read only v4; the v4
-  rollout is complete, so v3 manifests and v2 full-feed documents are rejected. A client configured
-  with the retired v3 endpoint reads the canonical v4 endpoint instead.
+- Campaign manifest v5 adds optional `required_link` and retains the required positive
+  `max_members` cutoff. Upgraded clients read v5 only; explicit retired v3/v4 URLs map to v5.
+  A cached v4 manifest is a cache miss. The publisher continues serving unchanged v4 for
+  validators not yet upgraded: briefs must not set `required_link` until validators have upgraded,
+  because only upgraded validators enforce it. Miners upgrade by hand to read v5.
+- Campaign records omit unset `required_link` when serialized, preserving old contracts,
+  reconciliation rows and publications byte-for-byte. No validator database schema change is needed.
+  A rollback after storing campaigns with a populated `required_link` is not safe: old strict
+  models cannot read that new contract or the new `required_link_missing` reason.
+- `required_link` evidence is the links written out in the post text plus the destination of
+  every `https://t.co/<alphanumeric>` short link, each looked up once with a cached HEAD that
+  never follows redirects; only an absolute HTTP(S) redirect destination is accepted. Desearch URL
+  entities are not used because they omit links past the first 280 characters of long posts.
+  `t.co` is undocumented X behavior (it answers our default User-Agent with a 301, a browser
+  User-Agent with an HTML page), so a change there stalls link-required campaigns. Lookup failures
+  defer the campaign during the 900-block evidence grace, then leave the tweet pending rather
+  than rejecting it. Preview and final reconciliation share the persistent cache, so previews
+  look links up long before settlement; campaigns without a link requirement never look up links.
 - Adding the first published cutoff does not rewrite a campaign with a positive reward allocation.
   Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
