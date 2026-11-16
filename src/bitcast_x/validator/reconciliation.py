@@ -32,14 +32,16 @@ from bitcast_x.x_provider import Tweet, XProvider
 
 LOGGER = logging.getLogger(__name__)
 SHORT_LINK_TOKEN = re.compile(r"(?<![\w/])https://t\.co/[A-Za-z0-9]+(?![A-Za-z0-9])")
+# Punctuation around a word in post text, never part of the link itself.
+_SURROUNDING_PUNCTUATION = re.compile(r"^[^\w/]+|[^\w/]+$")
 
 
 def _normalize_link(value: str) -> str:
     """Casefold and drop the scheme and a leading ``www.``, keeping any leading slashes.
 
-    Destinations normalize to ``//host/path``, so a requirement written with or without
-    the scheme, slashes or ``www.`` (``https://www.a.io/x``, ``/www.a.io/x``, ``a.io/x``)
-    and a path-only one (``/x/c``) all match as substrings.
+    A requirement written with or without the scheme, slashes or ``www.``
+    (``https://www.a.io/x``, ``/www.a.io/x``, ``a.io/x``) and a path-only one (``/x/c``)
+    all match a link in its ``//host/path`` form (:func:`_link_form`) as substrings.
     """
 
     normalized = value.casefold()
@@ -49,6 +51,12 @@ def _normalize_link(value: str) -> str:
             break
     rest = normalized.lstrip("/")
     return normalized[: len(normalized) - len(rest)] + rest.removeprefix("www.")
+
+
+def _link_form(value: str) -> str:
+    """Return a link destination, with or without its scheme, as ``//host/path``."""
+
+    return "//" + _normalize_link(value).lstrip("/")
 
 
 class QualificationChecker(Protocol):
@@ -428,23 +436,32 @@ class CampaignReconciler:
         return None
 
     async def _has_required_link(self, required_link: str, tweet: Tweet) -> bool:
+        """Match links written out in the post, then every ``t.co`` link X shortened.
+
+        Every short link is looked up rather than trusting provider entities, which omit
+        links beyond the first 280 characters of long posts. A short link to one of the
+        post's own photos or videos is an attachment, never a link.
+        """
+
         required = _normalize_link(required_link)
-        if any(required in _normalize_link(link.expanded_url) for link in tweet.links):
-            return True
-        known = {link.url for link in tweet.links} | set(tweet.media_urls)
-        unresolved = dict.fromkeys(
-            match.group()
-            for match in SHORT_LINK_TOKEN.finditer(tweet.text)
-            if match.group() not in known
+        for word in tweet.text.split():
+            candidate = _SURROUNDING_PUNCTUATION.sub("", word)
+            if candidate and "t.co/" not in candidate.casefold():
+                if required in _link_form(candidate):
+                    return True
+        own_media = re.compile(
+            rf"https?://(?:www\.)?(?:x|twitter)\.com/{re.escape(tweet.author)}"
+            rf"/status/{tweet.tweet_id}/(?:photo|video)/\d+",
+            re.IGNORECASE,
         )
-        for url in unresolved:
+        for url in dict.fromkeys(match.group() for match in SHORT_LINK_TOKEN.finditer(tweet.text)):
             if self._short_links is None:
                 raise ReconciliationUnavailableError("short-link resolver unavailable")
             try:
                 destination = await self._short_links.resolve(url)
             except ShortLinkResolutionError as exc:
                 raise ReconciliationUnavailableError(str(exc)) from exc
-            if required in _normalize_link(destination):
+            if own_media.fullmatch(destination) is None and required in _link_form(destination):
                 return True
         return False
 

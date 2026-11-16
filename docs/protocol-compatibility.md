@@ -26,13 +26,15 @@ strings are consensus-visible contracts.
   reconciliation rows and publications byte-for-byte. No validator database schema change is needed.
   A rollback after storing campaigns with a populated `required_link` is not safe: old strict
   models cannot read that new contract or the new `required_link_missing` reason.
-- Desearch expanded URL/media entities are authoritative link evidence. Missing long-post link
-  entities use a cached, single HEAD to `https://t.co/<alphanumeric>` without following redirects;
-  only an absolute HTTP(S) redirect destination is accepted. This is a stopgap until Desearch
-  returns complete long-post link entities. Resolution failures defer the campaign during the
-  900-block evidence grace, then leave the tweet pending rather than rejecting it. Preview and
-  final reconciliation share the persistent cache; campaigns without a link requirement never
-  resolve short links.
+- `required_link` evidence is the links written out in the post text plus the destination of
+  every `https://t.co/<alphanumeric>` short link, each looked up once with a cached HEAD that
+  never follows redirects; only an absolute HTTP(S) redirect destination is accepted. Desearch URL
+  entities are not used because they omit links past the first 280 characters of long posts.
+  `t.co` is undocumented X behavior (it answers our default User-Agent with a 301, a browser
+  User-Agent with an HTML page), so a change there stalls link-required campaigns. Lookup failures
+  defer the campaign during the 900-block evidence grace, then leave the tweet pending rather
+  than rejecting it. Preview and final reconciliation share the persistent cache, so previews
+  look links up long before settlement; campaigns without a link requirement never look up links.
 - Adding the first published cutoff does not rewrite a campaign with a positive reward allocation.
   Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.

@@ -10,11 +10,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 - Read campaign manifest v5, retaining the required `max_members` cutoff and automatically
   migrating explicitly configured v3/v4 URLs. The publisher retains unchanged v4 for older clients.
-- Enforce optional `required_link` against normalized expanded URL/media destinations, including
-  exclusive campaigns. Resolve missing long-post t.co entities with a single no-follow HEAD and
-  a bounded persistent `short-links.json` cache shared by preview and final reconciliation.
-  Unavailable resolutions defer through evidence grace, then remain pending; confirmed misses
-  report `required_link_missing`.
+- Enforce optional `required_link` against the links written out in a post and the destination
+  of every `t.co` short link in its full text, including exclusive campaigns and long posts whose
+  provider entities omit later links. Each short link is looked up once with a no-follow HEAD into
+  a bounded persistent `short-links.json` cache shared by preview and final reconciliation; the
+  post's own photos and videos never count. Unavailable lookups defer through evidence grace, then
+  remain pending; confirmed misses report `required_link_missing`.
 - Omit unset link requirements from serialized contracts so existing campaign state remains
   byte-identical; validator SQLite schema stays unchanged. Deploy validators before setting the
   field on briefs. Rollback is safe for unchanged campaigns, not newly stored link-required ones.

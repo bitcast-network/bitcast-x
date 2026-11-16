@@ -83,11 +83,13 @@ a leading `http:` or `https:`, and stripped of a `www.` that follows any leading
 destinations compare as `//host/path`). `https://www.a.io/x`, `/www.a.io/x` and `a.io/x` are
 equivalent requirements; a path-only requirement such as `/x/c` keeps its slash. Paths and query
 strings participate in this loose substring match. Missing/null leaves existing behavior unchanged.
-Validators check URL entities first; media attachments never satisfy the requirement and are
-never resolved. Only if no URL entity matches, other `https://t.co/` tokens in the full post text
-are resolved with one HEAD request without following redirects.
-An unavailable resolution follows the same evidence grace/pending rules below. This applies to
-open and exclusive campaigns, and `required_link` is public text for draft matching.
+A post's links are the links written out in its text (X does not always shorten them) and the
+destination of every `https://t.co/` short link in its full text, each looked up with one HEAD
+request without following redirects and cached. Provider URL entities are not used: they omit
+links beyond the first 280 characters of long posts. A short link to the post's own photo or video
+(`x.com/<author>/status/<id>/photo|video/<n>`) is an attachment and never satisfies the
+requirement. An unavailable lookup follows the same evidence grace/pending rules below. This
+applies to open and exclusive campaigns, and `required_link` is public text for draft matching.
 
 Campaign and map schemas reject unknown fields, ambiguous duplicate IDs, naive timestamps, invalid
 windows, and incomplete emission bounds. The `campaign_id` is the stable identity. Until a positive

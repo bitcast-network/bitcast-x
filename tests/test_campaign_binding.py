@@ -28,7 +28,7 @@ from bitcast_x.rewards import TweetReward
 from bitcast_x.validator.preview import PreviewStore
 from bitcast_x.validator.reconciliation import CampaignReconciler
 from bitcast_x.validator.store import ValidatorStore
-from bitcast_x.x_provider import Tweet, TweetFetch, TweetLink
+from bitcast_x.x_provider import Tweet, TweetFetch
 
 NOW = datetime(2026, 8, 5, tzinfo=UTC)
 HOTKEY = "5E2FKe891uQ7Y1xQ1PLjU7WAouhkxbdJhmovEapJ2cUQv5oA"
@@ -456,7 +456,6 @@ async def test_required_link_upgrade_preserves_old_state_and_enforces_new_campai
     try:
         evidence = preview.preview_tweet_evidence("999")
         assert evidence is not None and evidence.result.tweet is not None
-        assert evidence.result.tweet.links == ()
         engagements = preview.preview_engagement_evidence("999")
         assert engagements is not None
         assert engagements.result.engagements == {"reader": "retweet"}
@@ -577,11 +576,9 @@ async def test_required_link_upgrade_preserves_old_state_and_enforces_new_campai
         tweet_id="999",
         author_x_id="456",
         author="creator",
-        text=text,
+        # A link X left unshortened counts without any lookup.
+        text=f"{text} https://example.org/product" if has_link else text,
         created_at=NOW + timedelta(minutes=10),
-        links=(TweetLink(url="https://t.co/example", expanded_url="https://example.org/product"),)
-        if has_link
-        else (),
     )
     provider = AsyncMock()
     provider.fetch_tweet_by_id.return_value = TweetFetch(tweet=published, provider_available=True)
