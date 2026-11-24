@@ -48,11 +48,11 @@ strings are consensus-visible contracts.
   canonical hash. Validators before software 3.1.0 quarantine a batch that carries it, so every
   validator must run 3.1.0 or later before a miner emits one. Changing the event fields or how a
   designation takes effect is a compatibility change.
-- Weights are floor-first: each miner's USD floors are covered at the block's pricing snapshot
-  before the surplus is split by score share. Alpha's price and the emission come from finalized
-  chain state; only the TAO/USD quote differs between validators, so their vectors differ slightly
-  and the chain's consensus reconciles them. Changing the weight formula or its pricing inputs
-  requires a coordinated validator release.
+- Weights are floor-first: each miner is paid 95% of its USD floors at the block's pricing snapshot
+  and the miner with the largest floors receives the remainder. Alpha's price and the emission come
+  from finalized chain state; only the TAO/USD quote differs between validators, so their vectors
+  differ slightly and the chain's consensus reconciles them. Changing the weight formula or its
+  pricing inputs requires a coordinated validator release.
 - Immutable X-ID scoring is a validator-only, per-campaign activation:
   `opens_at >= 2026-11-16T00:00:00Z` selects ID matching; earlier campaigns retain historical
   username matching even when evaluated later. All validators must deploy the scoring release

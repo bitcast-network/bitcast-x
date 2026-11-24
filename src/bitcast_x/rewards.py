@@ -16,6 +16,8 @@ EMISSIONS_PERIOD_DAYS = 7
 PERFORMANCE_BONUS_PER_METRIC = 0.05
 FEATURED_MULTIPLIER = 1.05
 FEATURED_TOP_N = 5
+# Share of its USD floors each miner is paid before the remainder goes to the top miner.
+MINER_FLOOR_SHARE = 0.95
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,12 +332,14 @@ def _performance_metrics(tweet: RewardTweet) -> dict[str, float]:
 
 @dataclass(frozen=True, slots=True)
 class WeightAllocation:
-    """Floor-first mechanism-1 weights by UID position, with their audit breakdown.
+    """Mechanism-1 weights by UID position, with their audit breakdown.
 
-    ``weights`` is ``floor_weights + surplus_weights`` normalized to sum to 1.
-    ``surplus_weights`` already includes donations: ``donated_weights`` is the
-    surplus weight each UID gave to its beneficiary. ``funding_ratio`` and
-    ``emission_value_usd`` are None when no pricing snapshot was available.
+    ``floor_weights`` pay each miner ``MINER_FLOOR_SHARE`` of its floors and
+    ``surplus_weights`` hold the remainder, which belongs to the top miner and
+    already includes any donation: ``donated_weights`` is the surplus weight
+    each UID gave to its beneficiary. ``funding_ratio`` is the share of the paid
+    floors the emission covers. It and ``emission_value_usd`` are None when no
+    pricing snapshot was available.
     """
 
     weights: NDArray[np.float64]
@@ -355,23 +359,22 @@ def allocate_floor_first_weights(
     emission_value_usd: float | None,
     surplus_beneficiaries: Mapping[str, str] | None = None,
 ) -> WeightAllocation:
-    """Cover every miner's USD floors first, then split the surplus by score share.
+    """Pay every miner ``MINER_FLOOR_SHARE`` of its USD floors, the top miner the rest.
 
-    A miner's floor weight is its daily floors divided by the emission value,
-    so its emission is worth its floors. The surplus weight left over is split
-    by each miner's share of unique tweet scores. When floors exceed the
-    emission value (a shortfall) they are paid pro rata and there is no
-    surplus. Without an emission value, all weight is split in floor
-    proportions, which still covers floors whenever they are funded.
+    A miner's floor weight is its paid floors divided by the emission value.
+    The remainder left after those floors goes to the miner with the largest
+    floors, the lowest UID winning a tie. When the paid floors reach the
+    emission value (a shortfall) all weight is split pro rata by floors and
+    there is no remainder. Without an emission value, all weight is split in
+    floor proportions, which still covers paid floors whenever they are funded.
 
-    A miner with a registered surplus beneficiary gives its surplus weight to
+    A top miner with a registered surplus beneficiary gives the remainder to
     that hotkey. Donations move only the donor's own surplus, computed before
     any donation, so chains and cycles never pass weight on twice.
     """
 
     uid_to_index = {uid: index for index, uid in enumerate(uids)}
     floors = np.zeros(len(uids), dtype=np.float64)
-    scores = np.zeros(len(uids), dtype=np.float64)
     seen: set[tuple[str, str]] = set()
     for reward in tweet_rewards:
         # Attribution storage re-rows one (campaign, tweet) match per validator
@@ -384,8 +387,8 @@ def allocate_floor_first_weights(
         index = uid_to_index.get(uid) if uid is not None else None
         if index is not None:
             floors[index] += reward.daily_usd_floor
-            scores[index] += max(reward.score, 0.0)
     total_floors = float(floors.sum())
+    total_paid_floors = total_floors * MINER_FLOOR_SHARE
     zeros = np.zeros(len(uids), dtype=np.float64)
     if emission_value_usd is not None and emission_value_usd <= 0:
         raise ValueError("emission_value_usd must be positive")
@@ -400,7 +403,7 @@ def allocate_floor_first_weights(
             emission_value_usd=emission_value_usd,
             funding_ratio=None,
         )
-    if emission_value_usd is None or emission_value_usd <= total_floors:
+    if emission_value_usd is None or emission_value_usd <= total_paid_floors:
         floor_shares = cast(NDArray[np.float64], floors / total_floors)
         return WeightAllocation(
             weights=floor_shares,
@@ -410,14 +413,14 @@ def allocate_floor_first_weights(
             total_floors_usd=total_floors,
             emission_value_usd=emission_value_usd,
             funding_ratio=(
-                emission_value_usd / total_floors if emission_value_usd is not None else None
+                emission_value_usd / total_paid_floors if emission_value_usd is not None else None
             ),
         )
-    floor_weights = cast(NDArray[np.float64], floors / emission_value_usd)
-    score_shares = _normalized_shares(scores)
-    if score_shares is None:
-        score_shares = cast(NDArray[np.float64], floors / total_floors)
-    surplus = (1.0 - total_floors / emission_value_usd) * score_shares
+    floor_weights = cast(NDArray[np.float64], floors * MINER_FLOOR_SHARE / emission_value_usd)
+    # Every miner's floors are cut by the same share, so the largest floors earn the most.
+    winner = min(np.flatnonzero(floors == floors.max()), key=lambda index: uids[index])
+    surplus = zeros.copy()
+    surplus[winner] = 1.0 - total_paid_floors / emission_value_usd
     donated = np.zeros(len(uids), dtype=np.float64)
     received = np.zeros(len(uids), dtype=np.float64)
     for donor_hotkey, beneficiary_hotkey in sorted((surplus_beneficiaries or {}).items()):
@@ -441,15 +444,6 @@ def allocate_floor_first_weights(
         emission_value_usd=emission_value_usd,
         funding_ratio=1.0,
     )
-
-
-def _normalized_shares(values: NDArray[np.float64]) -> NDArray[np.float64] | None:
-    """Return values normalized to unit sum, or None when there is no signal."""
-
-    total = values.sum()
-    if total <= 0:
-        return None
-    return cast(NDArray[np.float64], values / total)
 
 
 def _burn(uids: list[int]) -> NDArray[np.float64]:

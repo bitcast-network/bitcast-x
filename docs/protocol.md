@@ -372,22 +372,24 @@ Reward construction then:
 Each accepted tweet's frozen daily USD **floor** is what its miner owes the creator for each day of
 the campaign's seven-day emission window. A **miner's floor** is the sum over its tweets in campaigns
 whose emission window contains the weight block, counting each `(campaign, tweet)` once. Weights
-cover every miner's floors in USD before anything else:
+pay every miner 95% of its floors in USD, then give everything left to the top miner:
 
 ```text
 V = daily miner emission (alpha) x alpha price (USD)       # emission value
 F = sum of miner floors (USD per day)
-funding ratio = min(1, V / F)
+P = 0.95 x F                                               # paid floors
+funding ratio = min(1, V / P)
 
-floor weight_i   = floor_i / V                 when V > F
-surplus weight_i = (1 - F / V) x score share_i when V > F
+floor weight_i   = 0.95 x floor_i / V            when V > P
+surplus weight_w = 1 - P / V                     when V > P, for the top miner w only
 weight_i         = floor weight_i + surplus weight_i
 ```
 
-The **surplus**, the emission value left after floors, is split by **score share**: each miner's
-share of the unique tweet scores behind those floors (or by floors when no score is positive).
-When `V <= F` (a **shortfall**) every miner receives `floor_i / F`: floors are paid pro rata and
-there is no surplus.
+The **top miner** is the one with the largest floors; the lowest UID wins a tie. Because every
+miner's floors are cut by the same 5%, it is also the miner that earns the most after the cut, and
+it alone receives the **surplus**: the emission value left after the paid floors. Every other miner
+receives 95% of its floors. When `V <= P` (a **shortfall**) every miner receives `floor_i / F`:
+floors are paid pro rata and there is no surplus.
 
 The **pricing snapshot** for a weight block has three inputs. The daily miner emission is
 `7200 x alpha_out_emission x 0.41 x` the mechanism's share of the emission split. Alpha's TAO price
@@ -396,8 +398,8 @@ the pool's spot `tao_in / alpha_in`, so one block's trading cannot move it. Both
 finalized state at that block. TAO/USD comes from CoinGecko; a failed request reuses the last quote,
 read back from the validator's stored allocations after a restart, for up to 7,200 blocks (a day).
 A snapshot is fixed once per block. When no snapshot is available, all weight is
-split in floor proportions. That still covers floors whenever they are funded, and only the
-surplus split changes for that cycle.
+split in floor proportions. That still covers paid floors whenever they are funded, and only the
+top miner's surplus changes for that cycle.
 
 ### Surplus beneficiary
 
@@ -413,10 +415,11 @@ event index) stays in force until replaced, and a null `beneficiary_hotkey` clea
 that predate this event quarantine a batch carrying it, so every validator must upgrade before a
 miner emits one.
 
-At weight time a donor keeps its floor weight and gives its surplus weight to the beneficiary's UID.
-The beneficiary may be any registered hotkey, including the burn UID. Each donation moves only the
-donor's own surplus, computed before any donation, so chains and cycles never pass weight on twice.
-An unregistered beneficiary, a self-designation, a shortfall or an unpriced cycle donates nothing.
+At weight time a donor keeps its floor weight and gives its surplus weight to the beneficiary's UID;
+only the top miner has surplus to give. The beneficiary may be any registered hotkey, including the
+burn UID. Each donation moves only the donor's own surplus, computed before any donation, so chains
+and cycles never pass weight on twice. An unregistered beneficiary, a self-designation, a shortfall
+or an unpriced cycle donates nothing.
 The reference miner commits the hotkey configured in `BITCAST_X_MINER_SURPLUS_BENEFICIARY` once it
 differs from the miner's latest designation; unsetting it commits a clearing event.
 

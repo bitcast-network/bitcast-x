@@ -277,22 +277,31 @@ MINERS = {"miner-a": 1, "miner-b": 2}
         pytest.param(
             FLOOR_VS_SCORE,
             1000.0,
-            # Floors $180/$200 and $20/$200 of $1000 emission, then the 0.8
-            # surplus split 20/80 by score share.
-            approx([0.0, 0.18 + 0.16, 0.02 + 0.64]),
+            # Floors are $180/$20, so 95% of them is $171/$19 of the $1000 emission; the 0.81
+            # remainder goes to miner a for the larger floors even though b has the larger score.
+            approx([0.0, 0.171 + 0.81, 0.019]),
             1.0,
-            id="floors-first-then-surplus-by-score-share",
+            id="paid-floors-then-remainder-to-largest-floors",
         ),
         pytest.param(
             FLOOR_VS_SCORE,
             200.0,
-            approx([0.0, 0.9, 0.1]),
+            # Emission covers the $190 paid floors but not the $200 full floors: the $10 left
+            # still goes to the top miner instead of a pro rata split.
+            approx([0.0, 0.855 + 0.05, 0.095]),
             1.0,
-            id="exactly-funded-floors-leave-no-surplus",
+            id="emission-between-paid-and-full-floors-leaves-a-remainder",
         ),
         pytest.param(
             FLOOR_VS_SCORE,
-            100.0,
+            190.0,
+            approx([0.0, 0.9, 0.1]),
+            1.0,
+            id="exactly-funded-paid-floors-leave-no-remainder",
+        ),
+        pytest.param(
+            FLOOR_VS_SCORE,
+            95.0,
             approx([0.0, 0.9, 0.1]),
             0.5,
             id="shortfall-pays-floors-pro-rata",
@@ -306,30 +315,11 @@ MINERS = {"miner-a": 1, "miner-b": 2}
         ),
         pytest.param(
             REPEATED_MATCH,
-            200.0,
+            95.0,
+            # Counted twice, miner a's floors would be $100 against b's $50.
             approx([0.0, 0.5, 0.5]),
             1.0,
             id="duplicate-match-counts-once",
-        ),
-        pytest.param(
-            [
-                _tweet_reward("c1", "t1", "miner-a", score=-5.0, daily_usd_floor=50.0),
-                _tweet_reward("c2", "t2", "miner-b", score=25.0, daily_usd_floor=50.0),
-            ],
-            200.0,
-            approx([0.0, 0.25, 0.75]),
-            1.0,
-            id="negative-scores-earn-no-surplus",
-        ),
-        pytest.param(
-            [
-                _tweet_reward("c1", "t1", "miner-a", score=0.0, daily_usd_floor=90.0),
-                _tweet_reward("c2", "t2", "miner-b", score=0.0, daily_usd_floor=10.0),
-            ],
-            200.0,
-            approx([0.0, 0.9, 0.1]),
-            1.0,
-            id="surplus-follows-floors-without-positive-scores",
         ),
     ],
 )
@@ -351,17 +341,30 @@ def test_floor_first_weights(
     assert not allocation.donated_weights.any()
 
 
-def test_funded_floors_are_always_covered_in_usd() -> None:
+def test_every_miner_is_paid_its_floor_share_in_usd() -> None:
     allocation = allocate_floor_first_weights(
         FLOOR_VS_SCORE, MINERS, [0, 1, 2], emission_value_usd=1000.0
     )
 
-    # Miner a holds 90% of floors but only 20% of score share.
-    assert allocation.weights[1] * 1000.0 >= 180.0
-    assert allocation.weights[2] * 1000.0 >= 20.0
+    assert allocation.weights[1] * 1000.0 == approx(981.0)
+    assert allocation.weights[2] * 1000.0 == approx(19.0)
     assert allocation.total_floors_usd == 200.0
-    assert allocation.floor_weights.tolist() == approx([0.0, 0.18, 0.02])
-    assert allocation.surplus_weights.sum() == approx(0.8)
+    assert allocation.floor_weights.tolist() == approx([0.0, 0.171, 0.019])
+    assert allocation.surplus_weights.tolist() == approx([0.0, 0.81, 0.0])
+
+
+def test_tied_largest_floors_give_the_remainder_to_the_lowest_uid() -> None:
+    allocation = allocate_floor_first_weights(
+        [
+            _tweet_reward("c1", "t1", "miner-a", score=10.0, daily_usd_floor=50.0),
+            _tweet_reward("c2", "t2", "miner-b", score=90.0, daily_usd_floor=50.0),
+        ],
+        {"miner-a": 5, "miner-b": 3},
+        [0, 5, 3],
+        emission_value_usd=1000.0,
+    )
+
+    assert allocation.surplus_weights.tolist() == approx([0.0, 0.0, 0.905])
 
 
 @pytest.mark.parametrize("emission_value_usd", [None, 1000.0])
@@ -386,39 +389,46 @@ def test_non_positive_emission_value_is_rejected(emission_value_usd: float) -> N
     ("beneficiaries", "hotkey_to_uid", "expected", "donated"),
     [
         pytest.param(
-            {"miner-b": "miner-a"},
+            {"miner-a": "miner-b"},
             MINERS,
-            # Miner b keeps its $20 floor weight and gives its 0.64 surplus away.
-            approx([0.0, 0.34 + 0.64, 0.02]),
-            approx([0.0, 0.0, 0.64]),
-            id="donor-keeps-floor-weight-and-gives-surplus",
+            # Top miner a keeps its $171 floor weight and gives its 0.81 remainder away.
+            approx([0.0, 0.171, 0.019 + 0.81]),
+            approx([0.0, 0.81, 0.0]),
+            id="winner-keeps-floor-weight-and-gives-remainder",
         ),
         pytest.param(
-            {"miner-b": "owner"},
+            {"miner-a": "owner"},
             {**MINERS, "owner": 0},
-            approx([0.64, 0.34, 0.02]),
-            approx([0.0, 0.0, 0.64]),
-            id="burn-uid-can-receive-surplus",
+            approx([0.81, 0.171, 0.019]),
+            approx([0.0, 0.81, 0.0]),
+            id="burn-uid-can-receive-remainder",
+        ),
+        pytest.param(
+            {"miner-b": "miner-a"},
+            MINERS,
+            approx([0.0, 0.981, 0.019]),
+            approx([0.0, 0.0, 0.0]),
+            id="miner-without-remainder-gives-nothing",
         ),
         pytest.param(
             {"miner-a": "miner-b", "miner-b": "miner-a"},
             MINERS,
-            # Each donation moves only the donor's own surplus, never one received.
-            approx([0.0, 0.18 + 0.64, 0.02 + 0.16]),
-            approx([0.0, 0.16, 0.64]),
-            id="cycle-moves-each-surplus-once",
+            # Each donation moves only the donor's own remainder, never one received.
+            approx([0.0, 0.171, 0.019 + 0.81]),
+            approx([0.0, 0.81, 0.0]),
+            id="cycle-moves-the-remainder-once",
         ),
         pytest.param(
-            {"miner-b": "unregistered"},
+            {"miner-a": "unregistered"},
             MINERS,
-            approx([0.0, 0.34, 0.66]),
+            approx([0.0, 0.981, 0.019]),
             approx([0.0, 0.0, 0.0]),
-            id="unregistered-beneficiary-leaves-surplus-with-donor",
+            id="unregistered-beneficiary-leaves-remainder-with-winner",
         ),
         pytest.param(
             {"miner-a": "miner-a"},
             MINERS,
-            approx([0.0, 0.34, 0.66]),
+            approx([0.0, 0.981, 0.019]),
             approx([0.0, 0.0, 0.0]),
             id="self-designation-is-ignored",
         ),
@@ -443,14 +453,14 @@ def test_surplus_beneficiaries_receive_donor_surplus(
     assert allocation.weights.sum() == approx(1.0)
 
 
-@pytest.mark.parametrize("emission_value_usd", [None, 100.0])
+@pytest.mark.parametrize("emission_value_usd", [None, 95.0])
 def test_nothing_is_donated_without_a_surplus(emission_value_usd: float | None) -> None:
     allocation = allocate_floor_first_weights(
         FLOOR_VS_SCORE,
         MINERS,
         [0, 1, 2],
         emission_value_usd=emission_value_usd,
-        surplus_beneficiaries={"miner-b": "miner-a"},
+        surplus_beneficiaries={"miner-a": "miner-b"},
     )
 
     assert allocation.weights.tolist() == approx([0.0, 0.9, 0.1])
