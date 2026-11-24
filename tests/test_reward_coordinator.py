@@ -152,19 +152,19 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
     assert [item.daily_usd_floor for item in floors] == [100.0, 100.0]
 
 
-def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Path) -> None:
+def test_priced_weights_pay_floor_share_then_route_designated_remainder(tmp_path: Path) -> None:
     store = ValidatorStore(tmp_path / "validator.sqlite3")
     start = 9_300_000
     designation = CommittedBatch.create(
-        miner_hotkey=MINER_B,
+        miner_hotkey=MINER_A,
         sequence=1,
         previous_batch_hash=None,
-        events=(SurplusBeneficiaryEvent(event_id="0c" * 16, beneficiary_hotkey=MINER_A),),
+        events=(SurplusBeneficiaryEvent(event_id="0c" * 16, beneficiary_hotkey=MINER_B),),
     )
     store.persist_verified(
         designation,
         ChainCommitment(
-            hotkey=MINER_B,
+            hotkey=MINER_A,
             block=start,
             extrinsic_index=1,
             timestamp=NOW,
@@ -198,11 +198,11 @@ def test_priced_weights_cover_floors_then_route_designated_surplus(tmp_path: Pat
     assert [item.daily_usd_floor for item in floors] == [100.0, 100.0]
     allocation = coordinator.last_allocation
     assert allocation is not None
-    assert allocation.floor_weights.tolist() == approx([0.0, 0.1, 0.1])
-    # Miner B earned 75% of the 0.8 surplus and gives it to miner A, keeping its floor.
-    assert allocation.donated_weights.tolist() == approx([0.0, 0.0, 0.6])
-    assert weights == approx({0: 0.0, 1: 0.9, 2: 0.1})
-    assert weights[2] * 1000.0 == approx(100.0)
+    assert allocation.floor_weights.tolist() == approx([0.0, 0.095, 0.095])
+    # Tied floors give the 0.81 remainder to UID 1 (miner A), which gives it to miner B.
+    assert allocation.donated_weights.tolist() == approx([0.0, 0.81, 0.0])
+    assert weights == approx({0: 0.0, 1: 0.095, 2: 0.905})
+    assert weights[1] * 1000.0 == approx(95.0)
 
 
 def test_outside_emission_window_burns_without_provisional_payment(tmp_path: Path) -> None:

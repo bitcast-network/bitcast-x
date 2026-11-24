@@ -57,6 +57,11 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
   `BITCAST_X_WEIGHT_SCORE_BLEND`, `rewards.aggregate_productive_weights` and
   `RewardCoordinator(score_blend=...)` are removed; use `allocate_floor_first_weights`. Each cycle's
   split is stored in a rollback-safe `weight_allocations` table.
+- The surplus is no longer split by score share. Each miner is paid 95% of its daily USD floors, and
+  the miner with the largest floors (the lowest UID on a tie) receives everything left; only that
+  miner's surplus beneficiary designation moves weight. A shortfall now starts once the emission
+  value is at or below 95% of total floors, and pays floors pro rata as before. `funding_ratio` is
+  measured against the paid 95% of floors.
 - Miner schema 4 rebuilds the miner event table to admit surplus-beneficiary events. It is
   forward-only: the first start logs `upgraded miner state schema 3 -> 4`, and 3.0.0 cannot open the
   database afterwards, so back up the miner before upgrading.
