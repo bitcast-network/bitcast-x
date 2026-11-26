@@ -49,6 +49,7 @@ def _preview_assignment(
     candidate = RewardCampaign(
         campaign_id=campaign.access.campaign_id,
         reward_pool_usd=float(campaign.reward_pool_usd),
+        emission_days=campaign.emission_days,
         max_tweets_per_creator=campaign.max_tweets_per_creator,
         tweets=tuple(
             _reward_tweet(campaign, item)
@@ -130,7 +131,7 @@ def active_emission_campaigns(
 
 
 class RewardCoordinator:
-    """Bridge frozen attribution into seven-day floor-first miner weights."""
+    """Bridge frozen attribution into floor-first miner weights."""
 
     def __init__(self, store: ValidatorStore, scorer: AttributionScorer) -> None:
         self.store = store
@@ -252,6 +253,7 @@ class RewardCoordinator:
                     RewardCampaign(
                         campaign_id=campaign_id,
                         reward_pool_usd=float(campaign.reward_pool_usd),
+                        emission_days=campaign.emission_days,
                         max_tweets_per_creator=campaign.max_tweets_per_creator,
                         tweets=tweets,
                     ),

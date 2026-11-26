@@ -132,7 +132,7 @@ campaign with a positive allocation requires a new campaign ID for such changes.
 announced one day before close stays fixed but does not freeze the campaign.
 Semantic evaluation uses Jev through OpenRouter with the existing
 `BITCAST_X_OPENROUTER_API_KEY`; no separate TypeSafe key is needed. Provider availability never
-becomes a content rejection. During the configured seven-day emission block window, the validator
+becomes a content rejection. During the campaign feed's emission block window, the validator
 calculates the complete proposed vector and stores it durably for inspection and reproducibility,
 whether or not submission is enabled. Campaign feed records can
 also carry the proven tag, quote-ID, inclusion-keyword and prompt-version filters. Tweet language

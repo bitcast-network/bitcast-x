@@ -42,6 +42,11 @@ LOGGER = logging.getLogger(__name__)
 # freeze different results. A waiting campaign is left out of weights; the others keep emitting.
 EVIDENCE_GRACE_BLOCKS = 900
 
+BLOCKS_PER_DAY = 7200
+# Campaigns published without emission bounds never emit; their floors keep the original
+# seven-day split so previews and publications stay defined.
+UNBOUNDED_EMISSION_DAYS = 7
+
 # Campaign opening time, not validator wall clock, fixes scoring through recovery/replay.
 # Delete the live handle scorer after the last pre-cutover campaign finalizes, preserving
 # finalized state/backups and pinned legacy code plus original inputs for historical rebuilds.
@@ -253,6 +258,19 @@ class CampaignRecord(BaseModel):
         """Whether settlement at ``block`` stops waiting for unavailable evidence."""
 
         return block >= self.settlement_block + EVIDENCE_GRACE_BLOCKS
+
+    @property
+    def emission_days(self) -> int:
+        """Whole days of the emission window; the reward pool pays one equal share per day.
+
+        The feed derives day-aligned windows from UTC dates, so rounding the block span to
+        whole days recovers its day count exactly and keeps seven-day floors unchanged.
+        """
+
+        if self.emission_start_block is None or self.emission_end_block is None:
+            return UNBOUNDED_EMISSION_DAYS
+        span = self.emission_end_block - self.emission_start_block + 1
+        return max(1, round(span / BLOCKS_PER_DAY))
 
 
 class CampaignFeed(BaseModel):

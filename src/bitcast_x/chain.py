@@ -13,6 +13,7 @@ from typing import Any
 import bittensor as bt
 from bittensor._generated import runtime_apis as runtime_api
 
+from bitcast_x.campaigns import BLOCKS_PER_DAY
 from bitcast_x.errors import ChainOperationError, ProtocolError
 from bitcast_x.protocol import (
     CommitmentPosition,
@@ -21,7 +22,6 @@ from bitcast_x.protocol import (
 )
 
 _GLOBAL_MAX_SUBNET_COUNT = 4096
-_BLOCKS_PER_DAY = 7200
 # Subnet emission splits 18% to the owner and the rest evenly between miners and validators.
 _MINER_EMISSION_SHARE = 0.41
 _RAO_PER_ALPHA = 1_000_000_000
@@ -357,7 +357,7 @@ class BittensorChain:
             raise ChainOperationError("subnet emission inputs are invalid")
         ratio = int(split[self.mechanism_id]) / split_total
         daily_miner_alpha = (
-            _BLOCKS_PER_DAY * (alpha_out_rao / _RAO_PER_ALPHA) * _MINER_EMISSION_SHARE * ratio
+            BLOCKS_PER_DAY * (alpha_out_rao / _RAO_PER_ALPHA) * _MINER_EMISSION_SHARE * ratio
         )
         return daily_miner_alpha, moving_price_bits / _I96F32_ONE
 

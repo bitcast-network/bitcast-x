@@ -1,4 +1,4 @@
-"""Finalized seven-day campaign floors and floor-first emission weights."""
+"""Finalized daily campaign floors and floor-first emission weights."""
 
 import hashlib
 from collections.abc import Mapping
@@ -12,7 +12,6 @@ from pydantic import BaseModel, ConfigDict
 from bitcast_x.protocol import AttributionReason
 
 REWARD_SMOOTHING_EXPONENT = 0.65
-EMISSIONS_PERIOD_DAYS = 7
 PERFORMANCE_BONUS_PER_METRIC = 0.05
 FEATURED_MULTIPLIER = 1.05
 FEATURED_TOP_N = 5
@@ -52,14 +51,15 @@ class RewardCampaign:
 
     campaign_id: str
     reward_pool_usd: float
+    emission_days: int
     max_tweets_per_creator: int | None
     tweets: tuple[RewardTweet, ...]
 
     @property
     def daily_budget_usd(self) -> float:
-        """Spread the frozen floor evenly over the existing seven-day state."""
+        """Spread the reward pool evenly over the days of the campaign's emission window."""
 
-        return self.reward_pool_usd / EMISSIONS_PERIOD_DAYS
+        return self.reward_pool_usd / self.emission_days
 
 
 @dataclass(frozen=True, slots=True)

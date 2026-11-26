@@ -39,7 +39,7 @@ strings are consensus-visible contracts.
   Once positive economics exist, changing the cutoff is a campaign-contract mutation and is
   rejected. A zero-value campaign remains provisional and adopts the latest published cutoff.
 - Miners must retain every committed complete batch through campaign end, reconciliation, the
-  seven-day emission period and the audit-retention window.
+  campaign's emission window and the audit-retention window.
 - Additive internal database or operator API changes do not change the protocol version. Miner
   schema version 4 and validator schema version 6 key batches by history ID and are forward-only;
   schema 4 rebuilds the miner event table to admit surplus-beneficiary events. Create a verified

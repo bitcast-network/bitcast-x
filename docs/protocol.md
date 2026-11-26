@@ -354,7 +354,9 @@ alone is not permission to delete it.
 
 Reward construction then:
 
-1. divides each campaign reward pool into seven equal daily budgets;
+1. divides each campaign reward pool into equal daily budgets, one per whole day of its emission
+   window (`emission_start_block` to `emission_end_block`, rounded to 7,200-block days; seven when
+   the feed gives no window);
 2. greedily assigns a tweet to at most one campaign by its estimated payout, enforcing any
    per-creator campaign limit;
 3. applies four relative performance bonuses—views, views per follower, total engagements, and
@@ -370,7 +372,7 @@ Reward construction then:
 ### Floor-first weights
 
 Each accepted tweet's frozen daily USD **floor** is what its miner owes the creator for each day of
-the campaign's seven-day emission window. A **miner's floor** is the sum over its tweets in campaigns
+the campaign's emission window. A **miner's floor** is the sum over its tweets in campaigns
 whose emission window contains the weight block, counting each `(campaign, tweet)` once. Weights
 pay every miner 95% of its floors in USD, then give everything left to the top miner:
 

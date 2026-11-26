@@ -1294,7 +1294,8 @@ async def test_unavailable_tweet_does_not_block_its_campaign_rewards(tmp_path: P
     assert results_by_tweet["999"].accepted is True
     assert results_by_tweet["999"].submission_id == "04" * 16
     assert [item.tweet_id for item in run.floors] == ["999"]
-    assert run.floors[0].daily_usd_floor == pytest.approx(1000 / 7)
+    # Blocks 30-40 round to a one-day emission window: the whole pool is one day's floor.
+    assert run.floors[0].daily_usd_floor == pytest.approx(1000)
     assert run.weights == {0: 0.0, 7: 1.0}
     assert run.coordinator.pending_reward_campaign_ids(snapshot, block=35) == ()
 
