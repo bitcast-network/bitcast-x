@@ -61,6 +61,7 @@ def fixture_campaigns() -> list[RewardCampaign]:
         RewardCampaign(
             campaign_id="brief_a",
             reward_pool_usd=700.0,
+            emission_days=7,
             max_tweets_per_creator=2,
             tweets=tuple(
                 RewardTweet("brief_a", tweet_id, author, miner, score)
@@ -76,6 +77,7 @@ def fixture_campaigns() -> list[RewardCampaign]:
         RewardCampaign(
             campaign_id="brief_b",
             reward_pool_usd=350.0,
+            emission_days=7,
             max_tweets_per_creator=None,
             tweets=tuple(
                 RewardTweet("brief_b", tweet_id, author, miner, score)
@@ -147,6 +149,7 @@ def test_v2_performance_then_featured_bonus_fixture_is_exact() -> None:
     campaign = RewardCampaign(
         campaign_id="campaign",
         reward_pool_usd=700,
+        emission_days=7,
         max_tweets_per_creator=None,
         tweets=(
             RewardTweet(
@@ -201,6 +204,7 @@ def test_identity_featured_bonus_does_not_follow_reused_handle() -> None:
     campaign = RewardCampaign(
         campaign_id="campaign",
         reward_pool_usd=700,
+        emission_days=7,
         max_tweets_per_creator=None,
         tweets=(
             RewardTweet(

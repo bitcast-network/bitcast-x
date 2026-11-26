@@ -46,6 +46,12 @@ campaign-manifest, and event-schema versions documented in `docs/protocol.md`.
 
 ### Breaking changes
 
+- Each campaign's reward pool is split over the whole days of its own emission window
+  (`emission_start_block` to `emission_end_block`, rounded to 7,200-block days) instead of a fixed
+  seven, and `total_usd_target` publishes the daily floor times those days. The feed's seven-day
+  windows give byte-identical floors to earlier releases, so campaigns frozen before upgrading keep
+  their economics. Deploy validators before the feed publishes a window of any other length: an
+  earlier release would pay such a campaign one-seventh of its pool per day for every day.
 - Mechanism-1 weights are floor-first again. Each miner's daily USD floors are converted to weight
   at the block's pricing snapshot first, so its emission is worth what it owes creators. The surplus
   left over is split by tweet-score share. When floors exceed the emission value they are paid pro

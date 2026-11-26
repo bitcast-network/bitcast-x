@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import TypeAdapter
 from pytest import approx
 
-from bitcast_x.campaigns import CampaignFeed, CampaignRecord
+from bitcast_x.campaigns import BLOCKS_PER_DAY, CampaignFeed, CampaignRecord
 from bitcast_x.chain import ChainCommitment
 from bitcast_x.pricing import PricingSnapshot
 from bitcast_x.protocol import (
@@ -72,7 +72,8 @@ def record(campaign_id: str, *, exclusive: str | None = None) -> CampaignRecord:
         pools=("eco",),
         opens_at=NOW,
         closes_at=NOW + timedelta(days=1),
-        reward_pool_usd="700",
+        # Blocks 30-40 round to a one-day emission window, so each tweet's daily floor is $100.
+        reward_pool_usd="100",
         emission_start_block=30,
         emission_end_block=40,
     )
@@ -150,6 +151,28 @@ def test_exclusive_and_open_campaigns_use_identical_floor_and_multiplier(tmp_pat
 
     assert weights == {0: 0.0, 1: 0.5, 2: 0.5}
     assert [item.daily_usd_floor for item in floors] == [100.0, 100.0]
+
+
+def test_each_campaign_splits_its_pool_over_its_own_emission_days(tmp_path: Path) -> None:
+    coordinator = reward_coordinator(ValidatorStore(tmp_path / "validator.sqlite3"))
+
+    def window(campaign_id: str, days: int) -> CampaignRecord:
+        return record(campaign_id).model_copy(
+            update={"reward_pool_usd": "700", "emission_end_block": 29 + days * BLOCKS_PER_DAY}
+        )
+
+    _weights, floors = coordinator.shadow_weights(
+        campaign_feed(window("seven", 7), window("ten", 10)),
+        [scored("seven", "1", MINER_A), scored("ten", "2", MINER_B)],
+        block=35,
+        hotkey_to_uid={MINER_A: 1, MINER_B: 2},
+        uids=[0, 1, 2],
+    )
+
+    assert {item.campaign_id: item.daily_usd_floor for item in floors} == {
+        "seven": 100.0,
+        "ten": 70.0,
+    }
 
 
 def test_priced_weights_pay_floor_share_then_route_designated_remainder(tmp_path: Path) -> None:

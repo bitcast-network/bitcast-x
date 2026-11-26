@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from bitcast_x.campaigns import CampaignFeed, CampaignRecord
+from bitcast_x.campaigns import BLOCKS_PER_DAY, CampaignFeed, CampaignRecord
 from bitcast_x.errors import ProtocolError
 from bitcast_x.protocol import (
     AttributionReason,
@@ -49,7 +49,7 @@ def campaign() -> CampaignRecord:
         closes_at=datetime(2026, 8, 5, tzinfo=UTC),
         reward_pool_usd="700",
         emission_start_block=101,
-        emission_end_block=200,
+        emission_end_block=100 + 7 * BLOCKS_PER_DAY,
     )
 
 
@@ -317,6 +317,44 @@ def test_brief_tweets_payload_preserves_v2_shape_and_v3_miner_target() -> None:
             "daily_usd_floor": 100.0,
         }
     ]
+
+
+@pytest.mark.parametrize("days", [7, 10])
+@pytest.mark.parametrize("start_offset_seconds", [0, 5])
+def test_feed_day_windows_round_to_whole_emission_days(
+    days: int, start_offset_seconds: int
+) -> None:
+    # The feed maps the first day's 00:00:00 and the last day's 23:59:59 UTC to 12-second blocks.
+    start_second = 1_000 * 12 + start_offset_seconds
+    end_second = start_second + days * 86_400 - 1
+    record = campaign().model_copy(
+        update={
+            "emission_start_block": start_second // 12,
+            "emission_end_block": end_second // 12,
+        }
+    )
+
+    assert record.emission_days == days
+
+
+def test_ten_day_campaign_publishes_ten_days_of_its_floor() -> None:
+    ten_day = campaign().model_copy(update={"emission_end_block": 100 + 10 * BLOCKS_PER_DAY})
+    reward = TweetReward(
+        campaign_id="campaign",
+        tweet_id="123",
+        creator_x_id="456",
+        miner_hotkey=MINER,
+        score=23.05,
+        daily_usd_floor=70.0,
+    )
+
+    payload = create_brief_tweets_payload(
+        ten_day, [reward], {("campaign", "123"): scored()}, {MINER: 7}, timestamp=NOW
+    )
+
+    tweet = payload["tweets"][0]  # type: ignore[index]
+    assert tweet["usd_target"] == 70.0
+    assert tweet["total_usd_target"] == 700.0
 
 
 def test_payload_publishes_protocol_rejections_without_fabricating_tweet_rows() -> None:

@@ -337,7 +337,7 @@ def create_brief_tweets_payload(
                 "reasoning": scored.brief_reasoning,
                 "prescreen_passed": True,
                 "usd_target": daily_floor,
-                "total_usd_target": daily_floor * 7,
+                "total_usd_target": daily_floor * campaign.emission_days,
                 # These legacy fields have no preclaim_v2 equivalent. Null preserves
                 # their established meanings instead of publishing fabricated values.
                 "alpha_target": None,
